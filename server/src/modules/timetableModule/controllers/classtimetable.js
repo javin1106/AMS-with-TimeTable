@@ -482,12 +482,12 @@ async deletelunchslot(req, res) {
       records.forEach((record) => {
         // Extract relevant data from the record
         const { day, slot, slotData,sem } = record;
-  
+
         // Create or initialize the day in the timetableData
         if (!timetableData[day]) {
           timetableData[day] = {};
         }
-  
+
         // Create or initialize the slot in the day
         if (!timetableData[day][slot]) {
           timetableData[day][slot] = [];
@@ -530,13 +530,13 @@ async deletelunchslot(req, res) {
         if (!timetableData[day][slot]) {
           timetableData[day][slot] = [];
         }
-   
+
    // Iterate through the slotData array and filter based on faculty name
    const matchingSlotData = slotData.filter((slotItem) => slotItem.room === roomno);
- 
+
   const formattedSlotData = matchingSlotData.map(({ subject, faculty }) => ({
       subject,
-      faculty,    
+      faculty,
       sem,
     }));
 

@@ -261,7 +261,7 @@ export default function AMSLayout() {
                         ? (
                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, verticalAlign: 'middle' }}>
                             <HomeIcon />
-                            <ILeed style={{ lineHeight: 1, display: 'inline-block' }} />
+                            <ILeed style={{ lineHeight: 1, display: 'inline-block', fontSize: 16 }} />
                           </span>
                         )
                         : item.label}

@@ -109,12 +109,30 @@ const FacultyLoadCalculation = () => {
         if (slots) {
           slots.forEach((slot) => {
             slot.forEach((cell) => {
+              // Lunch is the faculty's own lunch duty (the load endpoint already
+              // filters lunch cells to this faculty). Count each slot as 1 hr.
+              if (periodKey === 'lunch') {
+                const key = 'lunch-duty';
+                if (!summaryData[key]) {
+                  summaryData[key] = {
+                    subCode: 'LUNCH',
+                    count: 1,
+                    subType: 'lunch',
+                    subjectFullName: 'Lunch Duty',
+                    subSem: '',
+                  };
+                } else {
+                  summaryData[key].count++;
+                }
+                return;
+              }
+
               if (cell.subject) {
                 const { subject, faculty } = cell;
                 const foundSubject = subjectDataArray.find(item =>
                   item.subName === subject && item.sem === faculty
                 );
-               
+
                 if (foundSubject) {
                   const key = `${subject}-${faculty}-${foundSubject.type}`;
                   if (!summaryData[key]) {
