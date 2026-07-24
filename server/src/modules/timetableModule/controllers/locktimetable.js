@@ -18,7 +18,6 @@ const MasterclasstableController = require("./masterclasstable");
 const MasterClassTableController = new MasterclasstableController();
 
 const getIndianTime = require("../helper/getIndianTime");
-const addCommonLunchSlots = require("../helper/addCommonLunchSlots");
 const mailSender = require("../../mailsender");
 const Faculty = require("../../../models/faculty");
 const getEnvironmentURL = require("../../../getEnvironmentURL");
@@ -508,9 +507,6 @@ class LockTimeTableController {
         // Extract relevant data from the record
         const { day, slot, slotData, sem } = record;
 
-        // Lunch is a common break, not tied to a single faculty; handled below.
-        if (slot === "lunch") return;
-
         // Create or initialize the day in the timetableData
         if (!timetableData[day]) {
           timetableData[day] = {};
@@ -535,10 +531,6 @@ class LockTimeTableController {
         timetableData[day][slot].push(formattedSlotData);
         // Set the sem and code for the timetable
       });
-
-      // Include the common lunch break so it appears in the faculty timetable
-      // (like the semester view). Lunch cells are not filtered by faculty.
-      await addCommonLunchSlots(LockSem, timetableData, code, "faculty");
       // console.log(timetableData)
       const notes = await Notecontroller.getNoteByCode(
         code,
@@ -573,10 +565,6 @@ class LockTimeTableController {
       const timetableData = {};
       records.forEach((record) => {
         const { day, slot, slotData, sem } = record;
-
-        // Lunch is a common break, not tied to a single room; handled below.
-        if (slot === "lunch") return;
-
         if (!timetableData[day]) {
           timetableData[day] = {};
         }
@@ -600,10 +588,6 @@ class LockTimeTableController {
         timetableData[day][slot].push(formattedSlotData);
         // Set the sem and code for the timetable
       });
-
-      // Include the common lunch break so it appears in the room timetable
-      // (like the semester view). Lunch cells are not filtered by room.
-      await addCommonLunchSlots(LockSem, timetableData, code, "room");
       const notes = await Notecontroller.getNoteByCode(code, "room", roomno);
 
       // console.log('rooom data',timetableData)
