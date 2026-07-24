@@ -644,16 +644,37 @@ useEffect(() => {
       for (let period = 1; period <= 9; period++) {
         const periodKey = period === 9 ? 'lunch' : `period${period}`;
         const slots = timetableData[day][periodKey];
-        
+
         if (slots) {
           slots.forEach((slot) => {
             slot.forEach((cell) => {
+              // Lunch is the faculty's own lunch duty (the load endpoint already
+              // filters lunch cells to this faculty). Count each slot as 1 hr of
+              // load; it has no student-hour burden, so it adds to contact hours
+              // but not to TWU.
+              if (periodKey === 'lunch') {
+                const key = 'lunch-duty';
+                if (!summaryData[key]) {
+                  summaryData[key] = {
+                    subCode: 'LUNCH',
+                    count: 1,
+                    subType: 'lunch',
+                    subjectFullName: 'Lunch Duty',
+                    subSem: '',
+                    studentCount: 0,
+                  };
+                } else {
+                  summaryData[key].count++;
+                }
+                return;
+              }
+
               if (cell.subject) {
                 const { subject, faculty, room } = cell;
-                const foundSubject = subjectDataArray.find(item => 
+                const foundSubject = subjectDataArray.find(item =>
                   item.subName === subject && item.sem === faculty
                 );
-                
+
                 if (foundSubject) {
                   const key = `${subject}-${faculty}-${foundSubject.type}`;
                   if (!summaryData[key]) {
@@ -731,7 +752,8 @@ useEffect(() => {
 
       total.total += hours;
       studentHourBurden.total += shb;
-      uniqueCourses.all.add(courseName);
+      // Lunch duty counts as load hours but is not a taught course.
+      if (subType !== 'lunch') uniqueCourses.all.add(courseName);
       
       if (subType === 'theory') {
         total.theory += hours;
