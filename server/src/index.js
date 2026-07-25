@@ -217,6 +217,16 @@ mongoose
         console.log('[FrameCleanup] Development environment detected — Scheduler paused to protect local assets.');
       }
 
+      // ── Rejected Samples Cleanup Scheduler (Issue #1711) ──────
+      // Deletes liveness-rejected crops older than 7 days.
+      const { startRejectedSamplesCleanupScheduler } = require('./modules/attendanceModule/controllers/rejectedSamplesCleanupScheduler');
+      if (process.env.NODE_ENV === 'production') {
+        startRejectedSamplesCleanupScheduler();
+        console.log('[RejectedSamplesCleanup] Production 7-day retention scheduler registered successfully.');
+      } else {
+        console.log('[RejectedSamplesCleanup] Development environment detected — Scheduler paused to protect local assets.');
+      }
+
       // ── HOD Daily/Weekly Attendance Summary Scheduler ─────────
       // Actual enabled/frequency/threshold behavior is controlled from the
       // Email Notifications settings tab (NotificationSettings.dailySummaryConfig).
