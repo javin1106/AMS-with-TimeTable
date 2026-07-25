@@ -99,17 +99,17 @@ export default function RejectedSamples() {
                 <table className="ams-table">
                     <thead>
                         <tr>
-                            <th>Period</th>
-                            <th>Rejected Count</th>
-                            <th></th>
+                            <th style={{ textAlign: 'left' }}>Period</th>
+                            <th style={{ textAlign: 'center' }}>Rejected Count</th>
+                            <th style={{ textAlign: 'center' }}></th>
                         </tr>
                     </thead>
                     <tbody>
                         {summary.map((row) => (
                             <tr key={row.periodKey}>
-                                <td style={{ fontWeight: 600 }}>{row.periodKey}</td>
-                                <td>{row.count}</td>
-                                <td>
+                                <td style={{ textAlign: 'left', fontWeight: 600 }}>{row.periodKey}</td>
+                                <td style={{ textAlign: 'center' }}>{row.count}</td>
+                                <td style={{ textAlign: 'center' }}>
                                     <button
                                         onClick={() => openPeriod(row.periodKey)}
                                         style={{ ...styles.btnGhost, padding: '4px 12px', fontSize: 11 }}
@@ -122,9 +122,9 @@ export default function RejectedSamples() {
                     </tbody>
                     <tfoot>
                         <tr>
-                            <td>Total</td>
-                            <td>{totalRejected}</td>
-                            <td></td>
+                            <td style={{ textAlign: 'left' }}>Total</td>
+                            <td style={{ textAlign: 'center' }}>{totalRejected}</td>
+                            <td style={{ textAlign: 'center' }}></td>
                         </tr>
                     </tfoot>
                 </table>
