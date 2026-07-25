@@ -138,6 +138,9 @@ router.use(
 router.use('/settings/frame-cleanup',
     ...attendanceRoleAccess,
     require("./frameCleanupSettingsRoutes"));
+router.use('/settings/rejected-samples-cleanup',
+    ...attendanceRoleAccess,
+    require("./rejectedSamplesCleanupSettingsRoutes"));
 router.use('/settings/other-controls',
     ...attendanceRoleAccess,
     require("./otherControlsSettingsRoutes"));

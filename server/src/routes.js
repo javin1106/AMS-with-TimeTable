@@ -55,6 +55,9 @@ const { attendanceRoleAccess } = require("./modules/attendanceModule/middleware/
 const mlRoutes = require("./modules/attendanceModule/routes/mlRoutes");
 v1router.use("/ml", ...attendanceRoleAccess, mlRoutes);
 
+const rejectedSamplesRoutes = require("./modules/attendanceModule/routes/rejectedSamplesRoutes");
+v1router.use("/ml/rejected-samples", ...attendanceRoleAccess, rejectedSamplesRoutes);
+
 const guideModule = require("./modules/guideModule/routes/index");
 v1router.use("/guide", guideModule);
 
