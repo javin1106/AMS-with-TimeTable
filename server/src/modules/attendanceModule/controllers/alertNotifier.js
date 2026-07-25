@@ -114,8 +114,8 @@ async function notifyErpRecovered() {
 // Scheduled twice-daily uptime digest (see uptimeDigestScheduler.js) — a
 // schedule-triggered mechanism, distinct from the edge-triggered
 // notifyServerDown/notifyErpDown path driven by healthRoutes.js transitions.
-// Reuses the serverDown recipient opt-in so admins configure recipients in
-// one place; no cooldownKey because the two fixed daily fires can never spam.
+// Uses the scheduleCheck recipient opt-in so admins can toggle schedules check emails;
+// no cooldownKey because the two fixed daily fires can never spam.
 async function notifyUptimeDigest({ results }) {
   const downNames = results
     .filter((r) => r.status === "down")
@@ -127,7 +127,7 @@ async function notifyUptimeDigest({ results }) {
       checkedAt: new Date().toLocaleString(),
       results,
     }),
-    null, "serverDown", null
+    null, "scheduleCheck", null
   );
 }
 
