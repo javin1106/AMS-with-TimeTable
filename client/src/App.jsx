@@ -222,6 +222,7 @@ import CameraPreview from './attendancemodule/cameraPreview';
 import FrameVerification from './attendancemodule/FrameVerification';
 import UnknownFaces from './attendancemodule/UnknownFaces';
 import SchedulerPage from './attendancemodule/SchedulerPage';
+import { ExtraClassPage, AlterClassPage } from './attendancemodule/extraAlterClasses';
 import LiveReportPage from './attendancemodule/LiveReportPage';
 import RecordStream from './attendancemodule/RecordStream';
 import ErpOverrides from './attendancemodule/ErpOverrides';
@@ -715,6 +716,8 @@ function App() {
           <Route path="confidence" element={<ConfidenceMonitor />} />
           <Route path="ml-fine-tuning" element={<MLFineTuning />} />
           <Route path="acquisition-control" element={<SchedulerPage />} />
+          <Route path="extra-class" element={<ExtraClassPage />} />
+          <Route path="altering-class" element={<AlterClassPage />} />
           <Route path="gpu" element={<GpuMetrics />} />
           <Route path="server-console" element={<NodeConsole />} />
           <Route path="client-console" element={<ReactConsole />} />
@@ -735,6 +738,8 @@ function App() {
           <Route path="class-verification" element={<DeptClassVerification />} />
           <Route path="embeddings" element={<DeptSubjectEmbeddings />} />
           <Route path="confidence" element={<DeptConfidenceMonitor />} />
+          <Route path="extra-class" element={<ExtraClassPage />} />
+          <Route path="altering-class" element={<AlterClassPage />} />
           <Route path="stats/progress" element={<Navigate to="/dept-admin/dashboard" replace />} />
           <Route path="dept-reports-view" element={<DeptReports />} />
           <Route path="*" element={

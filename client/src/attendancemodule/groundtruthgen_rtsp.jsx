@@ -120,6 +120,7 @@ const LivePreview = ({ apiBase, isRunning, acquisitionId, cameraLabel }) => {
     const [showPreview, setShowPreview] = useState(true);
     const [loaded, setLoaded]           = useState(false);
     const [sessionKey, setSessionKey]   = useState(0);
+    const [errorStreak, setErrorStreak] = useState(0);
     const prevKey     = useRef(null);
     const retryTimer  = useRef(null);
 
@@ -127,10 +128,12 @@ const LivePreview = ({ apiBase, isRunning, acquisitionId, cameraLabel }) => {
     useEffect(() => {
         if (isRunning && acquisitionId && acquisitionId !== prevKey.current) {
             setLoaded(false);
+            setErrorStreak(0);
             setSessionKey(k => k + 1);
         }
         if (!isRunning) {
             setLoaded(false);
+            setErrorStreak(0);
             clearTimeout(retryTimer.current);
         }
         prevKey.current = acquisitionId;
@@ -140,6 +143,7 @@ const LivePreview = ({ apiBase, isRunning, acquisitionId, cameraLabel }) => {
 
     const handleImgError = useCallback(() => {
         setLoaded(false);
+        setErrorStreak(n => n + 1);
         clearTimeout(retryTimer.current);
         retryTimer.current = setTimeout(() => {
             setSessionKey(k => k + 1);
@@ -148,7 +152,13 @@ const LivePreview = ({ apiBase, isRunning, acquisitionId, cameraLabel }) => {
 
     const handleImgLoad = useCallback(() => {
         setLoaded(true);
+        setErrorStreak(0);
     }, []);
+
+    // A few early errors are normal while the first camera sub-run spins up; a
+    // sustained streak means the preview stream can't be established (commonly a
+    // stale python-ml-service with no /gt-job-preview route — restart it).
+    const stalled = errorStreak >= 3;
 
     return (
         <div style={{ marginBottom: 16 }}>
@@ -186,10 +196,15 @@ const LivePreview = ({ apiBase, isRunning, acquisitionId, cameraLabel }) => {
                             inset: 0, zIndex: 2,
                             width: '100%', aspectRatio: isRunning ? undefined : '16/9',
                             display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            color: '#555', fontSize: '13px',
+                            color: stalled ? '#f0c040' : '#555', fontSize: '13px',
+                            textAlign: 'center', padding: '0 16px',
                             background: isRunning ? 'rgba(0,0,0,0.6)' : '#000',
                         }}>
-                            {isRunning ? '⏳ Connecting to stream…' : 'Preview available once acquisition starts'}
+                            {!isRunning
+                                ? 'Preview available once acquisition starts'
+                                : stalled
+                                    ? '⚠️ Preview stream unavailable — the ML service may need a restart. Acquisition is still running.'
+                                    : '⏳ Connecting to stream…'}
                         </div>
                     )}
 
