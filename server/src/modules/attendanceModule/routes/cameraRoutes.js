@@ -10,6 +10,7 @@ router.post('/recording/stop',                 (req, res) => cameraController.st
 router.get('/recording/list',                  (req, res) => cameraController.listRecordings(req, res));
 router.get('/recording/download/:filename',    (req, res) => cameraController.downloadRecording(req, res));
 router.get('/recording/audio/:filename',       (req, res) => cameraController.downloadAudio(req, res));
+router.delete('/recording/:filename',          (req, res) => cameraController.deleteRecording(req,res));
 
 // ── Scheduled recording routes ─────────────────────────────────────────────
 router.post('/recording/schedule',             (req, res) => cameraController.scheduleRecording(req, res));

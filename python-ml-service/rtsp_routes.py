@@ -2280,6 +2280,16 @@ def download_recording_audio(filename: str):
         headers={"Content-Disposition": f'attachment; filename="{audio_name}"'},
     )
 
+@router.delete("/recordings/{filename}")
+def delete_recording(filename: str):
+    path = _recording_path(filename)
+
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    os.remove(path)
+
+    return {"message": "Recording deleted"}
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Liveness / anti-spoofing — runtime config (ML Fine Tuning page)
