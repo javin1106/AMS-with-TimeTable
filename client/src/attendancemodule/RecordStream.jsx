@@ -90,6 +90,8 @@ export default function RecordStream() {
     const [history, setHistory] = useState(() => {
     try { return JSON.parse(localStorage.getItem('recordingHistory') || '[]'); } catch { return []; }
 });
+    const [deleteConfirm, setDeleteConfirm] = useState(null);
+    const [deleting, setDeleting] = useState(null);
 
 useEffect(() => {
     localStorage.setItem('recordingHistory', JSON.stringify(history));
@@ -415,13 +417,93 @@ async function handleSchedulerSubmit() {
         }
     }
 
+    async function handleDelete(filename) {
+        setDeleting(filename);
+        try {
+            const res = await apiFetch(
+                `${REC_API}/${encodeURIComponent(filename)}`,
+                {
+                    method: "DELETE",
+                }
+            );
+            if (!res.ok) {
+                let errMsg = `Delete failed (${res.status})`;
+                try {
+                    const d = await res.json();
+                    errMsg = d.error || d.detail || errMsg;
+                } catch {}
+
+                showToast(errMsg, "error");
+                return;
+            }
+            showToast("Recording deleted successfully", "success");
+            setHistory(prev => prev.filter(h => h.filename !== filename));
+            refreshList();
+            setDeleteConfirm(null);
+        } catch {
+            showToast("Delete failed — check server connection", "error");
+        } finally {
+            setDeleting(null);
+        }
+    }
+
     const isRecording = Boolean(activeRecId);
     const T = theme;
+
+    const CSS = `
+      ${cssReset}
+      .erp-modal-overlay {
+        position: fixed !important; inset: 0 !important; background: rgba(15,23,42,.45) !important;
+        backdrop-filter: blur(5px) !important; display: flex !important; align-items: center !important;
+        justify-content: center !important; z-index: 99999999 !important; padding: 20px !important;
+        box-sizing: border-box !important;
+      }
+      .erp-modal-box {
+        background: ${T.surface} !important; border: 1px solid ${T.border} !important;
+        border-radius: 12px !important; padding: 24px !important; max-width: 760px !important;
+        width: 100% !important; box-shadow: 0 20px 25px -5px rgba(0,0,0,.15) !important;
+        animation: modalIn .2s cubic-bezier(.16,1,.3,1) both !important;
+      }
+
+    `;
+    
 
     return (
         <div style={styles.page}>
             <Toast toasts={toasts} />
-            <style>{cssReset}{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+            <style>{CSS}{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+
+            {
+                deleteConfirm && (
+                    <div className="erp-modal-overlay">
+                        <div className="erp-modal-box">
+                            <div style={{ fontSize: 16, fontWeight: 700, color: T.text, marginBottom: 8, fontFamily: T.fontBody }}>
+                                Delete Recording?
+                            </div>
+                            <div style={{ fontSize: 13.5, color: T.textMuted, lineHeight: 1.55, marginBottom: 22, fontFamily: T.fontBody }}>
+                                Are you sure you want to delete the recording <br /><strong>{deleteConfirm}</strong><br/>
+                                This action cannot be undone.
+                            </div>
+                            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                                <button
+                                    onClick={() => setDeleteConfirm(null)}
+                                    disabled={deleting === deleteConfirm}
+                                    style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', color: '#475569', padding: '10px 16px', borderRadius: 8, fontWeight: 600, fontSize: 13, cursor: 'pointer', fontFamily: T.fontBody }}
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={() => handleDelete(deleteConfirm)}
+                                    disabled={deleting === deleteConfirm}
+                                    style={{ background: '#ef4444', border: 'none', color: '#fff', padding: '10px 16px', borderRadius: 8, fontWeight: 600, fontSize: 13, cursor: deleting === deleteConfirm? 'not-allowed' : 'pointer', opacity: deleting === deleteConfirm ? 0.6 : 1, fontFamily: T.fontBody }}
+                                >
+                                    {deleting === deleteConfirm ? 'Deleting…' : 'Delete'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )
+            }
 
             <div style={{ marginBottom: 28 }}>
                 <div style={styles.heading}> Record Class Stream</div>
@@ -753,6 +835,10 @@ if (recDate !== today) return false;
                                     {h.format !== 'video' && (
                                         <button onClick={() => handleDownload(`${REC_API}/audio/${encodeURIComponent(fname)}`, fname.replace(/\.mp4$/i, '.mp3'), 'audio')} style={{ padding: '5px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700, background: 'rgba(16,185,129,0.09)', color: T.success, border: '1px solid rgba(16,185,129,0.3)', cursor: 'pointer' }}>🎵 Audio</button>
                                     )}
+                                    <button onClick={()=> setDeleteConfirm(fname)} style={{ padding: '5px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700, background: `${T.dangerDim}`, color: T.danger, border: `1px solid ${T.danger}40`, cursor: 'pointer', display: "flex", alignItems: "center", justifyContent: "center", gap: "4px"}}>
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-trash2-icon lucide-trash-2"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                                        Delete
+                                    </button>
                                 </div>
                             ) : (
                                 <span style={{ fontSize: 11, color: T.textMuted, fontStyle: 'italic' }}>file unavailable</span>

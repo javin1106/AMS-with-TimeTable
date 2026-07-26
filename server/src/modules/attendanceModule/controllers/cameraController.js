@@ -484,6 +484,25 @@ async downloadAudio(req, res) {
         return sendKnownError(res, error);
     }
 }
+
+async deleteRecording(req, res){
+    const path = require('path')
+    const safe = path.basename(req.params.filename);
+    console.log("Deleting: ", safe);
+    
+    try{
+        const response = await axios.delete(
+            `${ML_URL}/recordings/${encodeURIComponent(safe)}`,
+            {timeout : 30000}
+        )
+        return res.status(response.status).json(response.data);
+    }
+    catch(error){
+        if(error.response?.status === 404) return res.status(404).json({error: 'File not found'})
+        return sendKnownError(res, error)        
+    }
+}
+
 // ── Scheduled recording methods ────────────────────────────────────────────
 // In-memory store (survives server restart as long as the process runs;
 // for persistence across restarts you could move this to MongoDB later).
