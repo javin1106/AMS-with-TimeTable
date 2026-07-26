@@ -368,14 +368,24 @@ router.get('/gt-acquisition/preview', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('X-Accel-Buffering', 'no');
 
-    let closed   = false;
-    let upstream = null;
+    let closed     = false;
+    let upstream   = null;
+    let pipedAny   = false;   // did we ever forward a single byte to the browser?
+    let failStreak = 0;       // consecutive upstream failures with no bytes since
     req.on('close', () => {
         closed = true;
         if (upstream) upstream.destroy();
     });
 
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    // A sub-run needs a moment to register its Python jobId, so a few early
+    // failures are normal. But a *persistent* failure (e.g. a stale ML service
+    // with no /gt-job-preview route → 404) must not loop silently forever — it
+    // presents to the user as an eternal "Connecting to stream…". After this
+    // many consecutive failures without ever having streamed a byte, give up so
+    // the browser <img> fires onError and the UI can retry/surface it.
+    const MAX_FAIL_STREAK = 8;
 
     while (!closed) {
         const job = gtManager.getJob(acquisitionId);
@@ -395,8 +405,9 @@ router.get('/gt-acquisition/preview', async (req, res) => {
                 timeout:      0,
             });
             upstream = result.data;
+            failStreak = 0;
             await new Promise((resolve) => {
-                upstream.on('data',  (chunk) => { if (!closed) res.write(chunk); });
+                upstream.on('data',  (chunk) => { if (!closed) { res.write(chunk); pipedAny = true; } });
                 upstream.on('end',   resolve);
                 upstream.on('error', resolve);
             });
@@ -404,8 +415,31 @@ router.get('/gt-acquisition/preview', async (req, res) => {
             // Sub-run ended (camera switch) — brief pause so we don't hammer
             // the ML service while the next sub-run's jobId is being set up.
             await sleep(300);
-        } catch (_) {
-            // Sub-run not up yet / ML service hiccup — retry while the job lives.
+        } catch (err) {
+            upstream = null;
+            const status = err.response?.status;
+            // 404 here means the ML service has no /gt-job-preview route — i.e.
+            // it is running pre-fix code and needs a restart/redeploy. Surface
+            // it loudly instead of retrying into the void.
+            if (status === 404) {
+                console.error(
+                    `[gt-acquisition/preview] ML service ${ML_SERVICE_URL}/gt-job-preview ` +
+                    `returned 404 for pyJobId=${pyJobId} (acquisition ${acquisitionId}). ` +
+                    `The python-ml-service is likely running old code — restart it.`
+                );
+            } else {
+                console.warn(
+                    `[gt-acquisition/preview] upstream error for pyJobId=${pyJobId} ` +
+                    `(acquisition ${acquisitionId}): ${status || err.code || err.message}`
+                );
+            }
+            if (!pipedAny && ++failStreak >= MAX_FAIL_STREAK) {
+                console.error(
+                    `[gt-acquisition/preview] giving up after ${failStreak} consecutive ` +
+                    `failures with no frames streamed (acquisition ${acquisitionId}).`
+                );
+                break;
+            }
             await sleep(1000);
         }
     }

@@ -17,9 +17,10 @@ const ALL_MENUS = [
     { id: 'subjectEmbeddings', menuKey: 'subjectEmbeddings', route: '/dept-admin/embeddings',           label: 'Subject Embeddings',                 color: '#f59e0b' },
     { id: 'livePreview',       menuKey: 'livePreview',       route: '/cameras/preview',                 label: 'Live Preview',                       color: '#8b5cf6' },
     { id: 'confidenceMonitor', menuKey: 'confidenceMonitor', route: '/dept-admin/confidence',           label: 'Confidence Monitor',                 color: '#ef4444' },
+    { id: 'extraClasses',      menuKey: 'extraClasses',      route: '/dept-admin/extra-class',          label: 'Extra Classes',                      color: '#f59e0b' },
+    { id: 'alteringClasses',   menuKey: 'alteringClasses',   route: '/dept-admin/altering-class',       label: 'Altering Classes',                   color: '#d946ef' },
     { id: 'instituteIdentification', menuKey: 'instituteIdentification', route: '/attendance/institute-identification', label: 'Institute Identification', color: '#8b5cf6' },
     { id: 'erpOverrides',      menuKey: 'erpOverrides',      route: '/attendance/erp-overrides',        label: 'ERP Overrides',                      color: '#f59e0b' },
-    { id: 'erpSync',           menuKey: 'erpSync',           route: '/attendance/edit-session-dates?tab=erpControls', label: 'ERP Sync',              color: '#22c55e' },
     { id: 'helpManual',        menuKey: 'helpManual',        route: '/ams-manual',                      label: 'Help & Manual',        newTab: true, color: '#64748b' },
 ];
 
