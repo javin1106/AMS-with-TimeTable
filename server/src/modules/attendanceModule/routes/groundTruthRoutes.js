@@ -392,10 +392,10 @@ router.get('/gt-acquisition/preview', async (req, res) => {
         if (!pyJobId) { await sleep(500); continue; }
 
         try {
-            // /gt-job-preview, NOT /rtsp-preview: the latter resolves to
+            // /gt-acquisition-preview, NOT /rtsp-preview: the latter resolves to
             // ground_truth_routes.py's camera-preview streams (its router is
             // registered first) and knows nothing about acquisition jobIds.
-            const result = await axios.get(`${ML_SERVICE_URL}/gt-job-preview`, {
+            const result = await axios.get(`${ML_SERVICE_URL}/gt-acquisition-preview`, {
                 params:       { jobId: pyJobId },
                 responseType: 'stream',
                 timeout:      0,
