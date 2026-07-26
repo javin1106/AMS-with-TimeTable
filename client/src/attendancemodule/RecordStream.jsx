@@ -93,6 +93,8 @@ export default function RecordStream() {
     const [deleteConfirm, setDeleteConfirm] = useState(null);
     const [deleting, setDeleting] = useState(null);
 
+    const [historyDate, setHistoryDate] = useState('');
+
 useEffect(() => {
     localStorage.setItem('recordingHistory', JSON.stringify(history));
 }, [history]);
@@ -805,13 +807,33 @@ if (recDate !== today) return false;
                 </div>
             );
         }
-        const filteredHistory = history.filter(h =>
-            h.department === department &&
-            h.year === year &&
-            h.selectedRoom === selectedRoom
-        );
-        return filteredHistory.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '28px 0', color: T.textMuted, fontSize: 13 }}>
+        const filteredHistory = history.filter(h => {
+            if (
+                h.department !== department ||
+                h.year !== year ||
+                h.selectedRoom !== selectedRoom
+            )
+                return false;
+
+            if (!historyDate) return true;
+
+            return h.filename?.includes(historyDate.replaceAll('-', ''));
+        });
+        return (
+          <>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'end', marginBottom: 16 }}> 
+              <div style={{flex: 0}}>
+                <label style={styles.label}>
+                    Filter by Date
+                </label> 
+                <input type="date" value={historyDate} onChange={(e) => setHistoryDate(e.target.value)} style={{...styles.input, width: "fit-content"}}/>
+              </div>
+                <button onClick={() => setHistoryDate('')} style={{...styles.btnPrimary, display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center'}}> 
+                    Clear 
+                </button> 
+          </div>
+          { filteredHistory.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '28px 0', color: T.textMuted, fontSize: 13 }}>
                No history for this selection yet
             </div>
         ) : (
@@ -826,7 +848,7 @@ if (recDate !== today) return false;
                        {(() => {
                             // Use stored filename, or look up live from recordings by label
                             const fname = h.filename || 
-                                recordings.find(r => r.label === h.label && r.status === 'done')?.filename;
+                            recordings.find(r => r.label === h.label && r.status === 'done')?.filename;
                             return fname ? (
                                 <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
                                     {h.format !== 'audio' && (
@@ -847,7 +869,10 @@ if (recDate !== today) return false;
                     </div>
                 ))}
             </div>
-       );
+       )
+    }
+    </>
+    )
     })()}
     
 </div>
