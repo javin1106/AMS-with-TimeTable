@@ -573,6 +573,11 @@ const Timetable = () => {
   };
 
   const handleLockTT = async () => {
+    // Ignore repeat clicks while a lock is in flight: the change diff is
+    // computed before the locked table is rewritten, so two overlapping
+    // requests would both mail the same set of changes.
+    if (isLocking) return;
+
     const isConfirmed = window.confirm(
       'Are you sure you want to lock the timetable?'
     );
@@ -582,6 +587,7 @@ const Timetable = () => {
         'Do you want to inform the teachers about the timetable changes?'
       );
     if (isConfirmed) {
+      setIsLocking(true);
       setMessage('Data is being saved....');
       setMessage('Data saved. Commencing lock');
       setMessage('Data is being locked');
@@ -631,6 +637,8 @@ const Timetable = () => {
         }
       } catch (error) {
         console.error('Error sending data to the backend:', error);
+      } finally {
+        setIsLocking(false);
       }
     } else {
       toast({
@@ -646,6 +654,9 @@ const Timetable = () => {
   };
 
   const [showMessage, setShowMessage] = useState(true);
+  // Locking mails faculty server-side, so a second click while the first
+  // request is running duplicates every notification.
+  const [isLocking, setIsLocking] = useState(false);
 
   useEffect(() => {
     window.addEventListener('scroll', handleScroll);
@@ -806,7 +817,13 @@ const Timetable = () => {
           alignItems="center"
           mt={{ base: 2, md: 0 }}
         >
-          <Button m={1} colorScheme="orange" onClick={handleLockTT}>
+          <Button
+            m={1}
+            colorScheme="orange"
+            onClick={handleLockTT}
+            isLoading={isLocking}
+            loadingText="Locking..."
+          >
             Lock TT
           </Button>
           <Button m={1} colorScheme="orange" onClick={handleViewSummary}>

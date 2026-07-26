@@ -19,15 +19,11 @@ const MasterClassTableController = new MasterclasstableController();
 
 const getIndianTime = require("../helper/getIndianTime");
 const mailSender = require("../../mailsender");
-const Faculty = require("../../../models/faculty");
+const { findFacultyByExactName } = require("../helper/facultyLookup");
 const getEnvironmentURL = require("../../../getEnvironmentURL");
 const TimetableChangeLog = require("../../../models/timetableChangeLogs");
 const TimeTable = require("../../../models/timetable");
-const {
-  renderTimetableEmail,
-  emailButton,
-  emailSection,
-} = require("../helper/emailLayout");
+const { generateChangeEmail } = require("../helper/timetableEmails");
 
 function indexBySubjectAndSem(entries) {
   const map = {};
@@ -160,108 +156,11 @@ function detectChangesForFaculty(oldEntries, newEntries) {
   };
 }
 
-function generateEmail(faculty, changes, timetableLink) {
-  const listStyle =
-    "margin:6px 0 0;padding-left:18px;font-size:14px;color:#444;line-height:1.7;";
-
-  let bodyHtml = `
-      <p style="margin:0 0 8px;font-size:14px;color:#444;line-height:1.6;">Dear ${faculty},</p>
-      <p style="margin:0 0 20px;font-size:14px;color:#444;line-height:1.6;">
-        This email is to notify you of updates to your teaching timetable.
-        Please review the changes below:
-      </p>`;
-
-  /* 🟢 ADDED SUBJECTS */
-  if (changes.addedSubjects.length > 0) {
-    let inner = `<ul style="${listStyle}">`;
-    changes.addedSubjects.forEach((s) => {
-      inner += `<li><strong>${s.subject} (${s.sem})</strong><ul style="${listStyle}">`;
-      s.entries.forEach((e) => {
-        inner += `<li>${e.day}, ${e.slot} | Room: ${e.room}</li>`;
-      });
-      inner += `</ul></li>`;
-    });
-    inner += `</ul>`;
-    bodyHtml += emailSection({
-      heading: "🟢 New Subjects Assigned",
-      bg: "#effaf3",
-      border: "#c7ecd4",
-      headingColor: "#16a34a",
-      contentHtml: inner,
-    });
-  }
-
-  /* 🔴 REMOVED SUBJECTS */
-  if (changes.removedSubjects.length > 0) {
-    let inner = `<ul style="${listStyle}">`;
-    changes.removedSubjects.forEach((s) => {
-      inner += `<li><strong>${s.subject} (${s.sem})</strong></li>`;
-    });
-    inner += `</ul>`;
-    bodyHtml += emailSection({
-      heading: "🔴 Subjects Removed",
-      bg: "#fef2f2",
-      border: "#f6cccc",
-      headingColor: "#dc2626",
-      contentHtml: inner,
-    });
-  }
-
-  /* 🟡 UPDATED SUBJECTS */
-  if (changes.updatedSubjects.length > 0) {
-    let inner = `<ul style="${listStyle}">`;
-    changes.updatedSubjects.forEach((u) => {
-      inner += `<li><strong>${u.subject} (${u.sem})</strong><ul style="${listStyle}">`;
-      if (u.changes.room) {
-        inner += `<li>Room Changed: From ${u.changes.room.from.join(
-          ", "
-        )} to ${u.changes.room.to.join(", ")}</li>`;
-      }
-      if (u.changes.slots) {
-        inner += `<li>Slot Changes:<ul style="${listStyle}">`;
-        if (u.changes.slots.added.length > 0) {
-          inner += `<li>Added: ${u.changes.slots.added.join(", ")}</li>`;
-        }
-        if (u.changes.slots.removed.length > 0) {
-          inner += `<li>Removed: ${u.changes.slots.removed.join(", ")}</li>`;
-        }
-        inner += `</ul></li>`;
-      }
-      inner += `</ul></li>`;
-    });
-    inner += `</ul>`;
-    bodyHtml += emailSection({
-      heading: "🟡 Subject Updates",
-      bg: "#fffbeb",
-      border: "#f5e6b3",
-      headingColor: "#d97706",
-      contentHtml: inner,
-    });
-  }
-
-  bodyHtml += emailButton(timetableLink, "View Updated Timetable");
-  bodyHtml += `
-      <p style="margin:0 0 16px;font-size:12px;color:#888;line-height:1.6;">
-        This is an auto-generated email. If you have any questions, please contact
-        the department timetable coordinator.
-      </p>
-      <p style="margin:0;font-size:14px;color:#444;line-height:1.6;">
-        Regards,<br />
-        <strong style="color:#0e7490;">Team XCEED</strong>
-      </p>`;
-
-  return renderTimetableEmail({
-    title: "Timetable Update Notification",
-    bodyHtml,
-  });
-}
-
 function generateFacultyChangeEmails(oldData, newData) {
   const oldMap = Object.fromEntries(oldData.map((f) => [f._id, f.entries]));
   const newMap = Object.fromEntries(newData.map((f) => [f._id, f.entries]));
 
   const results = [];
-  const base_url = getEnvironmentURL();
   const allFaculty = new Set([...Object.keys(oldMap), ...Object.keys(newMap)]);
 
   for (const faculty of allFaculty) {
@@ -278,13 +177,6 @@ function generateFacultyChangeEmails(oldData, newData) {
     ) {
       results.push({
         faculty,
-        emailBody: (facultyid) => {
-          return generateEmail(
-            faculty,
-            changes,
-            `${base_url}/timetable/faculty/${facultyid}`
-          );
-        },
         changes,
       });
     }
@@ -299,34 +191,74 @@ async function sendFacultyChangeEmails(facultyChanges) {
   const month = today.toLocaleString("en-US", { month: "short" }).toUpperCase();
   const year = today.getFullYear();
   const emailTitle = `Timetable Update Notification [${day} ${month} ${year}]`;
+  const base_url = getEnvironmentURL();
   const results = [];
 
+  // Resolve every name to a faculty record first, then group by EMAIL ADDRESS.
+  // Timetable slots hold free-text names, so one person can appear as both
+  // "Mohan" and "Mohan Kumar" and produce two change-sets. Mailing per name
+  // sends them two notifications; instead we merge the change-sets and send a
+  // single email per address.
+  const groups = new Map();
+
   for (const change of facultyChanges) {
-    // Fetch faculty email from DB
-    const facultyDoc = await Faculty.findOne({ name: change.faculty }).lean();
-    if (!facultyDoc || !facultyDoc.email) {
+    const facultyDoc = await findFacultyByExactName(change.faculty);
+    const email = (facultyDoc?.email || "").trim();
+
+    if (!facultyDoc || !email) {
       console.warn(`No email found for faculty: ${change.faculty}`);
       results.push({
         email: null,
         faculty: change.faculty,
         success: false,
-        error: "Email not found",
+        error: facultyDoc ? "Email not found" : "Faculty record not found",
       });
       continue;
     }
 
+    const key = email.toLowerCase();
+    const group = groups.get(key);
+    if (group) {
+      group.names.push(change.faculty);
+      group.changes.addedSubjects.push(...change.changes.addedSubjects);
+      group.changes.removedSubjects.push(...change.changes.removedSubjects);
+      group.changes.updatedSubjects.push(...change.changes.updatedSubjects);
+    } else {
+      groups.set(key, {
+        email,
+        doc: facultyDoc,
+        names: [change.faculty],
+        changes: {
+          addedSubjects: [...change.changes.addedSubjects],
+          removedSubjects: [...change.changes.removedSubjects],
+          updatedSubjects: [...change.changes.updatedSubjects],
+        },
+      });
+    }
+  }
+
+  for (const group of groups.values()) {
+    const facultyLabel = group.names.join(", ");
     try {
-      await mailSender(facultyDoc.email, emailTitle, change.emailBody(facultyDoc._id.toString()));
+      await mailSender(
+        group.email,
+        emailTitle,
+        generateChangeEmail(
+          group.doc.name,
+          group.changes,
+          `${base_url}/timetable/faculty/${group.doc._id.toString()}`
+        )
+      );
       results.push({
-        email: facultyDoc.email,
-        faculty: change.faculty,
+        email: group.email,
+        faculty: facultyLabel,
         success: true,
       });
     } catch (err) {
-      console.error(`Failed to send email to ${facultyDoc.email}:`, err);
+      console.error(`Failed to send email to ${group.email}:`, err);
       results.push({
-        email: facultyDoc.email,
-        faculty: change.faculty,
+        email: group.email,
+        faculty: facultyLabel,
         success: false,
         error: err.message || "Unknown error",
       });
@@ -366,10 +298,27 @@ const aggregateConfig = (code) => [
   },
 ];
 
+// Codes currently mid-lock. The change diff is computed from LockSem *before*
+// LockSem is rewritten, so two overlapping requests for the same code would
+// both read the same pre-change snapshot and both mail the identical update.
+const lockInFlight = new Set();
+
 class LockTimeTableController {
   async locktt(req, res) {
+    const { code, toInform } = req.body;
+
+    if (!code) {
+      return res.status(400).json({ error: "Code is required" });
+    }
+
+    if (lockInFlight.has(code)) {
+      return res
+        .status(409)
+        .json({ error: "This timetable is already being locked. Please wait." });
+    }
+    lockInFlight.add(code);
+
     try {
-      const { code, toInform } = req.body;
       var results = [];
 
       // Delete all existing records in 'LockSem' for the given code
@@ -442,6 +391,8 @@ class LockTimeTableController {
       if (!res.headersSent) {
         res.status(500).json({ error: "An error occurred" });
       }
+    } finally {
+      lockInFlight.delete(code);
     }
   }
 

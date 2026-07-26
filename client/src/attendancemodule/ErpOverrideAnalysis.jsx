@@ -154,6 +154,10 @@ export default function ErpOverrideAnalysis() {
   const [error, setError] = useState(null);
   const [savingKey, setSavingKey] = useState(null);
   const [errorKey, setErrorKey] = useState(null);
+  // Full ERP exchange history for this period, from the append-only
+  // communication log. Until that log existed this page could only show ERP's
+  // latest word — a re-finalisation silently replaced the previous one.
+  const [erpHistory, setErpHistory] = useState(null);
 
   const load = useCallback(async () => {
     if (isDemo && String(reportId).startsWith('demo')) {
@@ -179,6 +183,29 @@ export default function ErpOverrideAnalysis() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Keyed on periodId, not reportId — the log records exchanges with ERP,
+  // which addresses periods by periodId. Reports saved before periodId existed
+  // simply have no history to show.
+  useEffect(() => {
+    const periodId = report?.periodId;
+    if (isDemo || !periodId) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `${REPORT_API}/erp-communications/period/${encodeURIComponent(periodId)}`,
+          { credentials: 'include' },
+        );
+        const data = await res.json();
+        if (!cancelled && res.ok) setErpHistory(data.items || []);
+      } catch {
+        // Non-fatal: the override analysis itself is still fully usable
+        // without the timeline, so a failure here stays silent.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [report?.periodId, isDemo]);
 
   const saveCoordinatorRemark = async (rollNo, coordinatorRemark) => {
     if (!coordinatorRemark) return;
@@ -289,6 +316,8 @@ export default function ErpOverrideAnalysis() {
               </div>
             </div>
 
+            <ErpHistoryTimeline items={erpHistory} />
+
             {overridden.length === 0 && (
               <div style={{ ...styles.card, padding: 32, textAlign: 'center', color: theme.textMuted }}>
                 No overridden students in this report.
@@ -319,6 +348,96 @@ const labelStyle = {
   fontSize: 10, fontWeight: 700, color: theme.textMuted,
   textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6,
 };
+
+// Every exchange with ERP for this period, oldest first — including calls we
+// rejected and no-op re-syncs, which is the point: the trail has to show what
+// ERP actually sent, not just what we ended up storing.
+function ErpHistoryTimeline({ items }) {
+  if (!items || items.length === 0) return null;
+
+  const fmtTime = (iso) => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString();
+  };
+
+  return (
+    <div style={{ ...styles.card, padding: 16, marginBottom: 20 }}>
+      <div style={{ ...labelStyle, marginBottom: 12 }}>
+        ERP communication history ({items.length})
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {items.map((item) => (
+          <div
+            key={item._id}
+            style={{
+              padding: '10px 12px',
+              borderRadius: 8,
+              background: theme.surfaceAlt,
+              borderLeft: `3px solid ${item.ok ? theme.success : theme.danger}`,
+            }}
+          >
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', fontSize: 12 }}>
+              <span style={{
+                fontWeight: 700,
+                color: item.direction === 'inbound' ? theme.accent : theme.textMuted,
+              }}
+              >
+                {item.direction === 'inbound' ? 'ERP → XCEED' : 'XCEED → ERP'}
+              </span>
+              <span style={{ fontFamily: theme.fontMono }}>{item.event}</span>
+              {item.responseCode && (
+                <span style={{ color: theme.textMuted, fontFamily: theme.fontMono }}>
+                  {item.responseCode}
+                </span>
+              )}
+              {item.httpStatus != null && (
+                <span style={{ color: theme.textMuted, fontFamily: theme.fontMono }}>
+                  HTTP {item.httpStatus}
+                </span>
+              )}
+              <span style={{ marginLeft: 'auto', color: theme.textMuted }}>
+                {fmtTime(item.occurredAt)}
+              </span>
+            </div>
+
+            {item.error && (
+              <div style={{ marginTop: 6, fontSize: 12, color: theme.danger }}>{item.error}</div>
+            )}
+
+            {item.changeCount > 0 && (
+              <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {item.changes.map((c) => (
+                  <span
+                    key={`${item._id}-${c.rollNo}`}
+                    style={{
+                      fontSize: 11,
+                      fontFamily: theme.fontMono,
+                      padding: '3px 8px',
+                      borderRadius: 5,
+                      background: theme.warningDim,
+                      color: theme.text,
+                      border: `1px solid ${theme.border}`,
+                    }}
+                    title={c.xceedStatus ? `XCEED recorded ${c.xceedStatus}` : undefined}
+                  >
+                    {c.rollNo}: {c.from ?? '—'} → {c.to}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {item.changeCount === 0 && item.ok && item.direction === 'inbound' && (
+              <div style={{ marginTop: 6, fontSize: 12, color: theme.textMuted, fontStyle: 'italic' }}>
+                No attendance changed by this call.
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function fmt(v) {
   return typeof v === 'number' ? v.toFixed(3) : '—';
