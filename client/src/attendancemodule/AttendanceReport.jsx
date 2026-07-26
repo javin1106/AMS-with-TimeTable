@@ -9,6 +9,7 @@ import UnknownFaces from './UnknownFaces';
 import RejectedSamples from './RejectedSamples';
 import getEnvironment from '../getenvironment';
 import ExportReportsTab from './ExportReportsTab';
+import CumulativeAttendanceTab from './CumulativeAttendanceTab';
 import ProxyModal from './ProxyModal';
 
 const apiUrl = getEnvironment();
@@ -739,6 +740,7 @@ export default function AttendanceReport() {
           ['unknown', 'Unknown Faces'],
           ['rejected', 'Rejected Samples'],
           ['export', 'Export Reports'],
+          ['cumulative', 'Cumulative (XCEED vs ERP)'],
           ['detail', 'Report Detail'],
         ].map(
           ([id, label]) =>
@@ -2155,6 +2157,9 @@ export default function AttendanceReport() {
         </div>
       )}
       {tab === 'export' && <ExportReportsTab />}
+
+      {/* ════ CUMULATIVE TAB (read-only: XCEED vs ERP) ════ */}
+      {tab === 'cumulative' && <CumulativeAttendanceTab />}
       {/* ════ UNKNOWN FACES TAB ════ */}
       {tab === 'unknown' && (
         <div style={{ marginTop: 16 }}>

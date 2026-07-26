@@ -1,6 +1,7 @@
 const HttpException = require("../../../models/http-exception");
 const Faculty = require("../../../models/faculty");
 const addFaculty = require("../../../models/addfaculty");
+const { findFacultyByExactName } = require("../helper/facultyLookup");
 
 
 class FacultyController {
@@ -73,8 +74,25 @@ class FacultyController {
     }
   };
 
-
-
+      /**
+       * Exact (anchored, case- and whitespace-insensitive) name lookup.
+       *
+       * `getFacultyByName` above is the *search* helper: its regex is unanchored
+       * and also matches `dept`, so "Mohan" happily matches "Mohan Kumar" and a
+       * name that matches no faculty at all can still return a whole department.
+       * Callers that mail people must never use it — resolving two spellings of
+       * one person to the same document is how duplicate emails happen.
+       */
+      async getFacultyByExactName(name) {
+        if (!name || !String(name).trim()) {
+          throw new HttpException(400, "Invalid faculty name");
+        }
+        try {
+          return await findFacultyByExactName(name);
+        } catch (e) {
+          throw new HttpException(500, e.message || "Internal Server Error");
+        }
+      }
 
 
      
