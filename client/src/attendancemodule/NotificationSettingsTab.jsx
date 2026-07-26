@@ -120,6 +120,17 @@ const ALERT_TYPES = [
       </svg>
     ),
   },
+  {
+    key: 'scheduleCheck',
+    label: 'Schedules Check',
+    description: 'Twice-daily scheduled uptime check of services',
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+        <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.4"/>
+        <polyline points="8,4 8,8 11,10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+      </svg>
+    ),
+  },
 ];
 
 const FREQUENCIES = [

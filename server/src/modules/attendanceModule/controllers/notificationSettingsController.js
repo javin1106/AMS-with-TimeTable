@@ -1,6 +1,6 @@
 const NotificationSettings = require('../../../models/attendanceModule/notificationSettings');
 
-const ALERT_KEYS = ['serverDown', 'erpDown', 'lowConfidence', 'noReportSaved', 'classBunk', 'duplicateAttendance', 'dailySummary', 'embeddingProgress'];
+const ALERT_KEYS = ['serverDown', 'erpDown', 'lowConfidence', 'noReportSaved', 'classBunk', 'duplicateAttendance', 'dailySummary', 'embeddingProgress', 'scheduleCheck'];
 const VALID_ROLES = ['admin', 'coordinator', 'head'];
 const VALID_FREQUENCIES = ['daily', 'weekly'];
 const VALID_MODES = ['all', 'threshold'];
