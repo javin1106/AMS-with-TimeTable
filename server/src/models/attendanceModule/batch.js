@@ -33,6 +33,8 @@ const batchSchema = new mongoose.Schema({
     gpuMetrics:        { type: Boolean, default: true },
     confidenceMonitor: { type: Boolean, default: true },
     recordStream:      { type: Boolean, default: true },
+    extraClasses:      { type: Boolean, default: false },
+    alteringClasses:   { type: Boolean, default: false },
     instituteIdentification: { type: Boolean, default: false },
     erpOverrides:      { type: Boolean, default: false },
     erpSync:           { type: Boolean, default: false },

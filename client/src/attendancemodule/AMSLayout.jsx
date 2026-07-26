@@ -55,6 +55,8 @@ const NAV = [
   { id: 'embeddings', route: '/attendance/embeddings', label: 'Subject Embeddings' },
   { id: 'preview', route: '/cameras/preview', label: 'Live Preview' },
   { id: 'record', route: '/attendance/record-stream', label: 'Record Stream' },
+  { id: 'extraClass', route: '/attendance/extra-class', label: 'Extra Classes' },
+  { id: 'alterClass', route: '/attendance/altering-class', label: 'Altering Classes' },
   {
     id: 'confidence',
     route: '/attendance/confidence',
@@ -62,7 +64,6 @@ const NAV = [
   },
   { id: 'institute', route: '/attendance/institute-identification', label: 'Institute Identification' },
   { id: 'erpOverrides', route: '/attendance/erp-overrides', label: 'ERP Overrides' },
-  { id: 'erpSync', route: '/attendance/edit-session-dates?tab=erpControls', label: 'ERP Sync' },
   { id: 'manual', route: '/ams-manual', label: 'Help & Manual', newTab: true },
 ];
 
@@ -78,6 +79,8 @@ const COLORS = {
   preview: '#8b5cf6',
   confidence: '#ef4444',
   record: '#ef4444',
+  extraClass: '#f59e0b',
+  alterClass: '#d946ef',
   manual: '#64748b',
   institute: '#8b5cf6',
   erpOverrides: '#f59e0b',
