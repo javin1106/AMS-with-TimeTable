@@ -530,6 +530,9 @@ export default function AMSDashboard() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
               <div style={{ fontWeight: 700, fontSize: 'clamp(17px,2.5vw,22px)', letterSpacing: '-0.03em', color: T.text }}>
                 Welcome to <ILeed />
+                <span style={{ fontWeight: 500, fontSize: '0.62em', letterSpacing: '0', color: T.textMuted, marginLeft: 10 }}>
+                  — {ILEED_FULL_FORM}
+                </span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 {/* Acquisition status chip */}
@@ -613,8 +616,7 @@ export default function AMSDashboard() {
             {/* Row 2: subtitle + badge buttons */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
               <div style={{ fontSize: 12, color: T.textMuted }}>
-                {ILEED_FULL_FORM}
-                {userRoles.length > 0 ? ` · ${userRoles.join(' · ')}` : ''}
+                {userRoles.length > 0 ? userRoles.join(' · ') : ''}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <HealthDashboard />

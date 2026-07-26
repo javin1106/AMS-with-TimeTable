@@ -507,6 +507,12 @@ class LockTimeTableController {
         // Extract relevant data from the record
         const { day, slot, slotData, sem } = record;
 
+        // Lunch is fetched separately below. The faculty/room views are built
+        // from an aggregation that joins on the `timetable` reference; lunch
+        // records that lack that link are dropped by the join, which is why
+        // lunch shows in the semester view (a plain find) but not here.
+        if (slot === "lunch") return;
+
         // Create or initialize the day in the timetableData
         if (!timetableData[day]) {
           timetableData[day] = {};
@@ -530,6 +536,27 @@ class LockTimeTableController {
 
         timetableData[day][slot].push(formattedSlotData);
         // Set the sem and code for the timetable
+      });
+
+      // Add this faculty's lunch-slot classes. Fetched directly by code (like
+      // the semester view) so they survive regardless of the `timetable` link,
+      // then filtered to this faculty so only their own lunch class shows.
+      const facultyLunchRecords = await LockSem.find({
+        code,
+        slot: "lunch",
+        "slotData.0": { $exists: true },
+      });
+      facultyLunchRecords.forEach((record) => {
+        const { day, sem, slotData } = record;
+        const matching = slotData.filter(
+          (slotItem) => slotItem.faculty === facultyname
+        );
+        if (!matching.length) return;
+        if (!timetableData[day]) timetableData[day] = {};
+        if (!timetableData[day].lunch) timetableData[day].lunch = [];
+        timetableData[day].lunch.push(
+          matching.map(({ subject, room }) => ({ subject, sem, room }))
+        );
       });
       // console.log(timetableData)
       const notes = await Notecontroller.getNoteByCode(
@@ -565,6 +592,11 @@ class LockTimeTableController {
       const timetableData = {};
       records.forEach((record) => {
         const { day, slot, slotData, sem } = record;
+
+        // Lunch is fetched separately below (see facultytt): the aggregation's
+        // `timetable` join drops lunch records that lack that link.
+        if (slot === "lunch") return;
+
         if (!timetableData[day]) {
           timetableData[day] = {};
         }
@@ -587,6 +619,25 @@ class LockTimeTableController {
 
         timetableData[day][slot].push(formattedSlotData);
         // Set the sem and code for the timetable
+      });
+
+      // Add this room's lunch-slot classes, fetched directly by code (like the
+      // semester view) so they survive the aggregation's join, then filtered
+      // to this room so only its own lunch class shows.
+      const roomLunchRecords = await LockSem.find({
+        code,
+        slot: "lunch",
+        "slotData.0": { $exists: true },
+      });
+      roomLunchRecords.forEach((record) => {
+        const { day, sem, slotData } = record;
+        const matching = slotData.filter((slotItem) => slotItem.room === roomno);
+        if (!matching.length) return;
+        if (!timetableData[day]) timetableData[day] = {};
+        if (!timetableData[day].lunch) timetableData[day].lunch = [];
+        timetableData[day].lunch.push(
+          matching.map(({ subject, faculty }) => ({ subject, faculty, sem }))
+        );
       });
       const notes = await Notecontroller.getNoteByCode(code, "room", roomno);
 

@@ -5,6 +5,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import getEnvironment from '../getenvironment';
 import NotificationSettingsTab from './NotificationSettingsTab';
 import FrameCleanupSettingsTab from './FrameCleanupSettingsTab';
+import RejectedSamplesCleanupSettingsTab from './RejectedSamplesCleanupSettingsTab';
 import OtherControlsSettingsTab from './OtherControlsSettingsTab';
 import { theme as T, cssReset } from './config';
 import BackButton from './BackButton';
@@ -1719,6 +1720,19 @@ export default function EditSessionDates() {
               Frame Cleanup
             </div>
             <FrameCleanupSettingsTab />
+            <div
+              style={{
+                fontSize: 14,
+                fontWeight: 700,
+                color: T.text,
+                margin: '4px 0 16px',
+                paddingTop: 16,
+                borderTop: `1px solid ${T.border}`,
+              }}
+            >
+              Rejected Samples Cleanup
+            </div>
+            <RejectedSamplesCleanupSettingsTab />
           </div>
         )}
       </div>
