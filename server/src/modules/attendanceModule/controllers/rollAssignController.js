@@ -856,8 +856,14 @@ class RollAssignController {
             const safeBatch    = batch ? path.basename(batch) : null;
 
             // 1. batch-specific subfolder: erp_photos/<batch>/<filename>
+            // This page uppercases the whole batch string while the ERP Upload
+            // page keeps the DB's casing, so the folder on disk rarely matches
+            // safeBatch byte-for-byte. Without resolveOnDisk the lookup misses on
+            // a case-sensitive filesystem and falls through to step 3, which
+            // happily serves a same-named photo from a *different* batch.
             if (safeBatch) {
-                const batchPath = path.join(ERP_PHOTOS_DIR, safeBatch, safeFilename);
+                const batchDir  = erpSync.resolveOnDisk(ERP_PHOTOS_DIR, safeBatch);
+                const batchPath = path.join(ERP_PHOTOS_DIR, batchDir, safeFilename);
                 if (fs.existsSync(batchPath)) return res.sendFile(batchPath);
             }
 
@@ -892,9 +898,14 @@ class RollAssignController {
                 pkgCheck = await erpSync.checkErpEmbedding(batch, department);
             } catch (_) {}
 
-            // Count ERP photos as proxy for student count when ML doesn't provide it
+            // The count that matters is how many students are actually *in* the
+            // pkl — checkErpEmbedding gets it by inspecting the file. Photos in
+            // erp_photos/ are only a proxy: a photo whose face failed to embed
+            // still sits there, so counting files overstates the enrolment. Fall
+            // back to it only when the inspect could not run (ML service down),
+            // where roll_count is 0 but the pkl demonstrably exists.
             const batchPhotoDir = erpSync.erpPhotoDir(batch);
-            let studentCount = pkgCheck.student_count || pkgCheck.num_students || pkgCheck.count || 0;
+            let studentCount = pkgCheck.roll_count || 0;
             if (!studentCount && fs.existsSync(batchPhotoDir)) {
                 try {
                     studentCount = fs.readdirSync(batchPhotoDir)
@@ -927,18 +938,18 @@ class RollAssignController {
             const batchPhotoDir   = erpSync.erpPhotoDir(batch);
             const erpPhotosDir    = fs.existsSync(batchPhotoDir) ? batchPhotoDir : ERP_PHOTOS_BASE;
 
-            // ── Check for pre-built pkl ───────────────────────────────────
-            let pkgCheck = { available: false };
-            try {
-                pkgCheck = await erpSync.checkErpEmbedding(batch, department);
-            } catch (_) {}
-
-            // Require pre-built pkl — block before starting SSE stream
-            if (!pkgCheck.available) {
+            // ── Require pre-built pkl — block before starting SSE stream ──
+            // findErpPkl, not checkErpEmbedding: the latter's roll count comes
+            // from an /erp-embedding/inspect call that base64s the whole pkl to
+            // the ML service, and this route discarded that count while going on
+            // to upload the very same bytes again in the match request below.
+            // Existence is all the gate needs.
+            const pklFile = erpSync.findErpPkl(batch, department);
+            if (!pklFile) {
                 return res.status(422).json({ noEmbedding: true, batch, department });
             }
 
-            const pklData = erpSync.readPklBase64(pkgCheck.pkl_path);
+            const pklData = erpSync.readPklBase64(pklFile);
 
             // ── Build ERP photo filename map (mirrors the old Python 3-tier
             // search: batch-specific dir, parent erp_photos/ root, siblings) ──
