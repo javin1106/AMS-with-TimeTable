@@ -81,47 +81,134 @@ function isValidImage(buffer, ext) {
     return signature.every((byte, i) => buffer[i] === byte);
 }
 
-// ─── Find pkl path for a batch (ML service saves under {dept}/{batch}/) ─────
+// ─── Find pkl path for a batch (saved under {dept}/{batch}/) ────────────────
+// Delegates the path formula to erpEmbeddingSyncHelper so the Roll Assignment
+// page's availability check and this one can never disagree.
 function findEmbeddingPkl(batchName) {
-    const parts = batchName.split('_');
-    const department = parts.length >= 3 ? parts.slice(1, -1).join('_') : '';
-    if (department) {
-        const newPath = path.join(ERP_EMBED_DIR, department, batchName, 'embeddings_db.pkl');
-        if (fs.existsSync(newPath)) return newPath;
-    }
+    const newPath = erpSync.pklPath(batchName, erpSync.departmentFromBatch(batchName));
+    if (fs.existsSync(newPath)) return newPath;
     // Fallback: flat path used before department subfolder convention
-    const oldPath = path.join(ERP_EMBED_DIR, batchName, 'embeddings_db.pkl');
+    const oldPath = path.join(ERP_EMBED_DIR, erpSync.resolveOnDisk(ERP_EMBED_DIR, batchName), 'embeddings_db.pkl');
     if (fs.existsSync(oldPath)) return oldPath;
     return null;
+}
+
+// ─── Background embedding jobs ────────────────────────────────────────────────
+// Embedding generation runs after the HTTP response is sent — it calls the ML
+// service per photo and can take minutes — so the POST's status code says only
+// "queued", never "worked". Callers used to assume success and tell the
+// operator "Embeddings created successfully" while the run was still going (or
+// had already failed with nothing but a server log to show for it). Track each
+// batch's run here and expose it via GET /embedding-status/:batch so the UI can
+// report what actually happened.
+const embeddingJobs = new Map();   // lower-cased batch → job
+
+const jobKey = (batch) => String(batch || '').trim().toLowerCase();
+
+function peekEmbeddingJob(batch) {
+    return embeddingJobs.get(jobKey(batch)) || null;
+}
+
+function getEmbeddingJob(batch) {
+    const key = jobKey(batch);
+    let job = embeddingJobs.get(key);
+    if (!job) {
+        job = {
+            batch, state: 'idle', queued: 0, processed: 0, skipped: [],
+            error: null, startedAt: null, finishedAt: null,
+            chain: Promise.resolve(),
+        };
+        embeddingJobs.set(key, job);
+    }
+    return job;
+}
+
+// Every unit of work reads the current .pkl, merges, and writes it back, so two
+// running at once each clobber the other's students. Callers used to fire one
+// per 1000-roll chunk — and one per roll number on delete-all — all in
+// parallel, leaving only the last writer's result on disk. Chaining them keeps
+// the file consistent and gives the job a single well-defined finish.
+function enqueueEmbeddingWork(batch, label, work) {
+    const job = getEmbeddingJob(batch);
+
+    if (job.state !== 'running') {
+        job.state      = 'running';
+        job.startedAt  = Date.now();
+        job.finishedAt = null;
+        job.processed  = 0;
+        job.skipped    = [];
+        job.error      = null;
+    }
+    job.queued++;
+
+    job.chain = job.chain.then(async () => {
+        const reqId = crypto.randomUUID();
+        try {
+            const result = await work();
+            job.processed += result?.processed || 0;
+            if (Array.isArray(result?.skipped)) {
+                job.skipped.push(...result.skipped);
+            }
+        } catch (err) {
+            job.error = err.message;
+            console.error(`[GT Upload] [${reqId}] Embedding ${label} failed for batch=${batch}:`, err.message);
+        } finally {
+            job.queued--;
+            if (job.queued === 0) {
+                job.state      = job.error ? 'error' : 'done';
+                job.finishedAt = Date.now();
+            }
+        }
+    });
+
+    return job;
 }
 
 // ─── Trigger Async Background Sync ────────────────────────────────────────────
 // The ML service is stateless — it never reads erp_photos/ or writes the
 // .pkl itself. This reads the relevant photo bytes (and the existing .pkl,
 // for sync) here, sends them to Python, and persists whatever comes back.
-// Still fire-and-forget from the caller's perspective: callers never await
-// this, matching the previous behavior where the route handler responded
-// before the sync completed.
-async function triggerEmbeddingSync(action, payload) {
-    const reqId = crypto.randomUUID();
-    try {
-        let department = 'UNKNOWN_DEPT';
-        const parts = payload.batch.split('_');
-        if (parts.length >= 3) {
-            department = parts.slice(1, -1).join('_');
-        }
+// Still fire-and-forget from the caller's perspective (it returns as soon as
+// the work is queued), but the returned job now records the outcome.
+function triggerEmbeddingSync(action, payload) {
+    const department = erpSync.departmentFromBatch(payload.batch);
 
+    return enqueueEmbeddingWork(payload.batch, action, async () => {
         if (action === 'sync') {
-            await erpSync.syncErpEmbeddings(payload.batch, department, payload.roll_nos || []);
-        } else if (action === 'rename') {
-            await erpSync.renameErpEmbedding(payload.batch, department, payload.old_roll_no, payload.new_roll_no);
-        } else if (action === 'delete') {
-            await erpSync.deleteErpEmbedding(payload.batch, department, payload.roll_no);
+            const result = await erpSync.syncErpEmbeddings(payload.batch, department, payload.roll_nos || []);
+            // A missing photo folder means nothing can be embedded — that is a
+            // failed run, not a no-op, so surface it instead of reporting done.
+            if (result.status === 'skipped') {
+                throw new Error(result.reason || 'ERP photos folder not found');
+            }
+            return result;
         }
+        if (action === 'rename') {
+            // rename/delete legitimately no-op when no .pkl exists yet.
+            return erpSync.renameErpEmbedding(payload.batch, department, payload.old_roll_no, payload.new_roll_no);
+        }
+        if (action === 'delete') {
+            return erpSync.deleteErpEmbedding(payload.batch, department, payload.roll_no);
+        }
+        return null;
+    });
+}
 
-    } catch (err) {
-        console.error(`[GT Upload] [${reqId}] Failed to trigger sync for action=${action} batch=${payload.batch}:`, err.message);
+// Queues one sync per chunk. Chunks run one after another (see
+// enqueueEmbeddingWork) and share a single job, so the caller can hand the
+// returned startedAt to the client as a handle on the whole run.
+function queueEmbeddingSync(batch, rollNos) {
+    const CHUNK = 1000;
+    if (!rollNos.length) {
+        // Nothing to embed (e.g. the last photo was just deleted). Still record
+        // a completed run so a client waiting on this batch isn't left hanging.
+        return enqueueEmbeddingWork(batch, 'sync', async () => ({ processed: 0, skipped: [] }));
     }
+    let job;
+    for (let i = 0; i < rollNos.length; i += CHUNK) {
+        job = triggerEmbeddingSync('sync', { batch, roll_nos: rollNos.slice(i, i + CHUNK) });
+    }
+    return job;
 }
 
 // ─── Controller ───────────────────────────────────────────────────────────────
@@ -135,7 +222,7 @@ class GroundTruthUploadController {
             const batch = sanitizeBatch(req.params.batch);
             if (!req.file) return res.status(400).json({ error: 'ZIP file is required' });
 
-            const batchPath = path.join(ERP_PHOTOS_DIR, batch);
+            const batchPath = erpSync.erpPhotoDir(batch);
             assertInsideRoot(batchPath);
             ensureDir(batchPath);
 
@@ -264,24 +351,18 @@ class GroundTruthUploadController {
 
             console.log(`[GT Upload] ZIP processed for batch=${batch}: ${extractedImagesCount} images, ${targetFolders.size} students`);
 
+            // Queue before responding — queueing is synchronous, the work still
+            // runs in the background — so the client gets the job handle it
+            // needs to wait for the real outcome.
+            const job = queueEmbeddingSync(batch, Array.from(targetFolders));
+
             res.json({
                 message: 'ZIP extraction complete',
                 extractedFolders: targetFolders.size,
                 extractedImages: extractedImagesCount,
+                embeddingJobStartedAt: job.startedAt,
                 errors: errors.length ? errors : undefined
             });
-
-            // Trigger background sync
-            if (targetFolders.size > 0) {
-                const roll_nos = Array.from(targetFolders);
-                const chunkSize = 1000;
-                for (let i = 0; i < roll_nos.length; i += chunkSize) {
-                    triggerEmbeddingSync('sync', {
-                        batch: batch,
-                        roll_nos: roll_nos.slice(i, i + chunkSize)
-                    });
-                }
-            }
 
         } catch (err) {
             if (err.message === 'Invalid batch name' || err.message === 'Batch name is required') {
@@ -301,7 +382,7 @@ class GroundTruthUploadController {
 
             if (!req.file) return res.status(400).json({ error: 'No photo uploaded' });
 
-            const batchPath = path.join(ERP_PHOTOS_DIR, batch);
+            const batchPath = erpSync.erpPhotoDir(batch);
             assertInsideRoot(batchPath);
             ensureDir(batchPath);
 
@@ -352,16 +433,16 @@ class GroundTruthUploadController {
 
             console.log(`[GT Upload] Photo uploaded: batch=${batch} rollNo=${safeRollNo} file=${targetFilename}`);
 
+            const job = triggerEmbeddingSync('sync', {
+                batch: batch,
+                roll_nos: [safeRollNo]
+            });
+
             res.json({
                 message: 'Photo uploaded successfully',
                 rollNo: safeRollNo,
-                imagesAdded: 1
-            });
-
-            // Trigger background sync
-            triggerEmbeddingSync('sync', {
-                batch: batch,
-                roll_nos: [safeRollNo]
+                imagesAdded: 1,
+                embeddingJobStartedAt: job.startedAt
             });
 
         } catch (err) {
@@ -385,7 +466,7 @@ class GroundTruthUploadController {
                 return res.json({ message: 'Roll number is unchanged', rollNo: safeNewRollNo });
             }
 
-            const batchPath = path.join(ERP_PHOTOS_DIR, batch);
+            const batchPath = erpSync.erpPhotoDir(batch);
             assertInsideRoot(batchPath);
             
             if (!fs.existsSync(batchPath)) {
@@ -428,17 +509,17 @@ class GroundTruthUploadController {
 
             console.log(`[GT Upload] Rename: batch=${batch} ${oldPhotoFile} -> ${safeNewRollNo}${oldExt.toLowerCase()}`);
 
-            res.json({
-                message: `Successfully renamed ${safeOldRollNo} to ${safeNewRollNo}`,
-                oldRollNo: safeOldRollNo,
-                newRollNo: safeNewRollNo
-            });
-
-            // Trigger background sync rename
-            triggerEmbeddingSync('rename', {
+            const job = triggerEmbeddingSync('rename', {
                 batch: batch,
                 old_roll_no: safeOldRollNo,
                 new_roll_no: safeNewRollNo
+            });
+
+            res.json({
+                message: `Successfully renamed ${safeOldRollNo} to ${safeNewRollNo}`,
+                oldRollNo: safeOldRollNo,
+                newRollNo: safeNewRollNo,
+                embeddingJobStartedAt: job.startedAt
             });
 
         } catch (err) {
@@ -457,7 +538,7 @@ class GroundTruthUploadController {
             const batch = sanitizeBatch(req.params.batch);
             const safeRollNo = sanitizeRollNo(req.params.rollNo);
 
-            const batchPath = path.join(ERP_PHOTOS_DIR, batch);
+            const batchPath = erpSync.erpPhotoDir(batch);
             assertInsideRoot(batchPath);
 
             if (!fs.existsSync(batchPath)) {
@@ -484,15 +565,15 @@ class GroundTruthUploadController {
 
             console.log(`[GT Upload] Delete: batch=${batch} rollNo=${safeRollNo}`);
 
-            res.json({
-                message: 'Photo deleted successfully',
-                rollNo: safeRollNo
-            });
-
-            // Trigger background sync delete
-            triggerEmbeddingSync('delete', {
+            const job = triggerEmbeddingSync('delete', {
                 batch: batch,
                 roll_no: safeRollNo
+            });
+
+            res.json({
+                message: 'Photo deleted successfully',
+                rollNo: safeRollNo,
+                embeddingJobStartedAt: job.startedAt
             });
 
         } catch (err) {
@@ -508,7 +589,7 @@ class GroundTruthUploadController {
     async deleteAllPhotos(req, res) {
         try {
             const batch = sanitizeBatch(req.params.batch);
-            const batchPath = path.join(ERP_PHOTOS_DIR, batch);
+            const batchPath = erpSync.erpPhotoDir(batch);
             assertInsideRoot(batchPath);
 
             if (!fs.existsSync(batchPath)) {
@@ -534,14 +615,16 @@ class GroundTruthUploadController {
 
             console.log(`[GT Upload] Delete ALL: batch=${batch} count=${deletedRollNos.length}`);
 
+            let job;
+            for (const roll_no of deletedRollNos) {
+                job = triggerEmbeddingSync('delete', { batch, roll_no });
+            }
+
             res.json({
                 message: `Deleted ${deletedRollNos.length} photo(s)`,
                 deletedCount: deletedRollNos.length,
+                embeddingJobStartedAt: job?.startedAt || null,
             });
-
-            for (const roll_no of deletedRollNos) {
-                triggerEmbeddingSync('delete', { batch, roll_no });
-            }
 
         } catch (err) {
             if (err.message === 'Invalid batch name' || err.message === 'Batch name is required') {
@@ -556,7 +639,7 @@ class GroundTruthUploadController {
     async syncAll(req, res) {
         try {
             const batch = sanitizeBatch(req.params.batch);
-            const batchPath = path.join(ERP_PHOTOS_DIR, batch);
+            const batchPath = erpSync.erpPhotoDir(batch);
             assertInsideRoot(batchPath);
 
             let roll_nos = [];
@@ -571,21 +654,15 @@ class GroundTruthUploadController {
                 }
             }
 
-            // Immediately respond
+            // Respond as soon as the work is queued — the run itself can take
+            // minutes. startedAt is the client's handle for polling it.
+            const job = queueEmbeddingSync(batch, roll_nos);
+
             res.json({
                 message: `Triggered sync for ${roll_nos.length} photos`,
-                photosCount: roll_nos.length
+                photosCount: roll_nos.length,
+                embeddingJobStartedAt: job.startedAt
             });
-
-            if (roll_nos.length > 0) {
-                const chunkSize = 1000;
-                for (let i = 0; i < roll_nos.length; i += chunkSize) {
-                    triggerEmbeddingSync('sync', {
-                        batch: batch,
-                        roll_nos: roll_nos.slice(i, i + chunkSize)
-                    });
-                }
-            }
 
         } catch (err) {
             console.error('[GT Upload] syncAll error:', err);
@@ -597,7 +674,7 @@ class GroundTruthUploadController {
     async listPhotos(req, res) {
         try {
             const batch = sanitizeBatch(req.params.batch);
-            const batchPath = path.join(ERP_PHOTOS_DIR, batch);
+            const batchPath = erpSync.erpPhotoDir(batch);
             assertInsideRoot(batchPath);
 
             if (!fs.existsSync(batchPath)) {
@@ -667,15 +744,47 @@ class GroundTruthUploadController {
         }
     }
 
+    // ─── Live state of this batch's background embedding run ─────────
+    // The bare "does a .pkl exist?" check above cannot answer "did my
+    // regeneration finish?" — on a re-run the file is already there, so a
+    // caller polling it reports success on the first tick, before any work
+    // has happened. Callers wait on `state` instead, and compare `startedAt`
+    // against the value the trigger returned so a previous run's result is
+    // never mistaken for this one's.
+    async embeddingStatus(req, res) {
+        try {
+            const batch   = sanitizeBatch(req.params.batch);
+            const job     = peekEmbeddingJob(batch);
+            const pklPath = findEmbeddingPkl(batch);
+
+            let updatedAt = null;
+            if (pklPath) {
+                try { updatedAt = fs.statSync(pklPath).mtime; } catch (_) {}
+            }
+
+            res.json({
+                batch,
+                state:        job?.state      || 'idle',   // idle | running | done | error
+                startedAt:    job?.startedAt  || null,
+                finishedAt:   job?.finishedAt || null,
+                queued:       job?.queued     || 0,
+                processed:    job?.processed  || 0,
+                skippedCount: job?.skipped.length || 0,
+                skipped:      (job?.skipped || []).slice(0, 50),
+                error:        job?.error      || null,
+                available:    !!pklPath,
+                updatedAt,
+            });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    }
+
     // ─── Get Sync Status ───────────────────────────────────────────────
     async getStatus(req, res) {
         try {
             const batchString = sanitizeBatch(req.params.batch);
-            let department = 'UNKNOWN_DEPT';
-            const parts = batchString.split('_');
-            if (parts.length >= 3) {
-                department = parts.slice(1, -1).join('_');
-            }
+            const department  = erpSync.departmentFromBatch(batchString);
 
             const data = await erpSync.getErpStatus(batchString, department);
             res.json(data);

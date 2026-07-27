@@ -374,10 +374,11 @@ router.get('/gt-acquisition/preview', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('X-Accel-Buffering', 'no');
 
-    let closed     = false;
-    let upstream   = null;
-    let pipedAny   = false;   // did we ever forward a single byte to the browser?
-    let failStreak = 0;       // consecutive upstream failures with no bytes since
+    let closed       = false;
+    let upstream     = null;
+    let pipedAny     = false;   // did we ever forward a single byte to the browser?
+    let failStreak   = 0;       // consecutive upstream failures with no bytes since
+    let drainedJobId = null;    // sub-run whose preview has already run dry
     req.on('close', () => {
         closed = true;
         if (upstream) upstream.destroy();
@@ -386,11 +387,11 @@ router.get('/gt-acquisition/preview', async (req, res) => {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
     // A sub-run needs a moment to register its Python jobId, so a few early
-    // failures are normal. But a *persistent* failure (e.g. a stale ML service
-    // with no /gt-job-preview route → 404) must not loop silently forever — it
-    // presents to the user as an eternal "Connecting to stream…". After this
-    // many consecutive failures without ever having streamed a byte, give up so
-    // the browser <img> fires onError and the UI can retry/surface it.
+    // failures are normal. But a *persistent* failure (e.g. the ML service being
+    // unreachable, or serving code without /gt-acquisition-preview) must not loop
+    // silently forever — it presents to the user as an eternal "Connecting to
+    // stream…". After this many consecutive failures without ever having streamed
+    // a byte, give up so the browser <img> fires onError and the UI can surface it.
     const MAX_FAIL_STREAK = 8;
 
     while (!closed) {
@@ -401,6 +402,15 @@ router.get('/gt-acquisition/preview', async (req, res) => {
         const pyJobId = job.pythonJobId;
         if (!pyJobId) { await sleep(500); continue; }
 
+        // Python sets its job's stop flag when the *capture* loop ends, but Node
+        // clears job.pythonJobId only when the SSE stream ends — and that stays
+        // open through the clustering/save phase that follows. So for the whole
+        // tail of every sub-run this id still points at a preview that hands back
+        // an empty stream. Reconnecting to it just spins (~3 req/s until the ML
+        // service drops the entry, then 404s); wait for the next camera's id.
+        if (pyJobId === drainedJobId) { await sleep(500); continue; }
+
+        let bytesThisRun = 0;
         try {
             // /gt-acquisition-preview, NOT /rtsp-preview: the latter resolves to
             // ground_truth_routes.py's camera-preview streams (its router is
@@ -413,36 +423,42 @@ router.get('/gt-acquisition/preview', async (req, res) => {
             upstream = result.data;
             failStreak = 0;
             await new Promise((resolve) => {
-                upstream.on('data',  (chunk) => { if (!closed) { res.write(chunk); pipedAny = true; } });
+                upstream.on('data', (chunk) => {
+                    if (closed) return;
+                    res.write(chunk);
+                    bytesThisRun += chunk.length;
+                    pipedAny = true;
+                });
                 upstream.on('end',   resolve);
                 upstream.on('error', resolve);
             });
             upstream = null;
-            // Sub-run ended (camera switch) — brief pause so we don't hammer
-            // the ML service while the next sub-run's jobId is being set up.
+            // Ended without a single frame → Python's generator exited straight
+            // away because this sub-run is already stopping. Nothing more will
+            // ever come from this id.
+            if (bytesThisRun === 0) drainedJobId = pyJobId;
+            // Brief pause so we don't hammer the ML service while the next
+            // sub-run's jobId is being set up.
             await sleep(300);
         } catch (err) {
             upstream = null;
             const status = err.response?.status;
-            // 404 here means the ML service has no /gt-job-preview route — i.e.
-            // it is running pre-fix code and needs a restart/redeploy. Surface
-            // it loudly instead of retrying into the void.
-            if (status === 404) {
-                console.error(
-                    `[gt-acquisition/preview] ML service ${ML_SERVICE_URL}/gt-job-preview ` +
-                    `returned 404 for pyJobId=${pyJobId} (acquisition ${acquisitionId}). ` +
-                    `The python-ml-service is likely running old code — restart it.`
-                );
-            } else {
-                console.warn(
-                    `[gt-acquisition/preview] upstream error for pyJobId=${pyJobId} ` +
-                    `(acquisition ${acquisitionId}): ${status || err.code || err.message}`
-                );
-            }
+            // A 404 once frames have been flowing just means the ML service has
+            // dropped this sub-run's entry — routine at the tail of a camera
+            // switch, not an error worth logging. Before the first frame it is a
+            // real problem, so let it fall through to the give-up path below.
+            if (status === 404 && pipedAny) { drainedJobId = pyJobId; continue; }
+
+            console.warn(
+                `[gt-acquisition/preview] upstream error for pyJobId=${pyJobId} ` +
+                `(acquisition ${acquisitionId}): ${status || err.code || err.message}`
+            );
             if (!pipedAny && ++failStreak >= MAX_FAIL_STREAK) {
                 console.error(
                     `[gt-acquisition/preview] giving up after ${failStreak} consecutive ` +
-                    `failures with no frames streamed (acquisition ${acquisitionId}).`
+                    `failures with no frames streamed (acquisition ${acquisitionId}). ` +
+                    `Check that python-ml-service is reachable at ${ML_SERVICE_URL} and ` +
+                    `serves /gt-acquisition-preview.`
                 );
                 break;
             }
