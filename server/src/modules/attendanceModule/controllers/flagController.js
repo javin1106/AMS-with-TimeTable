@@ -9,6 +9,7 @@ const fs         = require('fs');
 const fsPromises = require('fs').promises;
 
 const ClusterMatch = require('../../../models/attendanceModule/clusterMatch');
+const erpSync      = require('./erpEmbeddingSyncHelper');
 
 const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'ground_truth');
 const ERP_PHOTOS_DIR   = process.env.ERP_PHOTOS_DIR ||
@@ -465,8 +466,14 @@ class FlagController {
             const safeFilename = path.basename(filename);
             const safeBatch    = batch ? path.basename(batch) : null;
 
+            // resolveOnDisk: the Roll Assignment page uppercases the batch string
+            // while the ERP Upload page keeps the DB's casing, so this rarely
+            // matches the folder byte-for-byte on a case-sensitive filesystem.
+            // Missing here falls through to the scan below, which can serve a
+            // same-named photo belonging to another batch.
             if (safeBatch) {
-                const batchPath = path.join(ERP_PHOTOS_DIR, safeBatch, safeFilename);
+                const batchDir  = erpSync.resolveOnDisk(ERP_PHOTOS_DIR, safeBatch);
+                const batchPath = path.join(ERP_PHOTOS_DIR, batchDir, safeFilename);
                 if (fs.existsSync(batchPath)) return res.sendFile(batchPath);
             }
 

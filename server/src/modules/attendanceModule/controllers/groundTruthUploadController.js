@@ -10,7 +10,6 @@ const erpSync    = require('./erpEmbeddingSyncHelper');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const ERP_PHOTOS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'erp_photos');
-const ERP_EMBED_DIR  = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'embeddings', 'erp');
 
 const MAX_FILES_IN_ZIP  = 500;
 const MAX_IMAGE_SIZE    = 10 * 1024 * 1024;   // 10 MB per image
@@ -84,14 +83,10 @@ function isValidImage(buffer, ext) {
 // ─── Find pkl path for a batch (saved under {dept}/{batch}/) ────────────────
 // Delegates the path formula to erpEmbeddingSyncHelper so the Roll Assignment
 // page's availability check and this one can never disagree.
-function findEmbeddingPkl(batchName) {
-    const newPath = erpSync.pklPath(batchName, erpSync.departmentFromBatch(batchName));
-    if (fs.existsSync(newPath)) return newPath;
-    // Fallback: flat path used before department subfolder convention
-    const oldPath = path.join(ERP_EMBED_DIR, erpSync.resolveOnDisk(ERP_EMBED_DIR, batchName), 'embeddings_db.pkl');
-    if (fs.existsSync(oldPath)) return oldPath;
-    return null;
-}
+// Was an open-coded copy of the same two candidates erpSync searches (dept-nested
+// path, then the pre-department flat one). Delegating keeps this page and the
+// Roll Assignment page from ever drifting on *which* pkl a batch resolves to.
+const findEmbeddingPkl = (batchName) => erpSync.findErpPkl(batchName);
 
 // ─── Background embedding jobs ────────────────────────────────────────────────
 // Embedding generation runs after the HTTP response is sent — it calls the ML

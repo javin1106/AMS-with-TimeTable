@@ -99,12 +99,16 @@ async function inspectPkl(filePath) {
 }
 
 /**
- * Mirrors the old GET /erp-embedding/check — searches most-specific to
- * least-specific path (no sanitization, matching the original, which never
- * validated these particular inputs).
- * Returns { available, pkl_path, roll_count } — same shape as before.
+ * Locates a batch's .pkl — filesystem only, no ML round-trip. Searches
+ * most-specific to least-specific (no sanitization, matching the original
+ * /erp-embedding/check, which never validated these particular inputs).
+ * Returns the path, or null if the batch has no embeddings yet.
+ *
+ * Callers that only need "does it exist / which file?" must use this rather
+ * than checkErpEmbedding: the latter's roll count costs an /erp-embedding/inspect
+ * call that base64s the entire pkl to the ML service.
  */
-async function checkErpEmbedding(batch, department) {
+function findErpPkl(batch, department) {
     const dept = department || departmentFromBatch(batch);
     const candidates = [];
     if (dept) candidates.push(pklPath(batch, dept));
@@ -112,16 +116,25 @@ async function checkErpEmbedding(batch, department) {
     candidates.push(path.join(ERP_EMB_DIR, resolveOnDisk(ERP_EMB_DIR, batch), 'embeddings_db.pkl'));
 
     for (const candidate of candidates) {
-        if (fs.existsSync(candidate)) {
-            let rollCount = 0;
-            try {
-                const rollNos = await inspectPkl(candidate);
-                rollCount = rollNos.length;
-            } catch (_) { /* best-effort, matches old try/except pass */ }
-            return { available: true, pkl_path: candidate, roll_count: rollCount };
-        }
+        if (fs.existsSync(candidate)) return candidate;
     }
-    return { available: false, pkl_path: null, roll_count: 0 };
+    return null;
+}
+
+/**
+ * Mirrors the old GET /erp-embedding/check — findErpPkl plus the roll count.
+ * Returns { available, pkl_path, roll_count } — same shape as before.
+ */
+async function checkErpEmbedding(batch, department) {
+    const pklFile = findErpPkl(batch, department);
+    if (!pklFile) return { available: false, pkl_path: null, roll_count: 0 };
+
+    let rollCount = 0;
+    try {
+        const rollNos = await inspectPkl(pklFile);
+        rollCount = rollNos.length;
+    } catch (_) { /* best-effort, matches old try/except pass */ }
+    return { available: true, pkl_path: pklFile, roll_count: rollCount };
 }
 
 /**
@@ -237,6 +250,7 @@ async function deleteErpEmbedding(batch, department, rollNo) {
 }
 
 module.exports = {
+    findErpPkl,
     checkErpEmbedding,
     getErpStatus,
     syncErpEmbeddings,
