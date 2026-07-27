@@ -7,7 +7,7 @@ const JSZip      = require('jszip');
 const crypto     = require('crypto');
 const Batch      = require('../../../models/attendanceModule/batch');
 const erpSync    = require('./erpEmbeddingSyncHelper');
-const embeddingJobs = require('./erpEmbeddingJobManager');
+const embeddingJobManager = require('./erpEmbeddingJobManager');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const ERP_PHOTOS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'erp_photos');
@@ -358,7 +358,7 @@ class GroundTruthUploadController {
 
             const roll_nos = Array.from(targetFolders);
             const embeddingJob = roll_nos.length > 0
-                ? embeddingJobs.startEmbeddingJob({
+                ? embeddingJobManager.startEmbeddingJob({
                     batch,
                     department: departmentFromBatch(batch),
                     rollNos: roll_nos,
@@ -442,7 +442,7 @@ class GroundTruthUploadController {
 
             console.log(`[GT Upload] Photo uploaded: batch=${batch} rollNo=${safeRollNo} file=${targetFilename}`);
 
-            const embeddingJob = embeddingJobs.startEmbeddingJob({
+            const embeddingJob = embeddingJobManager.startEmbeddingJob({
                 batch,
                 department: departmentFromBatch(batch),
                 rollNos: [safeRollNo],
@@ -664,7 +664,7 @@ class GroundTruthUploadController {
                 }
             }
 
-            const embeddingJob = embeddingJobs.startEmbeddingJob({
+            const embeddingJob = embeddingJobManager.startEmbeddingJob({
                 batch,
                 department: departmentFromBatch(batch),
                 rollNos: roll_nos,
@@ -808,7 +808,7 @@ class GroundTruthUploadController {
 
     // ─── Get live embedding generation progress ───────────────────────
     async getSyncProgress(req, res) {
-        const job = embeddingJobs.getEmbeddingJob(req.params.jobId);
+        const job = embeddingJobManager.getEmbeddingJob(req.params.jobId);
         if (!job) {
             return res.status(404).json({ error: 'Embedding job not found or expired' });
         }
