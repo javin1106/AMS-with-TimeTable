@@ -1,11 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import getEnvironment from '../getenvironment';
 import { theme, styles, cssReset, DEGREES } from './config';
 import { useDepartments } from './useDepartments';
 
 const apiUrl      = getEnvironment();
 const UPLOAD_BASE = `${apiUrl}/attendancemodule/ground-truth-upload`;
-const EMB_API     = `${apiUrl}/attendancemodule/embeddings`;
 
 const T = theme;
 
@@ -180,6 +179,96 @@ function BatchSelector({ degree, setDegree, degrees, setDegrees, department, set
     );
 }
 
+function EmbeddingProgressPanel({ progress }) {
+    if (!progress) return null;
+
+    const active = progress.status === 'queued' || progress.status === 'running';
+    const failedRollNos = Array.isArray(progress.failedRollNos) ? progress.failedRollNos : [];
+    const tone = progress.status === 'error'
+        ? { color: T.danger, background: T.dangerDim, border: 'rgba(239,68,68,.25)' }
+        : progress.status === 'done'
+            ? { color: T.success, background: T.successDim, border: 'rgba(16,185,129,.25)' }
+            : { color: T.accent, background: T.accentDim, border: 'rgba(99,102,241,.25)' };
+
+    return (
+        <div style={{
+            marginTop: 14,
+            padding: 14,
+            borderRadius: 8,
+            background: tone.background,
+            border: `1px solid ${tone.border}`,
+            color: tone.color,
+        }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 8, fontSize: 12, fontWeight: 700 }}>
+                <span>
+                    {active
+                        ? 'Generating ERP embeddings…'
+                        : progress.status === 'done'
+                            ? 'Embedding generation complete'
+                            : 'Embedding generation failed'}
+                </span>
+                <span>{progress.processed}/{progress.total} processed ({progress.progressPercent}%)</span>
+            </div>
+
+            <div
+                role="progressbar"
+                aria-label="ERP embedding generation progress"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={progress.progressPercent}
+                style={{ height: 8, borderRadius: 99, overflow: 'hidden', background: 'rgba(15,23,42,.12)' }}
+            >
+                <div style={{
+                    width: `${progress.progressPercent}%`,
+                    height: '100%',
+                    background: tone.color,
+                    transition: 'width .25s ease',
+                }} />
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginTop: 12 }}>
+                <div><strong>{progress.total}</strong><br /><span style={{ fontSize: 10 }}>Total photos</span></div>
+                <div><strong>{progress.completed}</strong><br /><span style={{ fontSize: 10 }}>Completed</span></div>
+                <div><strong>{progress.failed}</strong><br /><span style={{ fontSize: 10 }}>Face not detected</span></div>
+            </div>
+
+            {progress.status === 'done' && (
+                <div style={{ marginTop: 10, fontSize: 11, fontWeight: 600 }}>
+                    Completion: {progress.completed}/{progress.total} embeddings ({progress.successPercent}%)
+                </div>
+            )}
+
+            {failedRollNos.length > 0 && (
+                <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${tone.border}` }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 7 }}>
+                        Replace the ERP photos for these roll numbers:
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                        {failedRollNos.map((failedRollNo) => (
+                            <span key={failedRollNo} style={{
+                                padding: '3px 8px',
+                                borderRadius: 5,
+                                background: T.surface,
+                                border: `1px solid ${T.danger}55`,
+                                color: T.danger,
+                                fontFamily: T.fontMono,
+                                fontSize: 11,
+                                fontWeight: 700,
+                            }}>
+                                {failedRollNo}
+                            </span>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {progress.error && (
+                <div style={{ marginTop: 10, fontSize: 11 }}>Error: {progress.error}</div>
+            )}
+        </div>
+    );
+}
+
 export default function GroundTruthUpload({ fixedDepartment = '' }) {
     const { departments, loading: deptLoading, error: deptError } = useDepartments();
 
@@ -225,8 +314,9 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
     const [summaryBatches,  setSummaryBatches]  = useState([]);
     const [summaryLoading,  setSummaryLoading]  = useState(false);
     const [regenning,       setRegenning]       = useState({});
-    const [zipEmbedStatus,   setZipEmbedStatus]   = useState(null); // null | 'syncing' | 'done' | 'error'
-    const [photoEmbedStatus, setPhotoEmbedStatus] = useState(null);
+    const embeddingPollTimers = useRef({});
+    const [zipEmbeddingProgress, setZipEmbeddingProgress] = useState(null);
+    const [photoEmbeddingProgress, setPhotoEmbeddingProgress] = useState(null);
 
     // ── Photo count for selected batch (shown in upload tab) ─────────
     const [batchPhotoCount, setBatchPhotoCount] = useState(null);
@@ -240,54 +330,72 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
         setTimeout(() => setToast(null), 4500);
     };
 
-    // ── Background embedding runs ─────────────────────────────────────
-    // Every endpoint that touches ERP photos queues the embedding build and
-    // responds as soon as it is queued — the build itself takes as long as the
-    // ML service needs and can fail on its own (no face in a photo, service
-    // down). Poll the job until it settles so what we tell the operator
-    // matches what actually happened on the server.
-    const waitForEmbeddings = async (batch, startedAt) => {
-        const deadline = Date.now() + 10 * 60 * 1000;
-        while (Date.now() < deadline) {
-            await new Promise(r => setTimeout(r, 3000));
-            let d;
+    useEffect(() => () => {
+        Object.values(embeddingPollTimers.current).forEach(clearTimeout);
+    }, []);
+
+    const trackEmbeddingJob = (initialJob, key, setProgress, onDone) => {
+        if (!initialJob?.jobId) {
+            const failedProgress = {
+                status: 'error',
+                total: 0,
+                processed: 0,
+                completed: 0,
+                failed: 0,
+                progressPercent: 0,
+                successPercent: 0,
+                failedRollNos: [],
+                error: 'The server did not return an embedding job',
+            };
+            setProgress(failedProgress);
+            onDone(failedProgress);
+            return;
+        }
+
+        if (embeddingPollTimers.current[key]) {
+            clearTimeout(embeddingPollTimers.current[key]);
+        }
+        setProgress(initialJob);
+
+        let consecutiveErrors = 0;
+        let latestProgress = initialJob;
+        const poll = async () => {
             try {
-                const r = await fetch(`${UPLOAD_BASE}/embedding-status/${encodeURIComponent(batch)}`,
-                                      { credentials: 'include' });
-                if (!r.ok) continue;
-                d = await r.json();
-            } catch { continue; }
+                const response = await fetch(
+                    `${UPLOAD_BASE}/sync-progress/${encodeURIComponent(initialJob.jobId)}`,
+                    { credentials: 'include' },
+                );
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'Failed to load embedding progress');
 
-            if (d.state === 'running') continue;
-            // A 'done' that predates our trigger belongs to an earlier run.
-            if (startedAt && (d.startedAt || 0) < startedAt) continue;
-            if (d.state === 'done' || d.state === 'error') {
-                return { ...d, ok: d.state === 'done' };
+                consecutiveErrors = 0;
+                latestProgress = data;
+                setProgress(data);
+
+                if (data.status === 'done' || data.status === 'error') {
+                    delete embeddingPollTimers.current[key];
+                    onDone(data);
+                    return;
+                }
+            } catch (error) {
+                consecutiveErrors += 1;
+                if (consecutiveErrors >= 3) {
+                    const failedProgress = {
+                        ...latestProgress,
+                        status: 'error',
+                        error: error.message,
+                    };
+                    setProgress(failedProgress);
+                    delete embeddingPollTimers.current[key];
+                    onDone(failedProgress);
+                    return;
+                }
             }
-        }
-        return { ok: false, timedOut: true };
-    };
 
-    const reportEmbeddingResult = (batch, result) => {
-        if (result.timedOut) {
-            showToast(`Embeddings for ${batch} are still generating — check the Summary tab shortly`, 'warning');
-        } else if (!result.ok) {
-            showToast(`Embedding generation failed: ${result.error || 'unknown error'}`, 'error');
-        } else if (result.skippedCount > 0) {
-            showToast(`Embeddings updated for ${result.processed} student(s) — ${result.skippedCount} skipped (no face detected)`, 'warning');
-        } else {
-            showToast(`Embeddings created successfully for ${result.processed} student(s).`);
-        }
-    };
+            embeddingPollTimers.current[key] = setTimeout(poll, 800);
+        };
 
-    // Rename/delete already queue their own targeted .pkl edit and hand back
-    // its job — wait on that instead of kicking off a redundant full-batch
-    // re-sync, and only speak up if it actually went wrong.
-    const followEmbedJob = async (batch, startedAt) => {
-        if (!startedAt) return;
-        const result = await waitForEmbeddings(batch, startedAt);
-        if (!result.ok) reportEmbeddingResult(batch, result);
-        setSummaryVersion(v => v + 1);
+        embeddingPollTimers.current[key] = setTimeout(poll, 300);
     };
 
     // Fetch Degrees
@@ -375,6 +483,7 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
         setZipReplaceConfirm(false);
         setZipUploading(true);
         setZipResult(null);
+        setZipEmbeddingProgress(null);
         const formData = new FormData();
         formData.append('zipFile', zipFile);
 
@@ -391,21 +500,31 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
             showToast(`Extracted ${data.extractedImages} photos for ${data.extractedFolders} students!`);
             setZipFile(null);
 
+            if (data.embeddingJob) {
+                trackEmbeddingJob(
+                    data.embeddingJob,
+                    'zip',
+                    setZipEmbeddingProgress,
+                    (job) => {
+                        if (job.status === 'done') {
+                            showToast(
+                                `Embeddings complete: ${job.completed}/${job.total}`
+                                + (job.failed ? ` — ${job.failed} face${job.failed === 1 ? '' : 's'} not detected` : ''),
+                                job.failed ? 'warning' : 'success',
+                            );
+                            setSummaryVersion(v => v + 1);
+                        } else {
+                            showToast(job.error || 'Embedding generation failed', 'error');
+                        }
+                    },
+                );
+            }
+
             if (batchPhotoCount > 0) {
                 setBatchPhotoCount(data.extractedFolders || 0); // Replaced
             } else {
                 setBatchPhotoCount(c => (c ?? 0) + (data.extractedFolders || 0));
             }
-            setZipUploading(false);
-
-            // Upload already queued the embedding build — wait for it rather
-            // than firing a second, redundant sync-all and guessing.
-            setZipEmbedStatus('syncing');
-            const result = await waitForEmbeddings(batchName, data.embeddingJobStartedAt);
-            setZipEmbedStatus(result.ok ? 'done' : 'error');
-            reportEmbeddingResult(batchName, result);
-            setSummaryVersion(v => v + 1);
-            if (result.ok) setTimeout(() => setZipEmbedStatus(null), 5000);
 
         } catch (err) {
             showToast(err.message, 'error');
@@ -420,6 +539,7 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
         if (!studentPhoto)  { showToast('Please select a photo', 'error'); return; }
 
         setPhotoUploading(true);
+        setPhotoEmbeddingProgress(null);
         const formData = new FormData();
         formData.append('photo', studentPhoto);
 
@@ -434,17 +554,29 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
             showToast(`Photo uploaded for ${data.rollNo}`);
             setStudentPhoto(null);
             setRollNo('');
-            setBatchPhotoCount(c => (c ?? 0) + 1);
-            setPhotoUploading(false);
 
-            // Upload already queued the embedding build — wait for it rather
-            // than firing a second, redundant sync-all and guessing.
-            setPhotoEmbedStatus('syncing');
-            const result = await waitForEmbeddings(batchName, data.embeddingJobStartedAt);
-            setPhotoEmbedStatus(result.ok ? 'done' : 'error');
-            reportEmbeddingResult(batchName, result);
-            setSummaryVersion(v => v + 1);
-            if (result.ok) setTimeout(() => setPhotoEmbedStatus(null), 5000);
+            if (data.embeddingJob) {
+                trackEmbeddingJob(
+                    data.embeddingJob,
+                    'photo',
+                    setPhotoEmbeddingProgress,
+                    (job) => {
+                        if (job.status === 'done') {
+                            showToast(
+                                job.failed
+                                    ? `No face detected for ${job.failedRollNos.join(', ')}`
+                                    : `Embedding created for ${data.rollNo}`,
+                                job.failed ? 'warning' : 'success',
+                            );
+                            setSummaryVersion(v => v + 1);
+                        } else {
+                            showToast(job.error || 'Embedding generation failed', 'error');
+                        }
+                    },
+                );
+            }
+
+            setBatchPhotoCount(c => (c ?? 0) + 1);
 
         } catch (err) {
             showToast(err.message, 'error');
@@ -470,7 +602,7 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
             setPhotos(prev => prev.map(p => p.rollNo === editingRoll ? { ...p, rollNo: data.newRollNo } : p));
             setEditingRoll(null);
             setEditValue('');
-            followEmbedJob(batchName, data.embeddingJobStartedAt);
+            setSummaryVersion(v => v + 1);
         } catch (err) {
             showToast(err.message, 'error');
         } finally {
@@ -490,7 +622,7 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
             if (!res.ok) throw new Error(data.error || 'Delete failed');
             showToast(`Deleted ${pendingDelete.rollNo}`);
             setPhotos(prev => prev.filter(p => p.rollNo !== pendingDelete.rollNo));
-            followEmbedJob(batchName, data.embeddingJobStartedAt);
+            setSummaryVersion(v => v + 1);
             setPendingDelete(null);
         } catch (err) {
             showToast(err.message, 'error');
@@ -534,26 +666,31 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
     const handleRegen = async (batch) => {
         setRegenning(r => ({ ...r, [batch]: true }));
         try {
-            const r = await fetch(`${UPLOAD_BASE}/sync-all/${encodeURIComponent(batch)}`, {
+            const response = await fetch(`${UPLOAD_BASE}/sync-all/${encodeURIComponent(batch)}`, {
                 method: 'POST', credentials: 'include',
             });
-            if (!r.ok) throw new Error('Sync trigger failed');
-            const { embeddingJobStartedAt } = await r.json();
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || 'Sync trigger failed');
             showToast(`Generating embeddings for ${batch}…`);
 
-            // Wait on the job, not on "does a .pkl exist" — on a regeneration
-            // the file is already there, so the old existence poll reported
-            // success on its first tick without any work having happened.
-            const result = await waitForEmbeddings(batch, embeddingJobStartedAt);
-            if (result.ok) {
-                // Update the row in-place so the pill flips to green
-                setSummaryBatches(prev => prev.map(b =>
-                    b.batch === batch
-                        ? { ...b, hasEmbedding: result.available, embeddingUpdatedAt: result.updatedAt }
-                        : b
-                ));
-            }
-            reportEmbeddingResult(batch, result);
+            trackEmbeddingJob(
+                data.embeddingJob,
+                `regen:${batch}`,
+                () => {},
+                (job) => {
+                    setRegenning(prev => { const next = { ...prev }; delete next[batch]; return next; });
+                    if (job.status === 'done') {
+                        setSummaryVersion(v => v + 1);
+                        showToast(
+                            `Embeddings complete for ${batch}: ${job.completed}/${job.total}`
+                            + (job.failed ? ` — ${job.failed} face${job.failed === 1 ? '' : 's'} not detected` : ''),
+                            job.failed ? 'warning' : 'success',
+                        );
+                    } else {
+                        showToast(job.error || 'Embedding generation failed', 'error');
+                    }
+                },
+            );
         } catch (e) {
             showToast(e.message, 'error');
         } finally {
@@ -621,7 +758,7 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
                                 >
                                     {zipUploading ? 'Extracting ZIP…' : 'Upload & Extract ZIP'}
                                 </button>
-                                <EmbedStatusBanner status={zipEmbedStatus} batchName={batchName} />
+                                <EmbeddingProgressPanel progress={zipEmbeddingProgress} />
 
                                 {zipResult && (
                                     <div style={{ marginTop: 14, padding: '10px 14px', background: T.successDim, borderRadius: 7, border: `1px solid rgba(16,185,129,.25)`, fontSize: 13, color: T.success, fontWeight: 600 }}>
@@ -670,7 +807,7 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
                                 >
                                     {photoUploading ? 'Uploading…' : 'Upload Photo'}
                                 </button>
-                                <EmbedStatusBanner status={photoEmbedStatus} batchName={batchName} />
+                                <EmbeddingProgressPanel progress={photoEmbeddingProgress} />
                             </div>
                         </div>
                     </div>
@@ -739,7 +876,7 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
                                 );
                                 if (filtered.length === 0) return (
                                     <div style={{ padding: '40px 20px', textAlign: 'center', color: T.textMuted, fontSize: 13 }}>
-                                        No results for "<strong>{searchQuery}</strong>"
+                                        No results for &quot;<strong>{searchQuery}</strong>&quot;
                                     </div>
                                 );
                                 return (

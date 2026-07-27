@@ -7,6 +7,7 @@ const JSZip      = require('jszip');
 const crypto     = require('crypto');
 const Batch      = require('../../../models/attendanceModule/batch');
 const erpSync    = require('./erpEmbeddingSyncHelper');
+const embeddingJobManager = require('./erpEmbeddingJobManager');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const ERP_PHOTOS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'erp_photos');
@@ -157,6 +158,15 @@ function enqueueEmbeddingWork(batch, label, work) {
     });
 
     return job;
+}
+
+function departmentFromBatch(batch) {
+    const parts = String(batch || '').split('_');
+    return parts.length >= 3 ? parts.slice(1, -1).join('_') : 'UNKNOWN_DEPT';
+}
+
+function normalizeDepartment(value) {
+    return String(value || '').trim().replace(/[\s_-]+/g, '').toUpperCase();
 }
 
 // ─── Trigger Async Background Sync ────────────────────────────────────────────
@@ -346,17 +356,21 @@ class GroundTruthUploadController {
 
             console.log(`[GT Upload] ZIP processed for batch=${batch}: ${extractedImagesCount} images, ${targetFolders.size} students`);
 
-            // Queue before responding — queueing is synchronous, the work still
-            // runs in the background — so the client gets the job handle it
-            // needs to wait for the real outcome.
-            const job = queueEmbeddingSync(batch, Array.from(targetFolders));
+            const roll_nos = Array.from(targetFolders);
+            const embeddingJob = roll_nos.length > 0
+                ? embeddingJobManager.startEmbeddingJob({
+                    batch,
+                    department: departmentFromBatch(batch),
+                    rollNos: roll_nos,
+                })
+                : null;
 
             res.json({
                 message: 'ZIP extraction complete',
                 extractedFolders: targetFolders.size,
                 extractedImages: extractedImagesCount,
-                embeddingJobStartedAt: job.startedAt,
-                errors: errors.length ? errors : undefined
+                errors: errors.length ? errors : undefined,
+                embeddingJob,
             });
 
         } catch (err) {
@@ -428,16 +442,17 @@ class GroundTruthUploadController {
 
             console.log(`[GT Upload] Photo uploaded: batch=${batch} rollNo=${safeRollNo} file=${targetFilename}`);
 
-            const job = triggerEmbeddingSync('sync', {
-                batch: batch,
-                roll_nos: [safeRollNo]
+            const embeddingJob = embeddingJobManager.startEmbeddingJob({
+                batch,
+                department: departmentFromBatch(batch),
+                rollNos: [safeRollNo],
             });
 
             res.json({
                 message: 'Photo uploaded successfully',
                 rollNo: safeRollNo,
                 imagesAdded: 1,
-                embeddingJobStartedAt: job.startedAt
+                embeddingJob,
             });
 
         } catch (err) {
@@ -649,14 +664,16 @@ class GroundTruthUploadController {
                 }
             }
 
-            // Respond as soon as the work is queued — the run itself can take
-            // minutes. startedAt is the client's handle for polling it.
-            const job = queueEmbeddingSync(batch, roll_nos);
+            const embeddingJob = embeddingJobManager.startEmbeddingJob({
+                batch,
+                department: departmentFromBatch(batch),
+                rollNos: roll_nos,
+            });
 
-            res.json({
-                message: `Triggered sync for ${roll_nos.length} photos`,
+            res.status(202).json({
+                message: `Embedding generation queued for ${roll_nos.length} photos`,
                 photosCount: roll_nos.length,
-                embeddingJobStartedAt: job.startedAt
+                embeddingJob,
             });
 
         } catch (err) {
@@ -787,6 +804,21 @@ class GroundTruthUploadController {
             console.error('[GT Upload] status proxy error:', e.message);
             res.status(502).json({ error: 'Failed to fetch status from ML service' });
         }
+    }
+
+    // ─── Get live embedding generation progress ───────────────────────
+    async getSyncProgress(req, res) {
+        const job = embeddingJobManager.getEmbeddingJob(req.params.jobId);
+        if (!job) {
+            return res.status(404).json({ error: 'Embedding job not found or expired' });
+        }
+        if (
+            !req.attendanceFullAccess
+            && normalizeDepartment(job.department) !== normalizeDepartment(req.attendanceDepartment)
+        ) {
+            return res.status(403).json({ error: 'Embedding job access denied' });
+        }
+        return res.json(job);
     }
 }
 

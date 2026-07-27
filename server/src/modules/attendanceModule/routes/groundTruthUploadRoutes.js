@@ -131,6 +131,16 @@ router.get('/status/:batch', async (req, res) => {
     }
 });
 
+// Get live progress for a tracked embedding generation job
+router.get('/sync-progress/:jobId', async (req, res) => {
+    try {
+        await controller.getSyncProgress(req, res);
+    } catch (e) {
+        console.error('[GT Upload Route] sync-progress error:', e.message);
+        res.status(500).json({ error: 'Failed to fetch embedding progress' });
+    }
+});
+
 // Trigger sync-all
 router.post('/sync-all/:batch', async (req, res) => {
     try {
