@@ -1,11 +1,10 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import getEnvironment from '../getenvironment';
 import { theme, styles, cssReset, DEGREES } from './config';
 import { useDepartments } from './useDepartments';
 
 const apiUrl      = getEnvironment();
 const UPLOAD_BASE = `${apiUrl}/attendancemodule/ground-truth-upload`;
-const EMB_API     = `${apiUrl}/attendancemodule/embeddings`;
 
 const T = theme;
 
@@ -157,6 +156,96 @@ function BatchSelector({ degree, setDegree, degrees, setDegrees, department, set
     );
 }
 
+function EmbeddingProgressPanel({ progress }) {
+    if (!progress) return null;
+
+    const active = progress.status === 'queued' || progress.status === 'running';
+    const failedRollNos = Array.isArray(progress.failedRollNos) ? progress.failedRollNos : [];
+    const tone = progress.status === 'error'
+        ? { color: T.danger, background: T.dangerDim, border: 'rgba(239,68,68,.25)' }
+        : progress.status === 'done'
+            ? { color: T.success, background: T.successDim, border: 'rgba(16,185,129,.25)' }
+            : { color: T.accent, background: T.accentDim, border: 'rgba(99,102,241,.25)' };
+
+    return (
+        <div style={{
+            marginTop: 14,
+            padding: 14,
+            borderRadius: 8,
+            background: tone.background,
+            border: `1px solid ${tone.border}`,
+            color: tone.color,
+        }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 8, fontSize: 12, fontWeight: 700 }}>
+                <span>
+                    {active
+                        ? 'Generating ERP embeddings…'
+                        : progress.status === 'done'
+                            ? 'Embedding generation complete'
+                            : 'Embedding generation failed'}
+                </span>
+                <span>{progress.processed}/{progress.total} processed ({progress.progressPercent}%)</span>
+            </div>
+
+            <div
+                role="progressbar"
+                aria-label="ERP embedding generation progress"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={progress.progressPercent}
+                style={{ height: 8, borderRadius: 99, overflow: 'hidden', background: 'rgba(15,23,42,.12)' }}
+            >
+                <div style={{
+                    width: `${progress.progressPercent}%`,
+                    height: '100%',
+                    background: tone.color,
+                    transition: 'width .25s ease',
+                }} />
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginTop: 12 }}>
+                <div><strong>{progress.total}</strong><br /><span style={{ fontSize: 10 }}>Total photos</span></div>
+                <div><strong>{progress.completed}</strong><br /><span style={{ fontSize: 10 }}>Completed</span></div>
+                <div><strong>{progress.failed}</strong><br /><span style={{ fontSize: 10 }}>Face not detected</span></div>
+            </div>
+
+            {progress.status === 'done' && (
+                <div style={{ marginTop: 10, fontSize: 11, fontWeight: 600 }}>
+                    Completion: {progress.completed}/{progress.total} embeddings ({progress.successPercent}%)
+                </div>
+            )}
+
+            {failedRollNos.length > 0 && (
+                <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${tone.border}` }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 7 }}>
+                        Replace the ERP photos for these roll numbers:
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                        {failedRollNos.map((failedRollNo) => (
+                            <span key={failedRollNo} style={{
+                                padding: '3px 8px',
+                                borderRadius: 5,
+                                background: T.surface,
+                                border: `1px solid ${T.danger}55`,
+                                color: T.danger,
+                                fontFamily: T.fontMono,
+                                fontSize: 11,
+                                fontWeight: 700,
+                            }}>
+                                {failedRollNo}
+                            </span>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {progress.error && (
+                <div style={{ marginTop: 10, fontSize: 11 }}>Error: {progress.error}</div>
+            )}
+        </div>
+    );
+}
+
 export default function GroundTruthUpload({ fixedDepartment = '' }) {
     const { departments, loading: deptLoading, error: deptError } = useDepartments();
 
@@ -200,15 +289,13 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
     const [summaryBatches,  setSummaryBatches]  = useState([]);
     const [summaryLoading,  setSummaryLoading]  = useState(false);
     const [regenning,       setRegenning]       = useState({});
-    const [zipEmbedStatus,   setZipEmbedStatus]   = useState(null); // null | 'syncing' | 'done' | 'error'
-    const [photoEmbedStatus, setPhotoEmbedStatus] = useState(null);
-    const regenTimers = useRef({});   // polling timers by batch
+    const embeddingPollTimers = useRef({});
+    const [zipEmbeddingProgress, setZipEmbeddingProgress] = useState(null);
+    const [photoEmbeddingProgress, setPhotoEmbeddingProgress] = useState(null);
 
     // ── Photo count for selected batch (shown in upload tab) ─────────
     const [batchPhotoCount, setBatchPhotoCount] = useState(null);
 
-    // ── Embedding generation status after upload ───────────────────────
-    const [embGenStatus, setEmbGenStatus] = useState(null); // null | 'generating' | 'done' | 'error'
     const [summaryVersion, setSummaryVersion] = useState(0); // bump to force summary refresh
 
     // ── Toast ─────────────────────────────────────────────────────────
@@ -218,13 +305,73 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
         setTimeout(() => setToast(null), 4500);
     };
 
-    // Fire-and-forget: regenerate ERP embeddings for a batch after any photo change
-    const triggerEmbedSync = useCallback((batch) => {
-        fetch(`${UPLOAD_BASE}/sync-all/${encodeURIComponent(batch)}`, {
-            method: 'POST',
-            credentials: 'include',
-        }).catch(() => {});
+    useEffect(() => () => {
+        Object.values(embeddingPollTimers.current).forEach(clearTimeout);
     }, []);
+
+    const trackEmbeddingJob = (initialJob, key, setProgress, onDone) => {
+        if (!initialJob?.jobId) {
+            const failedProgress = {
+                status: 'error',
+                total: 0,
+                processed: 0,
+                completed: 0,
+                failed: 0,
+                progressPercent: 0,
+                successPercent: 0,
+                failedRollNos: [],
+                error: 'The server did not return an embedding job',
+            };
+            setProgress(failedProgress);
+            onDone(failedProgress);
+            return;
+        }
+
+        if (embeddingPollTimers.current[key]) {
+            clearTimeout(embeddingPollTimers.current[key]);
+        }
+        setProgress(initialJob);
+
+        let consecutiveErrors = 0;
+        let latestProgress = initialJob;
+        const poll = async () => {
+            try {
+                const response = await fetch(
+                    `${UPLOAD_BASE}/sync-progress/${encodeURIComponent(initialJob.jobId)}`,
+                    { credentials: 'include' },
+                );
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || 'Failed to load embedding progress');
+
+                consecutiveErrors = 0;
+                latestProgress = data;
+                setProgress(data);
+
+                if (data.status === 'done' || data.status === 'error') {
+                    delete embeddingPollTimers.current[key];
+                    onDone(data);
+                    return;
+                }
+            } catch (error) {
+                consecutiveErrors += 1;
+                if (consecutiveErrors >= 3) {
+                    const failedProgress = {
+                        ...latestProgress,
+                        status: 'error',
+                        error: error.message,
+                    };
+                    setProgress(failedProgress);
+                    delete embeddingPollTimers.current[key];
+                    onDone(failedProgress);
+                    return;
+                }
+            }
+
+            embeddingPollTimers.current[key] = setTimeout(poll, 800);
+        };
+
+        embeddingPollTimers.current[key] = setTimeout(poll, 300);
+    };
 
     // Fetch Degrees
     const fetchDegrees = async () => {
@@ -295,16 +442,6 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
     }, [activeTab, summaryVersion]);
 
     // ── Upload handlers ───────────────────────────────────────────────
-    const runEmbedSync = useCallback((batch) => {
-        setEmbGenStatus('generating');
-        fetch(`${UPLOAD_BASE}/sync-all/${encodeURIComponent(batch)}`, {
-            method: 'POST',
-            credentials: 'include',
-        })
-        .then(r => setEmbGenStatus(r.ok ? 'done' : 'error'))
-        .catch(() => setEmbGenStatus('error'));
-    }, []);
-
     const handleZipUpload = async () => {
         if (!batchName) { showToast('Please select a Batch', 'error'); return; }
         if (!zipFile)   { showToast('Please select a ZIP file', 'error'); return; }
@@ -321,7 +458,7 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
         setZipReplaceConfirm(false);
         setZipUploading(true);
         setZipResult(null);
-        setEmbGenStatus(null);
+        setZipEmbeddingProgress(null);
         const formData = new FormData();
         formData.append('zipFile', zipFile);
 
@@ -337,23 +474,33 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
             setZipResult(data);
             showToast(`Extracted ${data.extractedImages} photos for ${data.extractedFolders} students!`);
             setZipFile(null);
-            
-            setZipEmbedStatus('syncing');
-            try {
-                await fetch(`${UPLOAD_BASE}/sync-all/${encodeURIComponent(batchName)}`, { method: 'POST', credentials: 'include' });
-                setZipEmbedStatus('done');
-                showToast('Embeddings created successfully.');
-                setTimeout(() => setZipEmbedStatus(null), 5000);
-            } catch {
-                setZipEmbedStatus('error');
+
+            if (data.embeddingJob) {
+                trackEmbeddingJob(
+                    data.embeddingJob,
+                    'zip',
+                    setZipEmbeddingProgress,
+                    (job) => {
+                        if (job.status === 'done') {
+                            showToast(
+                                `Embeddings complete: ${job.completed}/${job.total}`
+                                + (job.failed ? ` — ${job.failed} face${job.failed === 1 ? '' : 's'} not detected` : ''),
+                                job.failed ? 'warning' : 'success',
+                            );
+                            setSummaryVersion(v => v + 1);
+                        } else {
+                            showToast(job.error || 'Embedding generation failed', 'error');
+                        }
+                    },
+                );
             }
+
             if (batchPhotoCount > 0) {
                 setBatchPhotoCount(data.extractedFolders || 0); // Replaced
             } else {
                 setBatchPhotoCount(c => (c ?? 0) + (data.extractedFolders || 0));
             }
-            setTimeout(() => setSummaryVersion(v => v + 1), 6000);
-            
+
         } catch (err) {
             showToast(err.message, 'error');
         } finally {
@@ -367,7 +514,7 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
         if (!studentPhoto)  { showToast('Please select a photo', 'error'); return; }
 
         setPhotoUploading(true);
-        setEmbGenStatus(null);
+        setPhotoEmbeddingProgress(null);
         const formData = new FormData();
         formData.append('photo', studentPhoto);
 
@@ -381,21 +528,31 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
             if (!res.ok) throw new Error(data.error || 'Upload failed');
             showToast(`Photo uploaded for ${data.rollNo}`);
             setStudentPhoto(null);
-            
-setRollNo('');
-setPhotoEmbedStatus('syncing');
-try {
-    await fetch(`${UPLOAD_BASE}/sync-all/${encodeURIComponent(batchName)}`, { method: 'POST', credentials: 'include' });
-    setPhotoEmbedStatus('done');
-    showToast('Embeddings created successfully.');
-    setTimeout(() => setPhotoEmbedStatus(null), 5000);
-} catch {
-    setPhotoEmbedStatus('error');
-}
-            
+            setRollNo('');
+
+            if (data.embeddingJob) {
+                trackEmbeddingJob(
+                    data.embeddingJob,
+                    'photo',
+                    setPhotoEmbeddingProgress,
+                    (job) => {
+                        if (job.status === 'done') {
+                            showToast(
+                                job.failed
+                                    ? `No face detected for ${job.failedRollNos.join(', ')}`
+                                    : `Embedding created for ${data.rollNo}`,
+                                job.failed ? 'warning' : 'success',
+                            );
+                            setSummaryVersion(v => v + 1);
+                        } else {
+                            showToast(job.error || 'Embedding generation failed', 'error');
+                        }
+                    },
+                );
+            }
+
             setBatchPhotoCount(c => (c ?? 0) + 1);
-            setTimeout(() => setSummaryVersion(v => v + 1), 6000);
-            
+
         } catch (err) {
             showToast(err.message, 'error');
         } finally {
@@ -420,8 +577,7 @@ try {
             setPhotos(prev => prev.map(p => p.rollNo === editingRoll ? { ...p, rollNo: data.newRollNo } : p));
             setEditingRoll(null);
             setEditValue('');
-            triggerEmbedSync(batchName);
-             setSummaryVersion(v => v + 1);
+            setSummaryVersion(v => v + 1);
         } catch (err) {
             showToast(err.message, 'error');
         } finally {
@@ -441,7 +597,6 @@ try {
             if (!res.ok) throw new Error(data.error || 'Delete failed');
             showToast(`Deleted ${pendingDelete.rollNo}`);
             setPhotos(prev => prev.filter(p => p.rollNo !== pendingDelete.rollNo));
-            triggerEmbedSync(batchName);
             setSummaryVersion(v => v + 1);
             setPendingDelete(null);
         } catch (err) {
@@ -462,50 +617,33 @@ try {
     };
 
     const handleRegen = async (batch) => {
-        // Cancel any existing poll for this batch
-        if (regenTimers.current[batch]) {
-            clearTimeout(regenTimers.current[batch]);
-            delete regenTimers.current[batch];
-        }
         setRegenning(r => ({ ...r, [batch]: true }));
         try {
-            const r = await fetch(`${UPLOAD_BASE}/sync-all/${encodeURIComponent(batch)}`, {
+            const response = await fetch(`${UPLOAD_BASE}/sync-all/${encodeURIComponent(batch)}`, {
                 method: 'POST', credentials: 'include',
             });
-            if (!r.ok) throw new Error('Sync trigger failed');
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || 'Sync trigger failed');
             showToast(`Generating embeddings for ${batch}…`);
 
-            // Poll filesystem check every 3 s until pkl appears (max 25 attempts ≈ 75 s)
-            let attempts = 0;
-            const poll = async () => {
-                attempts++;
-                try {
-                    const sr = await fetch(`${UPLOAD_BASE}/embedding-ready/${encodeURIComponent(batch)}`, { credentials: 'include' });
-                    if (sr.ok) {
-                        const sd = await sr.json();
-                        if (sd.available) {
-                            // Update the row in-place so the pill flips to green
-                            setSummaryBatches(prev => prev.map(b =>
-                                b.batch === batch
-                                    ? { ...b, hasEmbedding: true, embeddingUpdatedAt: sd.updatedAt }
-                                    : b
-                            ));
-                            setRegenning(prev => { const n = { ...prev }; delete n[batch]; return n; });
-                            showToast(`✓ Embeddings ready for ${batch}`);
-                            delete regenTimers.current[batch];
-                            return;
-                        }
+            trackEmbeddingJob(
+                data.embeddingJob,
+                `regen:${batch}`,
+                () => {},
+                (job) => {
+                    setRegenning(prev => { const next = { ...prev }; delete next[batch]; return next; });
+                    if (job.status === 'done') {
+                        setSummaryVersion(v => v + 1);
+                        showToast(
+                            `Embeddings complete for ${batch}: ${job.completed}/${job.total}`
+                            + (job.failed ? ` — ${job.failed} face${job.failed === 1 ? '' : 's'} not detected` : ''),
+                            job.failed ? 'warning' : 'success',
+                        );
+                    } else {
+                        showToast(job.error || 'Embedding generation failed', 'error');
                     }
-                } catch (_) {}
-                if (attempts < 25) {
-                    regenTimers.current[batch] = setTimeout(poll, 3000);
-                } else {
-                    setRegenning(prev => { const n = { ...prev }; delete n[batch]; return n; });
-                    showToast('Embedding generation is taking longer than expected — check back shortly', 'warning');
-                    delete regenTimers.current[batch];
-                }
-            };
-            regenTimers.current[batch] = setTimeout(poll, 3000);
+                },
+            );
         } catch (e) {
             showToast(e.message, 'error');
             setRegenning(r => { const n = { ...r }; delete n[batch]; return n; });
@@ -572,20 +710,7 @@ try {
                                 >
                                     {zipUploading ? 'Extracting ZIP…' : 'Upload & Extract ZIP'}
                                 </button>
-                                {zipEmbedStatus === 'syncing' && (
-    <div style={{ marginTop: 12, padding: '9px 14px', background: T.accentDim,
-                  color: T.accent, borderRadius: 7, fontSize: 13, fontWeight: 600,
-                  display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ display: 'inline-block', animation: 'spin 1s linear infinite' }}>⟳</span>
-        Updating embeddings for {batchName}…
-    </div>
-)}
-{zipEmbedStatus === 'error' && (
-    <div style={{ marginTop: 12, padding: '9px 14px', background: T.dangerDim,
-                  color: T.danger, borderRadius: 7, fontSize: 13, fontWeight: 600 }}>
-        ✗ Embedding sync failed
-    </div>
-)}
+                                <EmbeddingProgressPanel progress={zipEmbeddingProgress} />
 
                                 {zipResult && (
                                     <div style={{ marginTop: 14, padding: '10px 14px', background: T.successDim, borderRadius: 7, border: `1px solid rgba(16,185,129,.25)`, fontSize: 13, color: T.success, fontWeight: 600 }}>
@@ -634,20 +759,7 @@ try {
                                 >
                                     {photoUploading ? 'Uploading…' : 'Upload Photo'}
                                 </button>
-                                {photoEmbedStatus === 'syncing' && (
-    <div style={{ marginTop: 12, padding: '9px 14px', background: T.accentDim,
-                  color: T.accent, borderRadius: 7, fontSize: 13, fontWeight: 600,
-                  display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ display: 'inline-block', animation: 'spin 1s linear infinite' }}>⟳</span>
-        Updating embeddings for {batchName}…
-    </div>
-)}
-{photoEmbedStatus === 'error' && (
-    <div style={{ marginTop: 12, padding: '9px 14px', background: T.dangerDim,
-                  color: T.danger, borderRadius: 7, fontSize: 13, fontWeight: 600 }}>
-        ✗ Embedding sync failed
-    </div>
-)}
+                                <EmbeddingProgressPanel progress={photoEmbeddingProgress} />
                             </div>
                         </div>
                     </div>
@@ -702,7 +814,7 @@ try {
                                 );
                                 if (filtered.length === 0) return (
                                     <div style={{ padding: '40px 20px', textAlign: 'center', color: T.textMuted, fontSize: 13 }}>
-                                        No results for "<strong>{searchQuery}</strong>"
+                                        No results for &quot;<strong>{searchQuery}</strong>&quot;
                                     </div>
                                 );
                                 return (
