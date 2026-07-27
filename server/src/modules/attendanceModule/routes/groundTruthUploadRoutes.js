@@ -115,6 +115,12 @@ router.get('/embedding-ready/:batch', async (req, res) => {
     catch (e) { res.status(500).json({ error: 'Check failed' }); }
 });
 
+// State of the background embedding run for this batch (what the UI waits on)
+router.get('/embedding-status/:batch', async (req, res) => {
+    try { await controller.embeddingStatus(req, res); }
+    catch (e) { res.status(500).json({ error: 'Status check failed' }); }
+});
+
 // Get ERP embedding sync status
 router.get('/status/:batch', async (req, res) => {
     try {

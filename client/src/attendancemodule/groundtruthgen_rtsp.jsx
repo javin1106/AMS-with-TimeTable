@@ -68,13 +68,25 @@ const FRAME_SKIP_OPTIONS = [
     { value: 5,   hint: 'Dense sampling — best for short sessions' },
     { value: 10,  hint: 'Balanced — recommended for live streams' },
     { value: 20,  hint: 'Fast, lighter on CPU' },
-    { value: 300, hint: 'Minimal CPU usage' },
+    // Preview frames are written once per *processed* frame, so the live preview
+    // refreshes at camera FPS ÷ frameSkip — at 300 that is roughly once every
+    // 10s, which reads as a frozen preview unless we say so up front.
+    { value: 300, hint: 'Minimal CPU usage — live preview refreshes only ~every 10s' },
 ];
 
 const DET_SIZE_OPTIONS = [
     { value: 320, label: 'Fast (320)',     hint: '~4× faster, good for clear footage' },
     { value: 640, label: 'Accurate (640)', hint: 'Better for small/distant faces' },
 ];
+
+// One label format for every camera, so the name shown while acquiring reads the
+// same whether the job was started in single, combined or room mode — the server
+// echoes this string back on each camera_switch.
+const camLabel = (cam, fallbackRoom = '') => {
+    const room = cam.roomId || fallbackRoom;
+    const head = [cam.cameraId, room].filter(Boolean).join(' — ');
+    return cam.position ? `${head} (${cam.position})` : head;
+};
 
 // ─── tiny status dot ─────────────────────────────────────────────────────────
 const Dot = ({ color, pulse = false }) => (
@@ -398,7 +410,7 @@ export default function GroundTruthRTSP({ fixedDepartment = '' }) {
                     .filter(camera => camera?.streamUrl)
                     .map(camera => ({
                         id: camera._id || camera.cameraId,
-                        label: `${camera.cameraId} — ${camera.roomId} (${camera.position})`,
+                        label: camLabel(camera),
                         url: camera.streamUrl,
                     }));
 
@@ -432,7 +444,7 @@ export default function GroundTruthRTSP({ fixedDepartment = '' }) {
                 const list = Array.isArray(data) ? data : [];
                 setRoomCameras(list.map(c => ({
                     id:    c._id || c.cameraId,
-                    label: `${c.roomId || selectedRoom} — ${c.position || c.cameraId}`,
+                    label: camLabel(c, selectedRoom),
                     url:   c.streamUrl,
                 })).filter(c => c.url));
             })
@@ -845,7 +857,7 @@ export default function GroundTruthRTSP({ fixedDepartment = '' }) {
                                 <span style={{ color: theme.textMuted }}>Loading cameras…</span>
                             ) : roomCameras.length > 0 ? (
                                 <span style={{ color: '#0ea5e9' }}>
-                                    <strong>{roomCameras.length}</strong> camera{roomCameras.length > 1 ? 's' : ''} routed — the server switches between them every 5 min
+                                    <strong>{roomCameras.length}</strong> camera{roomCameras.length > 1 ? 's' : ''} routed — the server switches between them automatically
                                 </span>
                             ) : (
                                 <span style={{ color: theme.danger }}>No cameras registered for room "{selectedRoom}"</span>
@@ -1066,7 +1078,7 @@ export default function GroundTruthRTSP({ fixedDepartment = '' }) {
                             {roomMode ? 'Room Mode' : 'Combined Mode'}{activeCameraLabel ? ` — ${activeCameraLabel}` : ''}
                         </div>
                         <div style={{ fontSize: '11px', color: theme.textMuted, marginTop: 2 }}>
-                            The server switches cameras every 5 min · persons are preserved across switches
+                            The server switches cameras automatically · persons are preserved across switches
                         </div>
                     </div>
                 </div>
@@ -1225,9 +1237,9 @@ export default function GroundTruthRTSP({ fixedDepartment = '' }) {
                         <br />
                         Acquisition runs on the server for up to 60 min and continues if you close this tab
                         <br />
-                        <span style={{ color: '#0ea5e9' }}>🏫 Room mode</span> auto-switches between all cameras in the room every 5 min
+                        <span style={{ color: '#0ea5e9' }}>🏫 Room mode</span> switches between all cameras in the room automatically
                         <br />
-                        <span style={{ color: '#f0c040' }}>🔄 Combined</span> alternates the first two cameras every 5 min
+                        <span style={{ color: '#f0c040' }}>🔄 Combined</span> alternates the first two cameras automatically
                     </div>
                 </div>
             )}

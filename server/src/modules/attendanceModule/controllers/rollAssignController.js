@@ -885,8 +885,7 @@ class RollAssignController {
     async erpEmbeddingStatus(req, res) {
         try {
             const { batch }  = req.params;
-            const parts      = batch.split('_');
-            const department = parts.slice(1, -1).join('_');
+            const department = erpSync.departmentFromBatch(batch);
 
             let pkgCheck = { available: false };
             try {
@@ -894,7 +893,7 @@ class RollAssignController {
             } catch (_) {}
 
             // Count ERP photos as proxy for student count when ML doesn't provide it
-            const batchPhotoDir = path.join(ERP_PHOTOS_DIR, batch);
+            const batchPhotoDir = erpSync.erpPhotoDir(batch);
             let studentCount = pkgCheck.student_count || pkgCheck.num_students || pkgCheck.count || 0;
             if (!studentCount && fs.existsSync(batchPhotoDir)) {
                 try {
@@ -922,11 +921,10 @@ class RollAssignController {
                 return res.status(404).json({ error: 'Batch not found' });
             }
 
-            const parts      = batch.split('_');
-            const department = parts.slice(1, -1).join('_');
+            const department = erpSync.departmentFromBatch(batch);
 
             const ERP_PHOTOS_BASE = ERP_PHOTOS_DIR;
-            const batchPhotoDir   = path.join(ERP_PHOTOS_BASE, batch);
+            const batchPhotoDir   = erpSync.erpPhotoDir(batch);
             const erpPhotosDir    = fs.existsSync(batchPhotoDir) ? batchPhotoDir : ERP_PHOTOS_BASE;
 
             // ── Check for pre-built pkl ───────────────────────────────────

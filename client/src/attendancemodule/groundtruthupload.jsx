@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import getEnvironment from '../getenvironment';
 import { theme, styles, cssReset, DEGREES } from './config';
 import { useDepartments } from './useDepartments';
@@ -96,6 +96,29 @@ const CSS = `
     .ams-tabs { overflow-x: auto; }
   }
 `;
+
+// ── Embedding-run banner ─────────────────────────────────────────────────────
+// 'syncing' means the background build is genuinely still going — it clears
+// only once the server reports the run finished, so it is never a stand-in for
+// "we fired the request and hoped".
+function EmbedStatusBanner({ status, batchName }) {
+    if (!status) return null;
+
+    const base = { marginTop: 12, padding: '9px 14px', borderRadius: 7, fontSize: 13, fontWeight: 600 };
+    if (status === 'syncing') {
+        return (
+            <div style={{ ...base, background: T.accentDim, color: T.accent,
+                          display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ display: 'inline-block', animation: 'spin 1s linear infinite' }}>⟳</span>
+                Generating embeddings for {batchName}… this can take a few minutes
+            </div>
+        );
+    }
+    if (status === 'done') {
+        return <div style={{ ...base, background: T.successDim, color: T.success }}>✓ Embeddings generated for {batchName}</div>;
+    }
+    return <div style={{ ...base, background: T.dangerDim, color: T.danger }}>✗ Embedding generation failed — see the message above</div>;
+}
 
 // ── Shared batch selector component ──────────────────────────────────────────
 function BatchSelector({ degree, setDegree, degrees, setDegrees, department, setDepartment, batchYear, setBatchYear, departments, deptLoading, deptError, batches, batchesLoading, batchName, photoCount, fixedDepartment }) {
@@ -204,13 +227,10 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
     const [regenning,       setRegenning]       = useState({});
     const [zipEmbedStatus,   setZipEmbedStatus]   = useState(null); // null | 'syncing' | 'done' | 'error'
     const [photoEmbedStatus, setPhotoEmbedStatus] = useState(null);
-    const regenTimers = useRef({});   // polling timers by batch
 
     // ── Photo count for selected batch (shown in upload tab) ─────────
     const [batchPhotoCount, setBatchPhotoCount] = useState(null);
 
-    // ── Embedding generation status after upload ───────────────────────
-    const [embGenStatus, setEmbGenStatus] = useState(null); // null | 'generating' | 'done' | 'error'
     const [summaryVersion, setSummaryVersion] = useState(0); // bump to force summary refresh
 
     // ── Toast ─────────────────────────────────────────────────────────
@@ -220,13 +240,55 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
         setTimeout(() => setToast(null), 4500);
     };
 
-    // Fire-and-forget: regenerate ERP embeddings for a batch after any photo change
-    const triggerEmbedSync = useCallback((batch) => {
-        fetch(`${UPLOAD_BASE}/sync-all/${encodeURIComponent(batch)}`, {
-            method: 'POST',
-            credentials: 'include',
-        }).catch(() => {});
-    }, []);
+    // ── Background embedding runs ─────────────────────────────────────
+    // Every endpoint that touches ERP photos queues the embedding build and
+    // responds as soon as it is queued — the build itself takes as long as the
+    // ML service needs and can fail on its own (no face in a photo, service
+    // down). Poll the job until it settles so what we tell the operator
+    // matches what actually happened on the server.
+    const waitForEmbeddings = async (batch, startedAt) => {
+        const deadline = Date.now() + 10 * 60 * 1000;
+        while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 3000));
+            let d;
+            try {
+                const r = await fetch(`${UPLOAD_BASE}/embedding-status/${encodeURIComponent(batch)}`,
+                                      { credentials: 'include' });
+                if (!r.ok) continue;
+                d = await r.json();
+            } catch { continue; }
+
+            if (d.state === 'running') continue;
+            // A 'done' that predates our trigger belongs to an earlier run.
+            if (startedAt && (d.startedAt || 0) < startedAt) continue;
+            if (d.state === 'done' || d.state === 'error') {
+                return { ...d, ok: d.state === 'done' };
+            }
+        }
+        return { ok: false, timedOut: true };
+    };
+
+    const reportEmbeddingResult = (batch, result) => {
+        if (result.timedOut) {
+            showToast(`Embeddings for ${batch} are still generating — check the Summary tab shortly`, 'warning');
+        } else if (!result.ok) {
+            showToast(`Embedding generation failed: ${result.error || 'unknown error'}`, 'error');
+        } else if (result.skippedCount > 0) {
+            showToast(`Embeddings updated for ${result.processed} student(s) — ${result.skippedCount} skipped (no face detected)`, 'warning');
+        } else {
+            showToast(`Embeddings created successfully for ${result.processed} student(s).`);
+        }
+    };
+
+    // Rename/delete already queue their own targeted .pkl edit and hand back
+    // its job — wait on that instead of kicking off a redundant full-batch
+    // re-sync, and only speak up if it actually went wrong.
+    const followEmbedJob = async (batch, startedAt) => {
+        if (!startedAt) return;
+        const result = await waitForEmbeddings(batch, startedAt);
+        if (!result.ok) reportEmbeddingResult(batch, result);
+        setSummaryVersion(v => v + 1);
+    };
 
     // Fetch Degrees
     const fetchDegrees = async () => {
@@ -297,16 +359,6 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
     }, [activeTab, summaryVersion]);
 
     // ── Upload handlers ───────────────────────────────────────────────
-    const runEmbedSync = useCallback((batch) => {
-        setEmbGenStatus('generating');
-        fetch(`${UPLOAD_BASE}/sync-all/${encodeURIComponent(batch)}`, {
-            method: 'POST',
-            credentials: 'include',
-        })
-        .then(r => setEmbGenStatus(r.ok ? 'done' : 'error'))
-        .catch(() => setEmbGenStatus('error'));
-    }, []);
-
     const handleZipUpload = async () => {
         if (!batchName) { showToast('Please select a Batch', 'error'); return; }
         if (!zipFile)   { showToast('Please select a ZIP file', 'error'); return; }
@@ -323,7 +375,6 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
         setZipReplaceConfirm(false);
         setZipUploading(true);
         setZipResult(null);
-        setEmbGenStatus(null);
         const formData = new FormData();
         formData.append('zipFile', zipFile);
 
@@ -339,23 +390,23 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
             setZipResult(data);
             showToast(`Extracted ${data.extractedImages} photos for ${data.extractedFolders} students!`);
             setZipFile(null);
-            
-            setZipEmbedStatus('syncing');
-            try {
-                await fetch(`${UPLOAD_BASE}/sync-all/${encodeURIComponent(batchName)}`, { method: 'POST', credentials: 'include' });
-                setZipEmbedStatus('done');
-                showToast('Embeddings created successfully.');
-                setTimeout(() => setZipEmbedStatus(null), 5000);
-            } catch {
-                setZipEmbedStatus('error');
-            }
+
             if (batchPhotoCount > 0) {
                 setBatchPhotoCount(data.extractedFolders || 0); // Replaced
             } else {
                 setBatchPhotoCount(c => (c ?? 0) + (data.extractedFolders || 0));
             }
-            setTimeout(() => setSummaryVersion(v => v + 1), 6000);
-            
+            setZipUploading(false);
+
+            // Upload already queued the embedding build — wait for it rather
+            // than firing a second, redundant sync-all and guessing.
+            setZipEmbedStatus('syncing');
+            const result = await waitForEmbeddings(batchName, data.embeddingJobStartedAt);
+            setZipEmbedStatus(result.ok ? 'done' : 'error');
+            reportEmbeddingResult(batchName, result);
+            setSummaryVersion(v => v + 1);
+            if (result.ok) setTimeout(() => setZipEmbedStatus(null), 5000);
+
         } catch (err) {
             showToast(err.message, 'error');
         } finally {
@@ -369,7 +420,6 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
         if (!studentPhoto)  { showToast('Please select a photo', 'error'); return; }
 
         setPhotoUploading(true);
-        setEmbGenStatus(null);
         const formData = new FormData();
         formData.append('photo', studentPhoto);
 
@@ -383,21 +433,19 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
             if (!res.ok) throw new Error(data.error || 'Upload failed');
             showToast(`Photo uploaded for ${data.rollNo}`);
             setStudentPhoto(null);
-            
-setRollNo('');
-setPhotoEmbedStatus('syncing');
-try {
-    await fetch(`${UPLOAD_BASE}/sync-all/${encodeURIComponent(batchName)}`, { method: 'POST', credentials: 'include' });
-    setPhotoEmbedStatus('done');
-    showToast('Embeddings created successfully.');
-    setTimeout(() => setPhotoEmbedStatus(null), 5000);
-} catch {
-    setPhotoEmbedStatus('error');
-}
-            
+            setRollNo('');
             setBatchPhotoCount(c => (c ?? 0) + 1);
-            setTimeout(() => setSummaryVersion(v => v + 1), 6000);
-            
+            setPhotoUploading(false);
+
+            // Upload already queued the embedding build — wait for it rather
+            // than firing a second, redundant sync-all and guessing.
+            setPhotoEmbedStatus('syncing');
+            const result = await waitForEmbeddings(batchName, data.embeddingJobStartedAt);
+            setPhotoEmbedStatus(result.ok ? 'done' : 'error');
+            reportEmbeddingResult(batchName, result);
+            setSummaryVersion(v => v + 1);
+            if (result.ok) setTimeout(() => setPhotoEmbedStatus(null), 5000);
+
         } catch (err) {
             showToast(err.message, 'error');
         } finally {
@@ -422,8 +470,7 @@ try {
             setPhotos(prev => prev.map(p => p.rollNo === editingRoll ? { ...p, rollNo: data.newRollNo } : p));
             setEditingRoll(null);
             setEditValue('');
-            triggerEmbedSync(batchName);
-             setSummaryVersion(v => v + 1);
+            followEmbedJob(batchName, data.embeddingJobStartedAt);
         } catch (err) {
             showToast(err.message, 'error');
         } finally {
@@ -443,8 +490,7 @@ try {
             if (!res.ok) throw new Error(data.error || 'Delete failed');
             showToast(`Deleted ${pendingDelete.rollNo}`);
             setPhotos(prev => prev.filter(p => p.rollNo !== pendingDelete.rollNo));
-            triggerEmbedSync(batchName);
-            setSummaryVersion(v => v + 1);
+            followEmbedJob(batchName, data.embeddingJobStartedAt);
             setPendingDelete(null);
         } catch (err) {
             showToast(err.message, 'error');
@@ -466,8 +512,7 @@ try {
             if (!res.ok) throw new Error(data.error || 'Delete failed');
             showToast(data.message || 'All photos deleted');
             setPhotos([]);
-            triggerEmbedSync(batchName);
-            setSummaryVersion(v => v + 1);
+            followEmbedJob(batchName, data.embeddingJobStartedAt);
             setPendingDeleteAll(false);
         } catch (err) {
             showToast(err.message, 'error');
@@ -487,53 +532,32 @@ try {
     };
 
     const handleRegen = async (batch) => {
-        // Cancel any existing poll for this batch
-        if (regenTimers.current[batch]) {
-            clearTimeout(regenTimers.current[batch]);
-            delete regenTimers.current[batch];
-        }
         setRegenning(r => ({ ...r, [batch]: true }));
         try {
             const r = await fetch(`${UPLOAD_BASE}/sync-all/${encodeURIComponent(batch)}`, {
                 method: 'POST', credentials: 'include',
             });
             if (!r.ok) throw new Error('Sync trigger failed');
+            const { embeddingJobStartedAt } = await r.json();
             showToast(`Generating embeddings for ${batch}…`);
 
-            // Poll filesystem check every 3 s until pkl appears (max 25 attempts ≈ 75 s)
-            let attempts = 0;
-            const poll = async () => {
-                attempts++;
-                try {
-                    const sr = await fetch(`${UPLOAD_BASE}/embedding-ready/${encodeURIComponent(batch)}`, { credentials: 'include' });
-                    if (sr.ok) {
-                        const sd = await sr.json();
-                        if (sd.available) {
-                            // Update the row in-place so the pill flips to green
-                            setSummaryBatches(prev => prev.map(b =>
-                                b.batch === batch
-                                    ? { ...b, hasEmbedding: true, embeddingUpdatedAt: sd.updatedAt }
-                                    : b
-                            ));
-                            setRegenning(prev => { const n = { ...prev }; delete n[batch]; return n; });
-                            showToast(`✓ Embeddings ready for ${batch}`);
-                            delete regenTimers.current[batch];
-                            return;
-                        }
-                    }
-                } catch (_) {}
-                if (attempts < 25) {
-                    regenTimers.current[batch] = setTimeout(poll, 3000);
-                } else {
-                    setRegenning(prev => { const n = { ...prev }; delete n[batch]; return n; });
-                    showToast('Embedding generation is taking longer than expected — check back shortly', 'warning');
-                    delete regenTimers.current[batch];
-                }
-            };
-            regenTimers.current[batch] = setTimeout(poll, 3000);
+            // Wait on the job, not on "does a .pkl exist" — on a regeneration
+            // the file is already there, so the old existence poll reported
+            // success on its first tick without any work having happened.
+            const result = await waitForEmbeddings(batch, embeddingJobStartedAt);
+            if (result.ok) {
+                // Update the row in-place so the pill flips to green
+                setSummaryBatches(prev => prev.map(b =>
+                    b.batch === batch
+                        ? { ...b, hasEmbedding: result.available, embeddingUpdatedAt: result.updatedAt }
+                        : b
+                ));
+            }
+            reportEmbeddingResult(batch, result);
         } catch (e) {
             showToast(e.message, 'error');
-            setRegenning(r => { const n = { ...r }; delete n[batch]; return n; });
+        } finally {
+            setRegenning(prev => { const n = { ...prev }; delete n[batch]; return n; });
         }
     };
 
@@ -597,20 +621,7 @@ try {
                                 >
                                     {zipUploading ? 'Extracting ZIP…' : 'Upload & Extract ZIP'}
                                 </button>
-                                {zipEmbedStatus === 'syncing' && (
-    <div style={{ marginTop: 12, padding: '9px 14px', background: T.accentDim,
-                  color: T.accent, borderRadius: 7, fontSize: 13, fontWeight: 600,
-                  display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ display: 'inline-block', animation: 'spin 1s linear infinite' }}>⟳</span>
-        Updating embeddings for {batchName}…
-    </div>
-)}
-{zipEmbedStatus === 'error' && (
-    <div style={{ marginTop: 12, padding: '9px 14px', background: T.dangerDim,
-                  color: T.danger, borderRadius: 7, fontSize: 13, fontWeight: 600 }}>
-        ✗ Embedding sync failed
-    </div>
-)}
+                                <EmbedStatusBanner status={zipEmbedStatus} batchName={batchName} />
 
                                 {zipResult && (
                                     <div style={{ marginTop: 14, padding: '10px 14px', background: T.successDim, borderRadius: 7, border: `1px solid rgba(16,185,129,.25)`, fontSize: 13, color: T.success, fontWeight: 600 }}>
@@ -659,20 +670,7 @@ try {
                                 >
                                     {photoUploading ? 'Uploading…' : 'Upload Photo'}
                                 </button>
-                                {photoEmbedStatus === 'syncing' && (
-    <div style={{ marginTop: 12, padding: '9px 14px', background: T.accentDim,
-                  color: T.accent, borderRadius: 7, fontSize: 13, fontWeight: 600,
-                  display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ display: 'inline-block', animation: 'spin 1s linear infinite' }}>⟳</span>
-        Updating embeddings for {batchName}…
-    </div>
-)}
-{photoEmbedStatus === 'error' && (
-    <div style={{ marginTop: 12, padding: '9px 14px', background: T.dangerDim,
-                  color: T.danger, borderRadius: 7, fontSize: 13, fontWeight: 600 }}>
-        ✗ Embedding sync failed
-    </div>
-)}
+                                <EmbedStatusBanner status={photoEmbedStatus} batchName={batchName} />
                             </div>
                         </div>
                     </div>
