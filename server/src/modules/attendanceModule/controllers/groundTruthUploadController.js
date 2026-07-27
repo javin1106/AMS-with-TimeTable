@@ -7,6 +7,7 @@ const JSZip      = require('jszip');
 const crypto     = require('crypto');
 const Batch      = require('../../../models/attendanceModule/batch');
 const erpSync    = require('./erpEmbeddingSyncHelper');
+const embeddingJobs = require('./erpEmbeddingJobManager');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const ERP_PHOTOS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'erp_photos');
@@ -95,6 +96,15 @@ function findEmbeddingPkl(batchName) {
     return null;
 }
 
+function departmentFromBatch(batch) {
+    const parts = String(batch || '').split('_');
+    return parts.length >= 3 ? parts.slice(1, -1).join('_') : 'UNKNOWN_DEPT';
+}
+
+function normalizeDepartment(value) {
+    return String(value || '').trim().replace(/[\s_-]+/g, '').toUpperCase();
+}
+
 // ─── Trigger Async Background Sync ────────────────────────────────────────────
 // The ML service is stateless — it never reads erp_photos/ or writes the
 // .pkl itself. This reads the relevant photo bytes (and the existing .pkl,
@@ -105,11 +115,7 @@ function findEmbeddingPkl(batchName) {
 async function triggerEmbeddingSync(action, payload) {
     const reqId = crypto.randomUUID();
     try {
-        let department = 'UNKNOWN_DEPT';
-        const parts = payload.batch.split('_');
-        if (parts.length >= 3) {
-            department = parts.slice(1, -1).join('_');
-        }
+        const department = departmentFromBatch(payload.batch);
 
         if (action === 'sync') {
             await erpSync.syncErpEmbeddings(payload.batch, department, payload.roll_nos || []);
@@ -264,24 +270,22 @@ class GroundTruthUploadController {
 
             console.log(`[GT Upload] ZIP processed for batch=${batch}: ${extractedImagesCount} images, ${targetFolders.size} students`);
 
+            const roll_nos = Array.from(targetFolders);
+            const embeddingJob = roll_nos.length > 0
+                ? embeddingJobs.startEmbeddingJob({
+                    batch,
+                    department: departmentFromBatch(batch),
+                    rollNos: roll_nos,
+                })
+                : null;
+
             res.json({
                 message: 'ZIP extraction complete',
                 extractedFolders: targetFolders.size,
                 extractedImages: extractedImagesCount,
-                errors: errors.length ? errors : undefined
+                errors: errors.length ? errors : undefined,
+                embeddingJob,
             });
-
-            // Trigger background sync
-            if (targetFolders.size > 0) {
-                const roll_nos = Array.from(targetFolders);
-                const chunkSize = 1000;
-                for (let i = 0; i < roll_nos.length; i += chunkSize) {
-                    triggerEmbeddingSync('sync', {
-                        batch: batch,
-                        roll_nos: roll_nos.slice(i, i + chunkSize)
-                    });
-                }
-            }
 
         } catch (err) {
             if (err.message === 'Invalid batch name' || err.message === 'Batch name is required') {
@@ -352,16 +356,17 @@ class GroundTruthUploadController {
 
             console.log(`[GT Upload] Photo uploaded: batch=${batch} rollNo=${safeRollNo} file=${targetFilename}`);
 
+            const embeddingJob = embeddingJobs.startEmbeddingJob({
+                batch,
+                department: departmentFromBatch(batch),
+                rollNos: [safeRollNo],
+            });
+
             res.json({
                 message: 'Photo uploaded successfully',
                 rollNo: safeRollNo,
-                imagesAdded: 1
-            });
-
-            // Trigger background sync
-            triggerEmbeddingSync('sync', {
-                batch: batch,
-                roll_nos: [safeRollNo]
+                imagesAdded: 1,
+                embeddingJob,
             });
 
         } catch (err) {
@@ -523,21 +528,17 @@ class GroundTruthUploadController {
                 }
             }
 
-            // Immediately respond
-            res.json({
-                message: `Triggered sync for ${roll_nos.length} photos`,
-                photosCount: roll_nos.length
+            const embeddingJob = embeddingJobs.startEmbeddingJob({
+                batch,
+                department: departmentFromBatch(batch),
+                rollNos: roll_nos,
             });
 
-            if (roll_nos.length > 0) {
-                const chunkSize = 1000;
-                for (let i = 0; i < roll_nos.length; i += chunkSize) {
-                    triggerEmbeddingSync('sync', {
-                        batch: batch,
-                        roll_nos: roll_nos.slice(i, i + chunkSize)
-                    });
-                }
-            }
+            res.status(202).json({
+                message: `Embedding generation queued for ${roll_nos.length} photos`,
+                photosCount: roll_nos.length,
+                embeddingJob,
+            });
 
         } catch (err) {
             console.error('[GT Upload] syncAll error:', err);
@@ -635,6 +636,21 @@ class GroundTruthUploadController {
             console.error('[GT Upload] status proxy error:', e.message);
             res.status(502).json({ error: 'Failed to fetch status from ML service' });
         }
+    }
+
+    // ─── Get live embedding generation progress ───────────────────────
+    async getSyncProgress(req, res) {
+        const job = embeddingJobs.getEmbeddingJob(req.params.jobId);
+        if (!job) {
+            return res.status(404).json({ error: 'Embedding job not found or expired' });
+        }
+        if (
+            !req.attendanceFullAccess
+            && normalizeDepartment(job.department) !== normalizeDepartment(req.attendanceDepartment)
+        ) {
+            return res.status(403).json({ error: 'Embedding job access denied' });
+        }
+        return res.json(job);
     }
 }
 
