@@ -217,6 +217,16 @@ mongoose
         console.log('[FrameCleanup] Development environment detected — Scheduler paused to protect local assets.');
       }
 
+      // ── Rejected Samples Cleanup Scheduler (Issue #1711) ──────
+      // Deletes liveness-rejected crops older than 7 days.
+      const { startRejectedSamplesCleanupScheduler } = require('./modules/attendanceModule/controllers/rejectedSamplesCleanupScheduler');
+      if (process.env.NODE_ENV === 'production') {
+        startRejectedSamplesCleanupScheduler();
+        console.log('[RejectedSamplesCleanup] Production 7-day retention scheduler registered successfully.');
+      } else {
+        console.log('[RejectedSamplesCleanup] Development environment detected — Scheduler paused to protect local assets.');
+      }
+
       // ── HOD Daily/Weekly Attendance Summary Scheduler ─────────
       // Actual enabled/frequency/threshold behavior is controlled from the
       // Email Notifications settings tab (NotificationSettings.dailySummaryConfig).
@@ -249,6 +259,16 @@ mongoose
       const { startErpPushRetryScheduler, startErpNightlyRetryScheduler } = require('./modules/attendanceModule/controllers/erpAttendancePushController');
       startErpPushRetryScheduler();
       startErpNightlyRetryScheduler();
+
+      // ── Scheduled Uptime Digest ───────────────────────────────
+      // Twice a day (08:30 & 13:30 IST, Mon–Fri) probes the Client,
+      // Node server public URL, ERP, and H100 ML service, and emails one
+      // consolidated Server Down digest if any are unreachable. Distinct
+      // from the edge-triggered 30s health monitor in healthRoutes.js —
+      // recipients come from the same serverDown opt-in. Probe targets are
+      // CLIENT_HEALTH_URL / SERVER_HEALTH_URL (plus ML_SERVICE_URL / ERP_API_URL).
+      const { startUptimeDigestScheduler } = require('./modules/attendanceModule/controllers/uptimeDigestScheduler');
+      startUptimeDigestScheduler();
 
     });
     server.setTimeout(600000); // 10 min — prevents Node killing long SSE connections

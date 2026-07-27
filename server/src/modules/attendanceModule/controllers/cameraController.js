@@ -2,6 +2,7 @@ const axios = require('axios');
 const net = require('net');
 const Camera = require('../../../models/attendanceModule/camera.js');
 const MasterRoom = require('../../../models/masterroom.js');
+const { spawn } = require("child_process");
 
 const ML_URL = process.env.ML_SERVICE_URL || 'http://localhost:8500';
 
@@ -44,6 +45,52 @@ function normalizeRoom(value = '') {
     return String(value).trim().replace(/[\s\-.]+/g, '').toUpperCase();
 }
 
+// Checks for online status of streams | same stuff as ffprobe command
+// Resolves true (stream ok), false (unreachable / no stream), or null when
+// ffprobe itself is not installed on this host (caller should fall back to a
+// TCP reachability check instead of reporting every camera offline).
+function probeRtsp(rtspUrl, timeoutMs = 12000) {
+    return new Promise((resolve) => {
+        const ffprobe = spawn("ffprobe", [
+            "-v", "error",
+            "-rtsp_transport", "tcp",
+            // RTSP socket I/O timeout in microseconds — without this, a dropped
+            // packet or unreachable host makes ffprobe hang far past any sane
+            // window and the outer kill timer marks an online camera offline.
+            "-timeout", "8000000",
+            "-show_entries", "stream=codec_type",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            rtspUrl,
+        ]);
+
+        let finished = false;
+
+        const timer = setTimeout(() => {
+            if (!finished) {
+                finished = true;
+                ffprobe.kill("SIGKILL");
+                resolve(false);
+            }
+        }, timeoutMs);
+
+        ffprobe.on("close", (code) => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            resolve(code === 0);
+        });
+
+        ffprobe.on("error", (err) => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            // ENOENT = ffprobe binary missing on this host, not a camera fault
+            resolve(err && err.code === 'ENOENT' ? null : false);
+        });
+    });
+}
+
+// Doesnt correctly tell if stream is running or not as only checks for a TCP connection which is open when mediamtx is running regardless of stream status
 function probeTcpReachability(host, port, timeoutMs = 1200) {
     return new Promise((resolve) => {
         if (!host || !Number.isFinite(Number(port))) {
@@ -133,11 +180,17 @@ class CameraController {
             const checkedAt = new Date().toISOString();
             const evaluated = await Promise.all(
                 cameras.map(async (camera) => {
-                    const online = await probeTcpReachability(camera.ipAddress, camera.port);
+                    let online = await probeRtsp(camera.streamUrl);
+                    if (online === null) {
+                        // ffprobe is not installed on this host — fall back to a
+                        // plain TCP reachability check rather than marking every
+                        // camera offline.
+                        online = await probeTcpReachability(camera.ipAddress, camera.port);
+                    }
                     return {
                         ...camera,
                         status: online ? 'online' : 'offline',
-                        isActive: online,
+                        isActive: Boolean(online),
                         availabilityCheckedAt: checkedAt,
                     };
                 })
@@ -151,6 +204,20 @@ class CameraController {
             }
 
             return res.json(filtered);
+        } catch (error) {
+            return sendKnownError(res, error);
+        }
+    }
+
+    async listCameraRooms(req, res) {
+        try {
+            const roomIds = await Camera.distinct('roomId');
+            const rooms = roomIds
+                .map((roomId) => String(roomId || '').trim().toUpperCase())
+                .filter(Boolean)
+                .sort((a, b) => a.localeCompare(b));
+
+            return res.json({ rooms });
         } catch (error) {
             return sendKnownError(res, error);
         }
@@ -298,6 +365,7 @@ class CameraController {
 
             return res.json({
                 status: 'ok',
+                jobId: result.data?.jobId,
                 previewCamera: {
                     id: camera._id,
                     cameraId: camera.cameraId,
@@ -332,6 +400,7 @@ class CameraController {
                 responseType: 'stream',
                 timeout: 0,
                 params: {
+                    jobId: req.query.jobId,
                     quality: req.query.quality,
                     scale: req.query.scale,
                 },
@@ -350,7 +419,12 @@ class CameraController {
 
     async stopPreview(req, res) {
         try {
-            const result = await axios.post(`${ML_URL}/stop-rtsp-stream`, {}, { timeout: 10000 });
+            const jobId = req.body?.jobId;
+            const result = await axios.post(
+                `${ML_URL}/stop-preview`,
+                jobId ? { jobId } : {},
+                { timeout: 10000 },
+            );
             return res.json(result.data);
         } catch (error) {
             return sendKnownError(res, error);
@@ -431,6 +505,25 @@ async downloadAudio(req, res) {
         return sendKnownError(res, error);
     }
 }
+
+async deleteRecording(req, res){
+    const path = require('path')
+    const safe = path.basename(req.params.filename);
+    console.log("Deleting: ", safe);
+    
+    try{
+        const response = await axios.delete(
+            `${ML_URL}/recordings/${encodeURIComponent(safe)}`,
+            {timeout : 30000}
+        )
+        return res.status(response.status).json(response.data);
+    }
+    catch(error){
+        if(error.response?.status === 404) return res.status(404).json({error: 'File not found'})
+        return sendKnownError(res, error)        
+    }
+}
+
 // ── Scheduled recording methods ────────────────────────────────────────────
 // In-memory store (survives server restart as long as the process runs;
 // for persistence across restarts you could move this to MongoDB later).

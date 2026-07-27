@@ -5,7 +5,10 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import getEnvironment from '../getenvironment';
 import NotificationSettingsTab from './NotificationSettingsTab';
 import FrameCleanupSettingsTab from './FrameCleanupSettingsTab';
+import RejectedSamplesCleanupSettingsTab from './RejectedSamplesCleanupSettingsTab';
+import OtherControlsSettingsTab from './OtherControlsSettingsTab';
 import { theme as T, cssReset } from './config';
+import BackButton from './BackButton';
 import DeptMenuConfig from './DeptMenuConfig';
 import DegreeManagement from './DegreeManagement';
 import ErpSyncSettingsTab from './ErpSyncSettingsTab';
@@ -178,10 +181,14 @@ export default function EditSessionDates() {
   const isFetching = useRef(false);
 
   // ── Tab ───────────────────────────────────────────────────────────────────
-  const initialTab = ['session', 'batch', 'notifications', 'deptMenu', 'degree', 'erpControls', 'frameCleanup'].includes(
-    searchParams.get('tab'),
+  // Frame cleanup now lives inside the "Other Controls" tab, but keep old
+  // ?tab=frameCleanup deep links working by mapping them across.
+  const requestedTab =
+    searchParams.get('tab') === 'frameCleanup' ? 'otherControls' : searchParams.get('tab');
+  const initialTab = ['session', 'batch', 'notifications', 'deptMenu', 'degree', 'erpControls', 'otherControls'].includes(
+    requestedTab,
   )
-    ? searchParams.get('tab')
+    ? requestedTab
     : 'session';
   const [activeTab, setActiveTab] = useState(initialTab);
 
@@ -841,12 +848,13 @@ export default function EditSessionDates() {
                 color: T.text,
               }}
             >
-              iams-master-settings
+              ileed-master-settings
             </div>
             <div style={{ fontSize: 12, color: T.textMuted }}>
               Configure session dates, non-working days, and batch identifiers
             </div>
           </div>
+          <BackButton />
         </div>
 
         {/* Tabs */}
@@ -888,10 +896,10 @@ export default function EditSessionDates() {
             ERP Controls
           </button>
           <button
-            className={`ams-tab${activeTab === 'frameCleanup' ? ' active' : ''}`}
-            onClick={() => setActiveTab('frameCleanup')}
+            className={`ams-tab${activeTab === 'otherControls' ? ' active' : ''}`}
+            onClick={() => setActiveTab('otherControls')}
           >
-            Frame Cleanup
+            Other Controls
           </button>
         </div>
 
@@ -1696,7 +1704,37 @@ export default function EditSessionDates() {
             <ErpPushSettingsTab />
           </div>
         )}
-        {activeTab === 'frameCleanup' && <FrameCleanupSettingsTab />}
+        {activeTab === 'otherControls' && (
+          <div>
+            <OtherControlsSettingsTab />
+            <div
+              style={{
+                fontSize: 14,
+                fontWeight: 700,
+                color: T.text,
+                margin: '4px 0 16px',
+                paddingTop: 16,
+                borderTop: `1px solid ${T.border}`,
+              }}
+            >
+              Frame Cleanup
+            </div>
+            <FrameCleanupSettingsTab />
+            <div
+              style={{
+                fontSize: 14,
+                fontWeight: 700,
+                color: T.text,
+                margin: '4px 0 16px',
+                paddingTop: 16,
+                borderTop: `1px solid ${T.border}`,
+              }}
+            >
+              Rejected Samples Cleanup
+            </div>
+            <RejectedSamplesCleanupSettingsTab />
+          </div>
+        )}
       </div>
 
       {/* ── Holiday delete confirmation modal ── */}

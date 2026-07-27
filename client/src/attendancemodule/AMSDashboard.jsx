@@ -9,6 +9,7 @@ import {
 import getEnvironment from '../getenvironment';
 import HealthDashboard from './HealthDashboard';
 import DashboardProgress from './DashboardProgress';
+import ILeed, { ILEED_FULL_FORM } from './BrandName';
 import PendingActionsCard from './PendingActionsCard';
 import DeptOverridesChart from './DeptOverridesChart';
 import { MLDataFolder } from './MLDataFolder';
@@ -528,7 +529,10 @@ export default function AMSDashboard() {
             {/* Row 1: title + status chips + icon buttons */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
               <div style={{ fontWeight: 700, fontSize: 'clamp(17px,2.5vw,22px)', letterSpacing: '-0.03em', color: T.text }}>
-                Attendance Management
+                Welcome to <ILeed />
+                <span style={{ fontWeight: 500, fontSize: '0.62em', letterSpacing: '0', color: T.textMuted, marginLeft: 10 }}>
+                  — {ILEED_FULL_FORM}
+                </span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 {/* Acquisition status chip */}
@@ -601,12 +605,18 @@ export default function AMSDashboard() {
                     <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
                   </svg>
                 </IconNavButton>
+                <IconNavButton title="Dept Admins" onClick={() => navigate('/attendance/dept-admins')}>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={T.textMuted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                    <circle cx="12" cy="7" r="4" />
+                  </svg>
+                </IconNavButton>
               </div>
             </div>
             {/* Row 2: subtitle + badge buttons */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
               <div style={{ fontSize: 12, color: T.textMuted }}>
-                {userRoles.length > 0 ? userRoles.join(' · ') : 'Attendance Management System'}
+                {userRoles.length > 0 ? userRoles.join(' · ') : ''}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <HealthDashboard />

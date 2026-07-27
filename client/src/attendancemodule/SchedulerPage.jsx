@@ -6,11 +6,12 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { theme, styles, cssReset } from './config';
+import BackButton from './BackButton';
 import getEnvironment from '../getenvironment';
 
 const apiUrl = getEnvironment();
-const AC_API = `${apiUrl}/attendancemodule/acquisitioncontrol`;
-const CAMERA_API = `${apiUrl}/attendancemodule/cameras`;
+export const AC_API = `${apiUrl}/attendancemodule/acquisitioncontrol`;
+export const CAMERA_API = `${apiUrl}/attendancemodule/cameras`;
 const SUBJECT_API = `${apiUrl}/timetablemodule/subject`;
 const FACULTY_API = `${apiUrl}/timetablemodule/faculty`;
 
@@ -27,7 +28,7 @@ const PERIOD_KEYS = [
   'lunch2',
 ];
 
-const SLOT_LABELS = {
+export const SLOT_LABELS = {
   period1: 'Period 1 — 08:30–09:20',
   period2: 'Period 2 — 09:20–10:10',
   period3: 'Period 3 — 10:10–11:00',
@@ -70,7 +71,7 @@ function Label({ children }) {
   return <div style={styles.label}>{children}</div>;
 }
 
-function Toast({ toast }) {
+export function Toast({ toast }) {
   if (!toast) return null;
   const isErr = toast.type === 'error';
   const isWarn = toast.type === 'warning';
@@ -125,7 +126,7 @@ function Toast({ toast }) {
   );
 }
 
-function SectionHead({ title, sub, color }) {
+export function SectionHead({ title, sub, color }) {
   return (
     <div style={{ marginBottom: 18 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -207,7 +208,7 @@ function Toggle({ value, onChange, label }) {
 // silently overwritten — user must pick "Change Room" or explicitly "Replace",
 // used when a faculty is exchanging/covering a class). isRegular=false → slot
 // holds another EXTRA class already (simple Cancel/Replace).
-function ConflictModal({
+export function ConflictModal({
   open,
   message,
   isRegular,
@@ -335,7 +336,7 @@ function ConflictModal({
 }
 
 // Themed replacement for window.confirm() on delete.
-function ConfirmModal({
+export function ConfirmModal({
   open,
   title,
   message,
@@ -727,7 +728,7 @@ const EMPTY_EXTRA = {
 };
 
 //extra class tab
-function ExtraClassForm({ onAdd, allRooms }) {
+export function ExtraClassForm({ onAdd, allRooms }) {
   const [form, setForm] = useState({ ...EMPTY_EXTRA });
   const [saving, setSaving] = useState(false);
   const [semesters, setSemesters] = useState([]);
@@ -940,7 +941,7 @@ const EMPTY_ALTER = {
   faculty: '',
 };
 
-function AlterClassForm({ onAdd }) {
+export function AlterClassForm({ onAdd }) {
   const [form, setForm] = useState({ ...EMPTY_ALTER });
   const [semesters, setSemesters] = useState([]);
   const [allSubjects, setAllSubjects] = useState([]);
@@ -1162,23 +1163,11 @@ export default function SchedulerPage() {
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
   const [cameraRooms, setCameraRooms] = useState([]);
-  const [allRooms, setAllRooms] = useState([]);
   const [tab, setTab] = useState('settings');
-  const [confirmDialog, setConfirmDialog] = useState(null); // conflict modal state
-  const [deleteTarget, setDeleteTarget] = useState(null); // extra class id pending deletion
 
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 4000);
-  };
-
-  // Promise-based replacement for window.confirm(); resolves 'cancel' | 'changeRoom' | 'replace'.
-  const askConfirm = (message, isRegular) =>
-    new Promise((resolve) => setConfirmDialog({ message, isRegular, resolve }));
-
-  const closeConfirm = (choice) => {
-    confirmDialog?.resolve(choice);
-    setConfirmDialog(null);
   };
 
   // ── Config ──────────────────────────────────────────────────────────────────
@@ -1211,11 +1200,9 @@ export default function SchedulerPage() {
             ),
           })),
         );
-        setAllRooms(distinct);
       })
       .catch(() => {
         setCameraRooms([]);
-        setAllRooms([]);
       });
   }, []);
 
@@ -1269,113 +1256,6 @@ export default function SchedulerPage() {
     showToast(`${form.room} saved`);
   };
 
-  const postExtraClass = (body) =>
-    fetch(`${AC_API}/extra-class`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-
-  // Returns { success } | { changeRoom } so ExtraClassForm knows how much to reset.
-  const addExtraClass = async (form) => {
-    let res = await postExtraClass(form);
-    let data = await res.json();
-
-    if (res.status === 409 && data.conflict) {
-      const isRegular = data.type === 'regular_timetable';
-      const choice = await askConfirm(
-        data.message || 'This slot is already booked.',
-        isRegular,
-      );
-
-      if (choice === 'cancel') {
-        showToast('Extra class not added — slot left unchanged', 'error');
-        return { success: false };
-      }
-      if (choice === 'changeRoom') {
-        showToast(
-          'Pick a different room for this class — the regular class stays untouched',
-          'warning',
-        );
-        return { changeRoom: true };
-      }
-      // choice === 'replace' — only path that can displace a regular class.
-      // Backend must swap attendance records to the new subject/faculty on this flag.
-      res = await postExtraClass({ ...form, confirm: true });
-      data = await res.json();
-    }
-
-    if (data.error) {
-      showToast(data.error, 'error');
-      return { success: false };
-    }
-    setConfig((p) => ({ ...p, extraClasses: data }));
-    const replaced = data.find?.((ec) => ec.replacedRegular);
-    showToast(
-      replaced
-        ? `Extra class added for "${form.subject}" — this replaced the regular timetable slot in ${form.room}`
-        : `Extra class added for "${form.subject}" in ${form.room}`,
-      replaced ? 'warning' : 'success',
-    );
-    return { success: true };
-  };
-
-  const postAlteration = (body) =>
-    fetch(`${AC_API}/alteration`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-
-  const addAlteration = async (form) => {
-    let res = await postAlteration(form);
-    let data = await res.json();
-
-    if (res.status === 409 && data.conflict) {
-      if (
-        data.type === 'faculty_regular_busy' ||
-        data.type === 'faculty_already_altered'
-      ) {
-        showToast(data.message, 'error');
-        return { success: false };
-      }
-      // duplicate_slot — same replace-confirm pattern as extra classes
-      const choice = await askConfirm(data.message, false);
-      if (choice !== 'replace') {
-        showToast('Alteration not added', 'error');
-        return { success: false };
-      }
-      res = await postAlteration({ ...form, confirm: true });
-      data = await res.json();
-    }
-
-    if (data.error) {
-      showToast(data.error, 'error');
-      return { success: false };
-    }
-    setConfig((p) => ({ ...p, extraClasses: data }));
-    showToast(`${form.faculty} now covering "${form.subject}" — swap saved`);
-    return { success: true };
-  };
-
-  const deleteExtraClass = (id) => setDeleteTarget(id);
-
-  const confirmDeleteExtraClass = async () => {
-    const id = deleteTarget;
-    setDeleteTarget(null);
-    if (!id) return;
-    const res = await fetch(`${AC_API}/extra-class/${id}`, {
-      method: 'DELETE',
-    });
-    const data = await res.json();
-    if (data.error) {
-      showToast(data.error, 'error');
-      return;
-    }
-    setConfig((p) => ({ ...p, extraClasses: data }));
-    showToast('Extra class removed');
-  };
-
   // ── Render ──────────────────────────────────────────────────────────────────
   if (loading) {
     return (
@@ -1399,22 +1279,6 @@ export default function SchedulerPage() {
     <div style={styles.page}>
       <style>{cssReset}</style>
       <Toast toast={toast} />
-      <ConflictModal
-        open={!!confirmDialog}
-        message={confirmDialog?.message}
-        isRegular={confirmDialog?.isRegular}
-        onCancel={() => closeConfirm('cancel')}
-        onChangeRoom={() => closeConfirm('changeRoom')}
-        onReplace={() => closeConfirm('replace')}
-      />
-      <ConfirmModal
-        open={!!deleteTarget}
-        title="Delete this extra class?"
-        message="This will permanently remove the scheduled extra class. This action cannot be undone."
-        confirmLabel="Delete"
-        onCancel={() => setDeleteTarget(null)}
-        onConfirm={confirmDeleteExtraClass}
-      />
 
       {/* ── Header ───────────────────────────────────────────────────────── */}
       <div style={{ marginBottom: 28 }}>
@@ -1432,34 +1296,37 @@ export default function SchedulerPage() {
               Acquisition Scheduler
             </div>
             <div style={styles.subheading}>
-              Manage attendance acquisition timing, rooms, and extra classes.
+              Manage attendance acquisition timing and rooms.
             </div>
           </div>
-          {/* Global on/off */}
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 12,
-              padding: '10px 20px',
-              borderRadius: 10,
-              background: config?.active ? theme.successDim : theme.dangerDim,
-              border: `1px solid ${config?.active ? theme.success : theme.danger}`,
-            }}
-          >
-            <Toggle
-              value={config?.active || false}
-              onChange={(v) => patchGlobal({ active: v })}
-            />
-            <span
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            {/* Global on/off */}
+            <div
               style={{
-                fontSize: 13,
-                fontWeight: 700,
-                color: config?.active ? theme.success : theme.danger,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                padding: '10px 20px',
+                borderRadius: 10,
+                background: config?.active ? theme.successDim : theme.dangerDim,
+                border: `1px solid ${config?.active ? theme.success : theme.danger}`,
               }}
             >
-              {config?.active ? 'Acquisition ACTIVE' : 'Acquisition STOPPED'}
-            </span>
+              <Toggle
+                value={config?.active || false}
+                onChange={(v) => patchGlobal({ active: v })}
+              />
+              <span
+                style={{
+                  fontSize: 13,
+                  fontWeight: 700,
+                  color: config?.active ? theme.success : theme.danger,
+                }}
+              >
+                {config?.active ? 'Acquisition ACTIVE' : 'Acquisition STOPPED'}
+              </span>
+            </div>
+            <BackButton />
           </div>
         </div>
       </div>
@@ -1478,8 +1345,6 @@ export default function SchedulerPage() {
           ['settings', 'Run Settings'],
           ['periods', 'Period Timings'],
           ['rooms', 'Rooms'],
-          ['extras', 'Extra Classes'],
-          ['alterations', 'Altering Classes'],
         ].map(([id, label]) => (
           <button
             key={id}
@@ -1578,360 +1443,6 @@ export default function SchedulerPage() {
                   />
                 );
               })}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ══════ EXTRA CLASSES TAB ══════ */}
-      {tab === 'extras' && (
-        <div>
-          <SectionHead
-            title="Extra Classes"
-            sub="Schedule extra classes outside the normal timetable. Data routes automatically to the correct subject."
-            color={theme.warning}
-          />
-          <div style={{ marginBottom: 20 }}>
-            <div
-              style={{
-                fontSize: 12,
-                fontWeight: 600,
-                color: theme.textMuted,
-                marginBottom: 10,
-              }}
-            >
-              Add New Extra Class
-            </div>
-            <ExtraClassForm onAdd={addExtraClass} allRooms={allRooms} />
-          </div>
-          <div
-            style={{
-              fontSize: 12,
-              fontWeight: 600,
-              color: theme.textMuted,
-              marginBottom: 12,
-            }}
-          >
-            Scheduled Extra Classes (
-            {(config?.extraClasses || []).filter((e) => e.active).length}{' '}
-            active)
-          </div>
-          {(config?.extraClasses || []).length === 0 ? (
-            <div
-              style={{
-                ...styles.card,
-                padding: 40,
-                textAlign: 'center',
-                color: theme.textMuted,
-                borderStyle: 'dashed',
-              }}
-            >
-              No extra classes scheduled yet.
-            </div>
-          ) : (
-            <div style={{ ...styles.card, padding: 0, overflow: 'hidden' }}>
-              <table
-                style={{
-                  width: '100%',
-                  borderCollapse: 'collapse',
-                  fontSize: 13,
-                }}
-              >
-                <thead>
-                  <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
-                    {[
-                      'Date',
-                      'Period',
-                      'Room',
-                      'Subject',
-                      'Faculty',
-                      'Sem',
-                      'Time',
-                      'Type',
-                      'Status',
-                      '',
-                    ].map((h) => (
-                      <th
-                        key={h}
-                        style={{
-                          padding: '10px 12px',
-                          textAlign: 'left',
-                          fontSize: 10,
-                          color: theme.textMuted,
-                          textTransform: 'uppercase',
-                          letterSpacing: '0.08em',
-                          fontWeight: 600,
-                        }}
-                      >
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {(config?.extraClasses || []).map((ec) => (
-                    <tr
-                      key={ec._id}
-                      style={{ borderBottom: `1px solid ${theme.border}` }}
-                    >
-                      <td
-                        style={{
-                          padding: '10px 12px',
-                          fontFamily: theme.fontMono,
-                          fontSize: 12,
-                        }}
-                      >
-                        {ec.date}
-                      </td>
-                      <td
-                        style={{
-                          padding: '10px 12px',
-                          fontSize: 12,
-                          color: theme.textMuted,
-                        }}
-                      >
-                        {SLOT_LABELS[ec.periodKey] || ec.periodKey}
-                      </td>
-                      <td style={{ padding: '10px 12px', fontWeight: 700 }}>
-                        {ec.room}
-                      </td>
-                      <td
-                        style={{ padding: '10px 12px', color: theme.textMuted }}
-                      >
-                        {ec.subject || '—'}
-                      </td>
-
-                      <td
-                        style={{
-                          padding: '10px 12px',
-                          fontFamily: theme.fontMono,
-                          fontSize: 11,
-                        }}
-                      >
-                        {ec.startTime && ec.endTime
-                          ? `${ec.startTime}–${ec.endTime}`
-                          : '—'}
-                      </td>
-                      <td style={{ padding: '10px 12px' }}>
-                        <span
-                          style={{
-                            padding: '2px 8px',
-                            borderRadius: 99,
-                            fontSize: 10,
-                            fontWeight: 700,
-                            background: ec.isLunchHour
-                              ? theme.warningDim
-                              : theme.accentDim,
-                            color: ec.isLunchHour
-                              ? theme.warning
-                              : theme.accent,
-                          }}
-                        >
-                          {ec.isLunchHour ? '🍱 Special' : 'Extra'}
-                        </span>
-                      </td>
-                      <td style={{ padding: '10px 12px' }}>
-                        <span
-                          style={{
-                            padding: '2px 8px',
-                            borderRadius: 99,
-                            fontSize: 10,
-                            fontWeight: 700,
-                            background: ec.active
-                              ? theme.successDim
-                              : theme.dangerDim,
-                            color: ec.active ? theme.success : theme.danger,
-                          }}
-                        >
-                          {ec.active ? 'Active' : 'Inactive'}
-                        </span>
-                      </td>
-                      <td style={{ padding: '10px 12px' }}>
-                        <button
-                          onClick={() => deleteExtraClass(ec._id)}
-                          style={{
-                            ...styles.btnDanger,
-                            padding: '4px 10px',
-                            fontSize: 11,
-                          }}
-                        >
-                          Delete
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
-
-      {tab === 'alterations' && (
-        <div>
-          <SectionHead
-            title="Altering Classes"
-            sub="One-time faculty/subject swap for an already-scheduled class"
-            color={theme.warning}
-          />
-          <div style={{ marginBottom: 20 }}>
-            <div
-              style={{
-                fontSize: 12,
-                fontWeight: 600,
-                color: theme.textMuted,
-                marginBottom: 10,
-              }}
-            >
-              Add New Alteration
-            </div>
-            <AlterClassForm onAdd={addAlteration} />
-          </div>
-          <div
-            style={{
-              fontSize: 12,
-              fontWeight: 600,
-              color: theme.textMuted,
-              marginBottom: 12,
-            }}
-          >
-            Active Alterations (
-            {
-              (config?.extraClasses || []).filter(
-                (e) => e.isAlteration && e.active,
-              ).length
-            }
-            )
-          </div>
-          {(config?.extraClasses || []).filter((e) => e.isAlteration).length ===
-          0 ? (
-            <div
-              style={{
-                ...styles.card,
-                padding: 40,
-                textAlign: 'center',
-                color: theme.textMuted,
-                borderStyle: 'dashed',
-              }}
-            >
-              No alterations scheduled yet.
-            </div>
-          ) : (
-            <div style={{ ...styles.card, padding: 0, overflow: 'hidden' }}>
-              <table
-                style={{
-                  width: '100%',
-                  borderCollapse: 'collapse',
-                  fontSize: 13,
-                }}
-              >
-                <thead>
-                  <tr style={{ borderBottom: `1px solid ${theme.border}` }}>
-                    {[
-                      'Date',
-                      'Period',
-                      'Room',
-                      'Original → New Subject',
-                      'New Faculty',
-                      'Sem',
-                      'Status',
-                      '',
-                    ].map((h) => (
-                      <th
-                        key={h}
-                        style={{
-                          padding: '10px 12px',
-                          textAlign: 'left',
-                          fontSize: 10,
-                          color: theme.textMuted,
-                          textTransform: 'uppercase',
-                          letterSpacing: '0.08em',
-                          fontWeight: 600,
-                        }}
-                      >
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {(config?.extraClasses || [])
-                    .filter((e) => e.isAlteration)
-                    .map((ec) => (
-                      <tr
-                        key={ec._id}
-                        style={{ borderBottom: `1px solid ${theme.border}` }}
-                      >
-                        <td
-                          style={{
-                            padding: '10px 12px',
-                            fontFamily: theme.fontMono,
-                            fontSize: 12,
-                          }}
-                        >
-                          {ec.date}
-                        </td>
-                        <td
-                          style={{
-                            padding: '10px 12px',
-                            fontSize: 12,
-                            color: theme.textMuted,
-                          }}
-                        >
-                          {SLOT_LABELS[ec.periodKey] || ec.periodKey}
-                        </td>
-                        <td style={{ padding: '10px 12px', fontWeight: 700 }}>
-                          {ec.room}
-                        </td>
-                        <td
-                          style={{
-                            padding: '10px 12px',
-                            color: theme.textMuted,
-                          }}
-                        >
-                          {ec.originalSubject || '—'} → {ec.subject}
-                        </td>
-                        <td style={{ padding: '10px 12px' }}>{ec.faculty}</td>
-                        <td
-                          style={{
-                            padding: '10px 12px',
-                            color: theme.textMuted,
-                          }}
-                        >
-                          {ec.semester || '—'}
-                        </td>
-                        <td style={{ padding: '10px 12px' }}>
-                          <span
-                            style={{
-                              padding: '2px 8px',
-                              borderRadius: 99,
-                              fontSize: 10,
-                              fontWeight: 700,
-                              background: ec.active
-                                ? theme.successDim
-                                : theme.dangerDim,
-                              color: ec.active ? theme.success : theme.danger,
-                            }}
-                          >
-                            {ec.active ? 'Active' : 'Inactive'}
-                          </span>
-                        </td>
-                        <td style={{ padding: '10px 12px' }}>
-                          <button
-                            onClick={() => deleteExtraClass(ec._id)}
-                            style={{
-                              ...styles.btnDanger,
-                              padding: '4px 10px',
-                              fontSize: 11,
-                            }}
-                          >
-                            Delete
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                </tbody>
-              </table>
             </div>
           )}
         </div>

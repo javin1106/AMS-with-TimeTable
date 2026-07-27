@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const TimeTable = require("../../../models/timetable");
 const addRoom = require("../../../models/addroom");
 
@@ -14,41 +15,11 @@ const addFaculty = require("../../../models/addfaculty");
 const facultyControllerInstance = new FacultyController();
 const MasterRoomProfile = new masterroomprofile();
 const mailSender = require("../../mailsender");
+const { getTimetableEmailContent } = require("../helper/timetableEmails");
 
-function getTimetableEmailContent({ facultyName, departmentName, sessionName, timetableUrl }) {
-  return {
-    subject: "Timetable Published for the Upcoming Session",
-    body: `
-      <p>Dear ${facultyName},</p>
-
-      <p>
-        We are pleased to inform you that the timetable for the
-        <strong>${departmentName}</strong> department for the upcoming academic
-        session <strong>${sessionName}</strong> has been published.
-      </p>
-
-      <p>
-        You may access your timetable using the link below:
-      </p>
-
-      <p>
-        <a href="${timetableUrl}" target="_blank">
-          View Timetable
-        </a>
-      </p>
-
-      <p>
-        This is an auto-generated email. For any clarifications, kindly contact the
-        timetable coordinator.
-      </p>
-
-      <p>
-        Regards,<br />
-        <strong>Team XCEED</strong>
-      </p>
-    `,
-  };
-}
+// Timetable ids currently mid-publish, so overlapping requests for the same
+// timetable can't both run the notification loop.
+const publishInFlight = new Set();
 
 class TableController {
   async createTable(req, res) {
@@ -361,48 +332,117 @@ class TableController {
  
 async publishTimetable(req, res) {
   const { id } = req.params;
+  // Explicit opt-in for re-notifying faculty about an already-published
+  // timetable. Without it a repeat publish is a no-op mail-wise.
+  const force =
+    req.query?.force === "true" || req.body?.force === true;
 
-  if (!id) {
+  if (!id || !mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({ error: "Invalid timetable id" });
   }
 
-  try {
-    // 1. Publish timetable
-    const updatedTimeTable = await TimeTable.findByIdAndUpdate(
-      id,
-      { publish: true, datePublished: new Date() },
-      { new: true }
-    );
+  // Guard against concurrent publishes of the same timetable (double-click,
+  // client retry). Without this, two overlapping requests each run the full
+  // mail loop before either marks the timetable published.
+  if (publishInFlight.has(id)) {
+    return res.status(409).json({
+      error: "This timetable is already being published. Please wait.",
+    });
+  }
+  publishInFlight.add(id);
 
-    if (!updatedTimeTable) {
+  try {
+    const timetable = await TimeTable.findById(id);
+
+    if (!timetable) {
       return res.status(404).json({ error: "Timetable not found" });
     }
 
-    // 2. Fetch all semester–faculty mappings for this timetable
+    const alreadyPublished = timetable.publish === true;
+
+    // 1. Publish timetable (idempotent — keep the original publish date)
+    const update = { publish: true };
+    if (!alreadyPublished) update.datePublished = new Date();
+    const updatedTimeTable = await TimeTable.findByIdAndUpdate(id, update, {
+      new: true,
+    });
+
+    // 2. Already published and no explicit re-send requested → don't mail again.
+    if (alreadyPublished && !force) {
+      return res.json({
+        success: true,
+        alreadyPublished: true,
+        mailsSent: 0,
+        results: [],
+        message:
+          "Timetable was already published — no notification emails were re-sent.",
+      });
+    }
+
+    // 3. Fetch all semester–faculty mappings for this timetable
     const allfaculties = await addFaculty.find({ code: updatedTimeTable.code });
 
-    // 3. Build UNIQUE faculty list across all semesters
+    // 4. Build UNIQUE faculty name list across all semesters
     const facultySet = new Set();
     for (const record of allfaculties) {
       if (Array.isArray(record.faculty)) {
         for (const name of record.faculty) {
-          facultySet.add(name.trim());
+          if (typeof name === "string" && name.trim()) {
+            facultySet.add(name.trim());
+          }
         }
       }
     }
 
     const base_url = getEnvironmentURL();
+    const results = [];
+    // De-duplicate on the RESOLVED EMAIL, not the name. Timetable slots hold
+    // free-text names, so one person can appear as "Mohan" and "Mohan Kumar"
+    // and survive the name-based Set above — mailing per name sends them two
+    // copies of the same notification.
+    const mailedEmails = new Set();
 
-    // 4. Send mail ONCE per faculty
+    // 5. Send mail ONCE per faculty email address
     for (const facultyName of facultySet) {
-      const facultyData = await facultyControllerInstance.getFacultyByName(facultyName);
+      const faculty = await facultyControllerInstance.getFacultyByExactName(
+        facultyName
+      );
 
-      if (!facultyData || facultyData.length === 0) {
+      if (!faculty) {
         console.warn(`Faculty not found: ${facultyName}`);
+        results.push({
+          faculty: facultyName,
+          email: null,
+          success: false,
+          error: "Faculty record not found",
+        });
         continue;
       }
 
-      const faculty = facultyData[0];
+      const email = (faculty.email || "").trim();
+      if (!email) {
+        console.warn(`No email on record for faculty: ${facultyName}`);
+        results.push({
+          faculty: facultyName,
+          email: null,
+          success: false,
+          error: "Email not found",
+        });
+        continue;
+      }
+
+      const emailKey = email.toLowerCase();
+      if (mailedEmails.has(emailKey)) {
+        console.log(`Skipping duplicate recipient: ${email} (${facultyName})`);
+        results.push({
+          faculty: facultyName,
+          email,
+          success: true,
+          skipped: "duplicate recipient",
+        });
+        continue;
+      }
+      mailedEmails.add(emailKey);
 
       const { subject, body } = getTimetableEmailContent({
         facultyName: faculty.name,
@@ -411,17 +451,36 @@ async publishTimetable(req, res) {
         timetableUrl: `${base_url}/timetable/faculty/${faculty._id}`,
       });
 
-      console.log("Sending mail to:", faculty.email);
-
-      await mailSender(faculty.email, subject, body);
+      try {
+        await mailSender(email, subject, body);
+        results.push({ faculty: facultyName, email, success: true });
+      } catch (err) {
+        console.error(`Failed to send publish email to ${email}:`, err);
+        results.push({
+          faculty: facultyName,
+          email,
+          success: false,
+          error: err.message || "Unknown error",
+        });
+      }
     }
 
-    // 5. Respond only after all mails are sent
-    res.json({ success: true, message: "Timetable published and mails sent" });
+    // 6. Respond only after all mails are sent
+    res.json({
+      success: true,
+      alreadyPublished,
+      mailsSent: mailedEmails.size,
+      results,
+      message: `Timetable published and ${mailedEmails.size} mail(s) sent`,
+    });
 
   } catch (error) {
     console.error("Error publishing timetable:", error);
-    res.status(500).json({ error: "Internal Server Error" });
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Internal Server Error" });
+    }
+  } finally {
+    publishInFlight.delete(id);
   }
 }
 

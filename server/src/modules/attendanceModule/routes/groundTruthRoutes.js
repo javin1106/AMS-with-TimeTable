@@ -135,6 +135,7 @@ router.post('/run-attendance', async (req, res) => {
 const axios = require('axios');
 const fs    = require('fs');
 const { buildExistingFoldersPayload } = require('../controllers/embeddingSyncHelper');
+const { checkGroundTruthAllowed } = require('../controllers/timeWindowGuard');
 
 // The ML service may run on a separate machine (e.g. the H100 GPU box) —
 // always resolve it from ML_SERVICE_URL, same as every other integration
@@ -147,84 +148,21 @@ const ML_SERVICE_URL = /^https?:\/\//i.test(rawMlUrl) ? rawMlUrl : `http://${raw
 
 const GT_BASE_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'ground_truth');
 
-// Internal SSE event types that Node.js handles server-side (not forwarded to client)
-const GT_INTERNAL = new Set(['mkdir_batch', 'mkdir', 'crop_save', 'info_save', 'file_delete']);
-
-// pythonFolderMap: maps Python-assigned "person_XXX" label → MongoDB ObjectId string
-// scoped per SSE request so parallel streams never collide
-function handleGroundTruthEvent(event, batch, pythonFolderMap) {
-    const batchDir = path.join(GT_BASE_DIR, batch);
-    try {
-        if (event.type === 'mkdir_batch') {
-            fs.mkdirSync(batchDir, { recursive: true });
-
-        } else if (event.type === 'mkdir') {
-            // Create the folder on disk (name stays person_XXX)
-            fs.mkdirSync(path.join(batchDir, event.folder), { recursive: true });
-
-            // Generate a stable ObjectId for this cluster immediately
-            const oid    = new mongoose.Types.ObjectId();
-            const oidStr = oid.toString();
-            pythonFolderMap[event.folder] = oidStr;
-
-            // Persist ClusterMatch record so the _id exists before ERP matching
-            ClusterMatch.create({
-                _id:           oid,
-                batch,
-                folderName:    event.folder,   // e.g. "person_001" — immutable label
-                currentFolder: event.folder,   // tracks actual disk folder; updated on approval
-                status:        'unmatched',
-                imageFiles:    [],
-                imageCount:    0,
-            }).catch(err => {
-                // Duplicate key = folder already registered (re-run / restart), safe to ignore
-                if (err.code !== 11000)
-                    console.error('[GT] ClusterMatch create error:', err.message);
-            });
-
-        } else if (event.type === 'crop_save') {
-            const folderPath = path.join(batchDir, event.folder);
-            fs.mkdirSync(folderPath, { recursive: true });
-            fs.writeFileSync(path.join(folderPath, event.filename), Buffer.from(event.data, 'base64'));
-
-            // Update imageFiles list on the ClusterMatch record
-            const oidStr = pythonFolderMap[event.folder];
-            if (oidStr) {
-                ClusterMatch.findByIdAndUpdate(oidStr, {
-                    $addToSet: { imageFiles:    event.filename },
-                    $inc:      { imageCount:    1 },
-                }).catch(() => {});
-            }
-
-        } else if (event.type === 'info_save') {
-            const folderPath = path.join(batchDir, event.folder);
-            fs.mkdirSync(folderPath, { recursive: true });
-            fs.writeFileSync(path.join(folderPath, '_info.json'), JSON.stringify(event.info, null, 2));
-
-            // Sync embeddingFiles / previewFiles to DB from the info payload
-            const oidStr = pythonFolderMap[event.folder];
-            if (oidStr && event.info) {
-                const embeds  = event.info.embedding_files || [];
-                const backups = event.info.backup_files    || [];
-                const all     = [...embeds, ...backups];
-                ClusterMatch.findByIdAndUpdate(oidStr, {
-                    $set: {
-                        embeddingFiles: embeds,
-                        previewFiles:   all.slice(0, 6),
-                    },
-                }).catch(() => {});
-            }
-
-        } else if (event.type === 'file_delete') {
-            const filePath = path.join(batchDir, event.folder, event.filename);
-            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        }
-    } catch (err) {
-        console.error(`[GT] Error handling ${event.type} for ${batch}/${event.folder || ''}:`, err.message);
-    }
-}
+// The disk writer and the set of internally-handled SSE event types now live
+// in the acquisition manager, shared between the legacy browser-driven
+// /extract-rtsp-stream path (below) and the server-persistent gt-acquisition/*
+// jobs — so both write ground-truth files identically.
+const gtManager = require('../controllers/gtAcquisitionManager');
+const { handleGroundTruthEvent, GT_INTERNAL } = gtManager;
+const getUserDetails = require('../../usermanagement/controllers/dto');
 
 router.post('/extract-rtsp-stream', async (req, res) => {
+    // Optional 08:30–17:30 IST restriction (admin toggle, default off).
+    const gate = await checkGroundTruthAllowed();
+    if (!gate.allowed) {
+        return res.status(403).json({ error: gate.reason });
+    }
+
     const batch           = req.body.batch || '';
     const existingFolders = buildExistingFoldersPayload(path.join(GT_BASE_DIR, batch));
     const body            = { ...req.body, existingFolders };
@@ -310,7 +248,13 @@ router.post('/stop-rtsp-stream', async (req, res) => {
 router.get('/rtsp-preview', async (req, res) => {
     const jobId = req.query.jobId;
     try {
-        const result = await axios.get(`${ML_SERVICE_URL}/rtsp-preview`, {
+        // Must hit the ML service's /gt-acquisition-preview, not /rtsp-preview —
+        // that path is a *different* preview system (Camera Live Preview,
+        // ground_truth_routes.py's own _previews dict) which happens to shadow
+        // this module's route since it's registered first in ml_service.py.
+        // This jobId only exists in rtsp_routes.py's _jobs registry, so hitting
+        // the shadowed /rtsp-preview always 404/503'd against the wrong dict.
+        const result = await axios.get(`${ML_SERVICE_URL}/gt-acquisition-preview`, {
             params: jobId ? { jobId } : undefined,
             responseType: 'stream',
             timeout: 0,   // long-lived MJPEG stream
@@ -333,6 +277,203 @@ router.post('/start-preview', async (req, res) => {
         console.error('start-preview proxy error:', err.message);
         res.status(502).json({ error: 'ML service unavailable' });
     }
+});
+
+// ─── Server-persistent Ground Truth acquisition (gtAcquisitionManager) ────────
+// Unlike /extract-rtsp-stream (which dies when the browser tab closes), these
+// jobs run on the server until Stop or the 60-minute ceiling. The browser
+// starts a job, attaches to observe it, and can reattach after a reload.
+
+async function resolveStartedByName(req) {
+    if (req.user?.email) return req.user.email;
+    try {
+        const u = await getUserDetails(req.user.id);
+        return u?.email || String(req.user.id);
+    } catch (_) {
+        return String(req.user?.id || 'user');
+    }
+}
+
+// Start a job. `enforceAttendanceDepartment` (mounted on /ground-truth) already
+// rejects a batch outside the caller's department, so no extra check needed.
+router.post('/gt-acquisition/start', async (req, res) => {
+    const gate = await checkGroundTruthAllowed();
+    if (!gate.allowed) return res.status(403).json({ error: gate.reason });
+
+    const {
+        mode = 'single', batch, cameras,
+        detSize, frameSkip, targetImgsPerPerson, minSamples, clusterThreshold,
+    } = req.body || {};
+
+    if (!batch) return res.status(400).json({ error: 'batch is required' });
+    if (!Array.isArray(cameras) || cameras.length === 0)
+        return res.status(400).json({ error: 'cameras[] is required' });
+    if (!cameras.every(c => c && c.url))
+        return res.status(400).json({ error: 'every camera needs a url' });
+
+    const { acquisitionId } = gtManager.startAcquisition({
+        mode,
+        batch,
+        cameras,
+        // Omitted values stay undefined (dropped from the JSON body) so the
+        // ML service seeds them from the GT Acquisition config (ML Fine
+        // Tuning page) and reports the fallback via a gt_config_seeded event.
+        params: {
+            detSize:             Number(detSize)             || undefined,
+            frameSkip:           Number(frameSkip)           || undefined,
+            targetImgsPerPerson: Number(targetImgsPerPerson) || undefined,
+            minSamples:          Number(minSamples)          || undefined,
+            clusterThreshold:    Number(clusterThreshold)    || undefined,
+        },
+        startedByName: await resolveStartedByName(req),
+        department:    req.attendanceDepartment,
+    });
+
+    res.json({ acquisitionId });
+});
+
+// List running/recent jobs the caller may see — used on page load to show
+// active acquisitions (elapsed time + per-person counts) and reattach.
+router.get('/gt-acquisition/status', (req, res) => {
+    res.json({
+        jobs: gtManager.listJobs({
+            department:  req.attendanceDepartment,
+            fullAccess:  req.attendanceFullAccess,
+        }),
+    });
+});
+
+// Live SSE feed for one job: emits a `snapshot` immediately, then streams
+// updates. Detaching (tab close/reload) never affects the job.
+router.get('/gt-acquisition/stream', (req, res) => {
+    const { acquisitionId } = req.query;
+    if (!acquisitionId) return res.status(400).json({ error: 'acquisitionId is required' });
+
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    gtManager.attachStream(acquisitionId, res);
+});
+
+// Live MJPEG preview for one acquisition. Unlike /rtsp-preview (bound to a
+// single Python sub-run jobId that dies on every camera switch), this follows
+// job.pythonJobId across sub-runs: when a camera's stream ends, it silently
+// reconnects to the next camera's Python job and keeps piping into the SAME
+// response — the browser <img> never breaks, so no flicker on switches and
+// the preview always shows the camera currently acquiring.
+router.get('/gt-acquisition/preview', async (req, res) => {
+    const { acquisitionId } = req.query;
+    if (!acquisitionId) return res.status(400).json({ error: 'acquisitionId is required' });
+    if (!gtManager.getJob(acquisitionId))
+        return res.status(404).json({ error: 'Acquisition not found or expired' });
+
+    res.setHeader('Content-Type', 'multipart/x-mixed-replace; boundary=frame');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
+
+    let closed       = false;
+    let upstream     = null;
+    let pipedAny     = false;   // did we ever forward a single byte to the browser?
+    let failStreak   = 0;       // consecutive upstream failures with no bytes since
+    let drainedJobId = null;    // sub-run whose preview has already run dry
+    req.on('close', () => {
+        closed = true;
+        if (upstream) upstream.destroy();
+    });
+
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    // A sub-run needs a moment to register its Python jobId, so a few early
+    // failures are normal. But a *persistent* failure (e.g. the ML service being
+    // unreachable, or serving code without /gt-acquisition-preview) must not loop
+    // silently forever — it presents to the user as an eternal "Connecting to
+    // stream…". After this many consecutive failures without ever having streamed
+    // a byte, give up so the browser <img> fires onError and the UI can surface it.
+    const MAX_FAIL_STREAK = 8;
+
+    while (!closed) {
+        const job = gtManager.getJob(acquisitionId);
+        if (!job || (job.status !== 'running' && job.status !== 'stopping')) break;
+
+        // Between sub-runs there is no Python job yet — wait for the next one.
+        const pyJobId = job.pythonJobId;
+        if (!pyJobId) { await sleep(500); continue; }
+
+        // Python sets its job's stop flag when the *capture* loop ends, but Node
+        // clears job.pythonJobId only when the SSE stream ends — and that stays
+        // open through the clustering/save phase that follows. So for the whole
+        // tail of every sub-run this id still points at a preview that hands back
+        // an empty stream. Reconnecting to it just spins (~3 req/s until the ML
+        // service drops the entry, then 404s); wait for the next camera's id.
+        if (pyJobId === drainedJobId) { await sleep(500); continue; }
+
+        let bytesThisRun = 0;
+        try {
+            // /gt-acquisition-preview, NOT /rtsp-preview: the latter resolves to
+            // ground_truth_routes.py's camera-preview streams (its router is
+            // registered first) and knows nothing about acquisition jobIds.
+            const result = await axios.get(`${ML_SERVICE_URL}/gt-acquisition-preview`, {
+                params:       { jobId: pyJobId },
+                responseType: 'stream',
+                timeout:      0,
+            });
+            upstream = result.data;
+            failStreak = 0;
+            await new Promise((resolve) => {
+                upstream.on('data', (chunk) => {
+                    if (closed) return;
+                    res.write(chunk);
+                    bytesThisRun += chunk.length;
+                    pipedAny = true;
+                });
+                upstream.on('end',   resolve);
+                upstream.on('error', resolve);
+            });
+            upstream = null;
+            // Ended without a single frame → Python's generator exited straight
+            // away because this sub-run is already stopping. Nothing more will
+            // ever come from this id.
+            if (bytesThisRun === 0) drainedJobId = pyJobId;
+            // Brief pause so we don't hammer the ML service while the next
+            // sub-run's jobId is being set up.
+            await sleep(300);
+        } catch (err) {
+            upstream = null;
+            const status = err.response?.status;
+            // A 404 once frames have been flowing just means the ML service has
+            // dropped this sub-run's entry — routine at the tail of a camera
+            // switch, not an error worth logging. Before the first frame it is a
+            // real problem, so let it fall through to the give-up path below.
+            if (status === 404 && pipedAny) { drainedJobId = pyJobId; continue; }
+
+            console.warn(
+                `[gt-acquisition/preview] upstream error for pyJobId=${pyJobId} ` +
+                `(acquisition ${acquisitionId}): ${status || err.code || err.message}`
+            );
+            if (!pipedAny && ++failStreak >= MAX_FAIL_STREAK) {
+                console.error(
+                    `[gt-acquisition/preview] giving up after ${failStreak} consecutive ` +
+                    `failures with no frames streamed (acquisition ${acquisitionId}). ` +
+                    `Check that python-ml-service is reachable at ${ML_SERVICE_URL} and ` +
+                    `serves /gt-acquisition-preview.`
+                );
+                break;
+            }
+            await sleep(1000);
+        }
+    }
+    if (!res.writableEnded) res.end();
+});
+
+router.post('/gt-acquisition/stop', async (req, res) => {
+    const { acquisitionId } = req.body || {};
+    if (!acquisitionId) return res.status(400).json({ error: 'acquisitionId is required' });
+    const result = await gtManager.stopAcquisition(acquisitionId);
+    if (!result.ok) return res.status(404).json(result);
+    res.json(result);
 });
 
 module.exports = router;

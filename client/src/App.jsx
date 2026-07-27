@@ -23,6 +23,7 @@ import Login from './dashboard/login';
 import Messages from './timetableadmin/messages';
 import ForgotPassword from './dashboard/ForgotPassword';
 import SuperAdminPage from './dashboard/superadmin';
+import DeptAdminAssignPage from './dashboard/deptAdminAssign';
 import CommonSlot from './timetableadmin/commonslot.jsx';
 import Subjects from './timetableadmin/addsubjects';
 import ImportTT from './timetableadmin/importt.jsx';
@@ -221,6 +222,7 @@ import CameraPreview from './attendancemodule/cameraPreview';
 import FrameVerification from './attendancemodule/FrameVerification';
 import UnknownFaces from './attendancemodule/UnknownFaces';
 import SchedulerPage from './attendancemodule/SchedulerPage';
+import { ExtraClassPage, AlterClassPage } from './attendancemodule/extraAlterClasses';
 import LiveReportPage from './attendancemodule/LiveReportPage';
 import RecordStream from './attendancemodule/RecordStream';
 import ErpOverrides from './attendancemodule/ErpOverrides';
@@ -708,11 +710,14 @@ function App() {
           <Route path="model-analytics" element={<ModelAnalytics />} />
           <Route path="reports" element={<AttendanceReport />} />
           <Route path="frame-verification" element={<FrameVerification />} />
+          <Route path="dept-admins" element={<DeptAdminAssignPage />} />
           <Route path="erp-overrides" element={<ErpOverrides />} />
           <Route path="erp-overrides/:reportId" element={<ErpOverrideAnalysis />} />
           <Route path="confidence" element={<ConfidenceMonitor />} />
           <Route path="ml-fine-tuning" element={<MLFineTuning />} />
           <Route path="acquisition-control" element={<SchedulerPage />} />
+          <Route path="extra-class" element={<ExtraClassPage />} />
+          <Route path="altering-class" element={<AlterClassPage />} />
           <Route path="gpu" element={<GpuMetrics />} />
           <Route path="server-console" element={<NodeConsole />} />
           <Route path="client-console" element={<ReactConsole />} />
@@ -733,6 +738,8 @@ function App() {
           <Route path="class-verification" element={<DeptClassVerification />} />
           <Route path="embeddings" element={<DeptSubjectEmbeddings />} />
           <Route path="confidence" element={<DeptConfidenceMonitor />} />
+          <Route path="extra-class" element={<ExtraClassPage />} />
+          <Route path="altering-class" element={<AlterClassPage />} />
           <Route path="stats/progress" element={<Navigate to="/dept-admin/dashboard" replace />} />
           <Route path="dept-reports-view" element={<DeptReports />} />
           <Route path="*" element={

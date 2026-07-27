@@ -50,6 +50,9 @@ function FirstYearLoad() {
     state: false,
     id: "",
   });
+  // Locking can mail faculty server-side, so a second click while the first
+  // request is running duplicates every notification.
+  const [isLocking, setIsLocking] = useState(false);
   const [currentDepartment, setCurrentDepartment] = useState("");
   const [currentSession, setCurrentSession] = useState("");
   const [availableSubjects, setAvailableSubjects] = useState([]);
@@ -112,9 +115,12 @@ function FirstYearLoad() {
   };
 
   const handleLockTT = async () => {
+    if (isLocking) return;
+
     const isConfirmed = window.confirm('Are you sure you want to lock the timetable?');
 
     if (isConfirmed) {
+      setIsLocking(true);
       setMessage("Data is being saved....");
       setMessage("Data saved. Commencing lock");
       setMessage("Data is being locked");
@@ -150,6 +156,8 @@ function FirstYearLoad() {
         }
       } catch (error) {
         console.error("Error sending data to the backend:", error);
+      } finally {
+        setIsLocking(false);
       }
     } else {
       toast({
@@ -579,7 +587,12 @@ function FirstYearLoad() {
                 Add First Year Faculty
               </Button>
 
-              <Button colorScheme="orange" onClick={handleLockTT}>
+              <Button
+                colorScheme="orange"
+                onClick={handleLockTT}
+                isLoading={isLocking}
+                loadingText="Locking..."
+              >
                 Lock First Year Time Table
               </Button>
             </HStack>

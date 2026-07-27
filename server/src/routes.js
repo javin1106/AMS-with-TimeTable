@@ -39,9 +39,6 @@ v1router.use("/user", newusermanagementModule);
 const platform = require("./modules/platform/routes")
 v1router.use("/platform", platform);
 
-const stories = require("./modules/stories/routes/index");
-v1router.use("/stories", stories);
-
 // diabetics
 const diabeticsModule = require("./modules/diabeticsModule/routes/index");
 v1router.use("/diabeticsModule", diabeticsModule);
@@ -57,6 +54,9 @@ v1router.use("/diabeticsModule", diabeticsModule);
 const { attendanceRoleAccess } = require("./modules/attendanceModule/middleware/attendanceAccess");
 const mlRoutes = require("./modules/attendanceModule/routes/mlRoutes");
 v1router.use("/ml", ...attendanceRoleAccess, mlRoutes);
+
+const rejectedSamplesRoutes = require("./modules/attendanceModule/routes/rejectedSamplesRoutes");
+v1router.use("/ml/rejected-samples", ...attendanceRoleAccess, rejectedSamplesRoutes);
 
 const guideModule = require("./modules/guideModule/routes/index");
 v1router.use("/guide", guideModule);

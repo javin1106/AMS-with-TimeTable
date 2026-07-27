@@ -58,26 +58,41 @@ function StatusBadge({ status }) {
   );
 }
 
+// RTSP connection setup is genuinely flaky under concurrent load (two cameras
+// opening large streams at once) — a manual Retry click reliably recovers it,
+// so automate that same recovery before ever surfacing the error to the user.
+const MAX_AUTO_RETRIES = 2;
+const AUTO_RETRY_DELAY_MS = 3000;
+
 // Single camera feed panel
-function FeedPanel({ camera, quality, scale, onError }) {
+function FeedPanel({ camera, quality, scale, refreshKey, onError }) {
   const [feedKey, setFeedKey] = useState(0);
   const [starting, setStarting] = useState(true);
   const [failed, setFailed] = useState(false);
+  const [failReason, setFailReason] = useState('');
   const [streamUrl, setStreamUrl] = useState(null);
+  const [retryAttempt, setRetryAttempt] = useState(0);
+  // Each panel tracks its own preview job so the two feeds never share a slot.
+  const jobIdRef = useRef(null);
+  const retryCountRef = useRef(0);
+  const retryTimerRef = useRef(null);
+
+  const buildStreamUrl = useCallback(
+    () =>
+      `${CAMERA_API}/preview/stream?jobId=${encodeURIComponent(
+        jobIdRef.current || '',
+      )}&quality=${quality}&scale=${scale}&t=${Date.now()}`,
+    [quality, scale],
+  );
 
   const startFeed = useCallback(() => {
     if (!camera?._id) return;
 
-    // Don't attempt connection for offline cameras
-    if (camera?.status === 'offline') {
-      setStarting(false);
-      setFailed(false);
-      setStreamUrl(null);
-      return;
-    }
-
+    // Always attempt the connection — the offline status comes from a periodic
+    // probe that can be stale or wrong; the preview start below is the real test.
     setStarting(true);
     setFailed(false);
+    setFailReason('');
     setStreamUrl(null);
 
     fetch(`${CAMERA_API}/${camera._id}/preview/start`, {
@@ -85,39 +100,58 @@ function FeedPanel({ camera, quality, scale, onError }) {
       headers: { 'Content-Type': 'application/json' },
       body: '{}',
     })
-      .then((res) => res.json())
-      .then(() => {
-        setStreamUrl(
-          `${CAMERA_API}/preview/stream?quality=${quality}&scale=${scale}&t=${Date.now()}`,
-        );
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data?.error || `Preview start failed (${res.status})`);
+        }
+        return data;
+      })
+      .then((data) => {
+        retryCountRef.current = 0;
+        setRetryAttempt(0);
+        jobIdRef.current = data?.jobId || null;
+        setStreamUrl(buildStreamUrl());
         setFeedKey((k) => k + 1);
         setStarting(false);
       })
       .catch((err) => {
+        if (retryCountRef.current < MAX_AUTO_RETRIES) {
+          retryCountRef.current += 1;
+          setRetryAttempt(retryCountRef.current);
+          retryTimerRef.current = setTimeout(startFeed, AUTO_RETRY_DELAY_MS);
+          return;
+        }
         setStarting(false);
         setFailed(true);
+        setFailReason(err.message);
         onError?.(
           `Could not start feed for ${camera.cameraId}: ${err.message}`,
         );
       });
-  }, [camera?._id, quality, scale]);
+  }, [camera?._id, buildStreamUrl]);
 
   useEffect(() => {
     startFeed();
     return () => {
-      fetch(`${CAMERA_API}/preview/stop`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
-      }).catch(() => {});
+        if (retryTimerRef.current) {
+          clearTimeout(retryTimerRef.current);
+          retryTimerRef.current = null;
+        }
+        retryCountRef.current = 0;
+        setRetryAttempt(0);
+        const jobId = jobIdRef.current;
+        fetch(`${CAMERA_API}/preview/stop`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(jobId ? { jobId } : {}),
+        }).catch(() => {});
     };
-  }, [camera?._id]);
+}, [camera?._id, refreshKey]);
 
   useEffect(() => {
     if (streamUrl) {
-      setStreamUrl(
-        `${CAMERA_API}/preview/stream?quality=${quality}&scale=${scale}&t=${Date.now()}`,
-      );
+      setStreamUrl(buildStreamUrl());
       setFeedKey((k) => k + 1);
     }
   }, [quality, scale]);
@@ -177,7 +211,9 @@ function FeedPanel({ camera, quality, scale, onError }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           {starting && (
             <span style={{ fontSize: 11, color: theme.textMuted }}>
-              Connecting...
+              {retryAttempt > 0
+                ? `Retrying (${retryAttempt}/${MAX_AUTO_RETRIES})...`
+                : 'Connecting...'}
             </span>
           )}
           <StatusBadge status={camera?.status} />
@@ -195,26 +231,7 @@ function FeedPanel({ camera, quality, scale, onError }) {
           justifyContent: 'center',
         }}
       >
-        {camera?.status === 'offline' ? (
-          <div style={{ textAlign: 'center', padding: 24 }}>
-            <div style={{ fontSize: 32, marginBottom: 10 }}>📵</div>
-            <div
-              style={{
-                fontSize: 14,
-                fontWeight: 700,
-                color: theme.textMuted,
-                marginBottom: 6,
-              }}
-            >
-              Camera Offline
-            </div>
-            <div
-              style={{ color: theme.textMuted, fontSize: 12, lineHeight: 1.6 }}
-            >
-              This camera is currently unreachable.
-            </div>
-          </div>
-        ) : starting ? (
+        {starting ? (
           <div style={{ textAlign: 'center', padding: 24 }}>
             <div
               style={{
@@ -254,11 +271,17 @@ function FeedPanel({ camera, quality, scale, onError }) {
                 lineHeight: 1.6,
               }}
             >
-              Timed out waiting for first frame from RTSP stream.
+              {failReason || 'Timed out waiting for first frame from RTSP stream.'}
             </div>
             <button
               type="button"
-              onClick={startFeed}
+              onClick={() => {
+                // Manual retry gets its own fresh quota of automatic retries,
+                // not whatever was left over from the last exhausted attempt.
+                retryCountRef.current = 0;
+                setRetryAttempt(0);
+                startFeed();
+              }}
               style={{ ...styles.btnGhost, fontSize: 12, padding: '8px 20px' }}
             >
               Retry
@@ -271,6 +294,14 @@ function FeedPanel({ camera, quality, scale, onError }) {
             alt={`${camera?.cameraId} live feed`}
             style={{ width: '100%', display: 'block', objectFit: 'contain' }}
             onError={() => {
+              if (retryCountRef.current < MAX_AUTO_RETRIES) {
+                retryCountRef.current += 1;
+                setRetryAttempt(retryCountRef.current);
+                setStarting(true);
+                setStreamUrl(null);
+                retryTimerRef.current = setTimeout(startFeed, AUTO_RETRY_DELAY_MS);
+                return;
+              }
               setFailed(true);
               onError?.(`Stream error on ${camera?.cameraId}. Check RTSP URL.`);
             }}
@@ -326,6 +357,16 @@ export default function CameraPreview() {
   const [previewScale, setPreviewScale] = useState('1');
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const handleRefresh = async () => {
+    // Re-fetch camera docs from the DB first — refreshKey alone only restarts
+    // the existing feed panels with whatever camera data is already in memory,
+    // so an edited streamUrl (e.g. switching to a sub-stream) never took effect
+    // until a full page reload.
+    await fetchCameras();
+    setRefreshKey(prev => prev + 1);
+};
 
   const showToast = useCallback((msg, type = 'success') => {
     clearTimeout(toastTimer.current);
@@ -513,7 +554,7 @@ export default function CameraPreview() {
 
         <button
           type="button"
-          onClick={fetchCameras}
+          onClick={handleRefresh}
           disabled={loading}
           style={{ ...styles.btnGhost, alignSelf: 'flex-end' }}
         >
@@ -575,6 +616,7 @@ export default function CameraPreview() {
               camera={roomCameras.left}
               quality={previewQuality}
               scale={previewScale}
+              refreshKey={refreshKey}
               onError={(msg) => showToast(msg, 'warning')}
             />
           ) : (
@@ -595,6 +637,7 @@ export default function CameraPreview() {
               camera={roomCameras.right}
               quality={previewQuality}
               scale={previewScale}
+              refreshKey={refreshKey}
               onError={(msg) => showToast(msg, 'warning')}
             />
           ) : (

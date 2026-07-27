@@ -96,6 +96,29 @@ const CSS = `
   }
 `;
 
+// ── Embedding-run banner ─────────────────────────────────────────────────────
+// 'syncing' means the background build is genuinely still going — it clears
+// only once the server reports the run finished, so it is never a stand-in for
+// "we fired the request and hoped".
+function EmbedStatusBanner({ status, batchName }) {
+    if (!status) return null;
+
+    const base = { marginTop: 12, padding: '9px 14px', borderRadius: 7, fontSize: 13, fontWeight: 600 };
+    if (status === 'syncing') {
+        return (
+            <div style={{ ...base, background: T.accentDim, color: T.accent,
+                          display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ display: 'inline-block', animation: 'spin 1s linear infinite' }}>⟳</span>
+                Generating embeddings for {batchName}… this can take a few minutes
+            </div>
+        );
+    }
+    if (status === 'done') {
+        return <div style={{ ...base, background: T.successDim, color: T.success }}>✓ Embeddings generated for {batchName}</div>;
+    }
+    return <div style={{ ...base, background: T.dangerDim, color: T.danger }}>✗ Embedding generation failed — see the message above</div>;
+}
+
 // ── Shared batch selector component ──────────────────────────────────────────
 function BatchSelector({ degree, setDegree, degrees, setDegrees, department, setDepartment, batchYear, setBatchYear, departments, deptLoading, deptError, batches, batchesLoading, batchName, photoCount, fixedDepartment }) {
     return (
@@ -283,6 +306,8 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
     const [saving,         setSaving]        = useState(false);
     const [pendingDelete,  setPendingDelete] = useState(null); // {rollNo, ext}
     const [deleting,       setDeleting]      = useState(false);
+    const [pendingDeleteAll, setPendingDeleteAll] = useState(false);
+    const [deletingAll,      setDeletingAll]      = useState(false);
     const [searchQuery,    setSearchQuery]   = useState('');
 
     // ── Summary tab state ─────────────────────────────────────────────
@@ -607,6 +632,28 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
         }
     };
 
+    const handleConfirmedDeleteAll = async () => {
+        if (!batchName) return;
+        setDeletingAll(true);
+        try {
+            const res = await fetch(`${UPLOAD_BASE}/photos/${encodeURIComponent(batchName)}`, {
+                method: 'DELETE',
+                credentials: 'include',
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Delete failed');
+            showToast(data.message || 'All photos deleted');
+            setPhotos([]);
+            followEmbedJob(batchName, data.embeddingJobStartedAt);
+            setPendingDeleteAll(false);
+        } catch (err) {
+            showToast(err.message, 'error');
+            setPendingDeleteAll(false);
+        } finally {
+            setDeletingAll(false);
+        }
+    };
+
     // ── Summary helpers ───────────────────────────────────────────────
     const parseBatch = (batchStr) => {
         const parts = batchStr.split('_');
@@ -646,7 +693,8 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
             );
         } catch (e) {
             showToast(e.message, 'error');
-            setRegenning(r => { const n = { ...r }; delete n[batch]; return n; });
+        } finally {
+            setRegenning(prev => { const n = { ...prev }; delete n[batch]; return n; });
         }
     };
 
@@ -783,11 +831,25 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
                         <div className="erp-card">
                             <div className="erp-card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                 <span>Photos in <span style={{ color: T.accent }}>{batchName}</span></span>
-                                <span style={{ color: T.accent, fontWeight: 700 }}>
-                                    {searchQuery
-                                        ? `${photos.filter(p => p.rollNo.includes(searchQuery)).length} / ${photos.length} students`
-                                        : `${photos.length} students`}
-                                </span>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                                    <span style={{ color: T.accent, fontWeight: 700 }}>
+                                        {searchQuery
+                                            ? `${photos.filter(p => p.rollNo.includes(searchQuery)).length} / ${photos.length} students`
+                                            : `${photos.length} students`}
+                                    </span>
+                                    {photos.length > 0 && (
+                                        <button
+                                            onClick={() => setPendingDeleteAll(true)}
+                                            style={{
+                                                background: 'transparent', border: '1px solid #ef4444',
+                                                color: '#ef4444', padding: '5px 12px', borderRadius: 6,
+                                                fontWeight: 600, fontSize: 12, cursor: 'pointer', fontFamily: T.fontBody,
+                                            }}
+                                        >
+                                            🗑 Delete All
+                                        </button>
+                                    )}
+                                </div>
                             </div>
 
                             {/* Search bar */}
@@ -1079,6 +1141,35 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
                                 style={{ background: '#ef4444', border: 'none', color: '#fff', padding: '10px 16px', borderRadius: 8, fontWeight: 600, fontSize: 13, cursor: deleting ? 'not-allowed' : 'pointer', opacity: deleting ? 0.6 : 1, fontFamily: T.fontBody }}
                             >
                                 {deleting ? 'Deleting…' : 'Yes, Delete'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {pendingDeleteAll && (
+                <div className="erp-modal-overlay">
+                    <div className="erp-modal-box">
+                        <div style={{ fontSize: 16, fontWeight: 700, color: T.text, marginBottom: 8, fontFamily: T.fontBody }}>
+                            Delete ALL Photos
+                        </div>
+                        <div style={{ fontSize: 13.5, color: T.textMuted, lineHeight: 1.55, marginBottom: 22, fontFamily: T.fontBody }}>
+                            Are you sure you want to delete <strong style={{ color: '#ef4444' }}>all {photos.length} photo{photos.length === 1 ? '' : 's'}</strong> for <strong style={{ color: T.text, fontFamily: T.fontMono }}>{batchName}</strong>?
+                            This will also remove all associated embeddings for this batch. This action cannot be undone.
+                        </div>
+                        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                            <button
+                                onClick={() => setPendingDeleteAll(false)}
+                                style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', color: '#475569', padding: '10px 16px', borderRadius: 8, fontWeight: 600, fontSize: 13, cursor: 'pointer', fontFamily: T.fontBody }}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={handleConfirmedDeleteAll}
+                                disabled={deletingAll}
+                                style={{ background: '#ef4444', border: 'none', color: '#fff', padding: '10px 16px', borderRadius: 8, fontWeight: 600, fontSize: 13, cursor: deletingAll ? 'not-allowed' : 'pointer', opacity: deletingAll ? 0.6 : 1, fontFamily: T.fontBody }}
+                            >
+                                {deletingAll ? 'Deleting…' : `Yes, Delete All ${photos.length}`}
                             </button>
                         </div>
                     </div>

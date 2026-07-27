@@ -13,6 +13,7 @@ const {
     updateStudentEmbedding: syncUpdateStudentEmbedding,
     buildBatchEmbeddingsPkl,
 } = require('./embeddingSyncHelper');
+const { checkAttendanceRunAllowed } = require('./timeWindowGuard');
 
 const ML_SERVICE_URL   = process.env.ML_SERVICE_URL || 'http://localhost:8500';
 const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'ground_truth');
@@ -475,7 +476,7 @@ setImmediate(async () => {
     // ─── Update embedding for a student ─────────────────────────────────────
    async updateStudentEmbedding(req, res) {
     try {
-        const { batch, rollNo, embeddingFiles } = req.body;
+        const { batch, rollNo, embeddingFiles, backupFiles } = req.body;
         if (!batch || !rollNo || !Array.isArray(embeddingFiles) || embeddingFiles.length === 0)
             return res.status(400).json({ error: 'batch, rollNo, and embeddingFiles[] required' });
         if (embeddingFiles.length > 5)
@@ -484,7 +485,7 @@ setImmediate(async () => {
         const studentDir = path.join(GROUND_TRUTH_DIR, batch, rollNo);
 
         // 1. Update the student embedding in ML service
-        const response = await syncUpdateStudentEmbedding(studentDir, rollNo, embeddingFiles);
+        const response = await syncUpdateStudentEmbedding(studentDir, rollNo, embeddingFiles, backupFiles);
 
         // 2. Rebuild all subject PKLs where this student is enrolled — wait for completion
 try {
@@ -543,6 +544,10 @@ res.json({ ...response, embedding_files_used: embeddingFiles.length });
     //
     async runAttendance(req, res) {
         try {
+            // Optional 08:30–17:30 IST restriction (admin toggle, default off).
+            const runGate = await checkAttendanceRunAllowed();
+            if (!runGate.allowed) return res.status(403).json({ error: runGate.reason });
+
             const { videoLink, room, slot, date, batch: batchOverride } = req.body;
 
             if (!videoLink)     return res.status(400).json({ error: 'videoLink is required' });

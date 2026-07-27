@@ -44,15 +44,37 @@ MIN_SHARPNESS = 10.0     # Laplacian variance
 # constants here — see _check_liveness() below, which reads from it on
 # every call so a change takes effect on the very next detection.
 #
-# Rejected crops are saved to LIVENESS_REJECTED_DIR (when
-# state.liveness_config["save_rejected_crops"] is True) so accuracy can be
-# audited later — separate from the existing debug-only rejected_dir used
-# for blur/size rejects, since this folder is meant to be checked routinely,
-# not just during debugging.
-LIVENESS_REJECTED_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..",
-    "server", "ml-data", "liveness_rejected",
-)
+# Rejected crops (when state.liveness_config["save_rejected_crops"] is True)
+# are NOT stored on this machine — they are POSTed to the Node server, which
+# saves them in its ml-data/liveness_rejected/ beside its other data folders
+# (this service may run on a separate machine, e.g. the H100 box). Upload is
+# fire-and-forget through a bounded queue + daemon worker so the frame loop
+# never blocks on the network; dropped uploads are acceptable — this is an
+# accuracy-audit trail, not a system of record.
+import base64 as _b64
+import queue as _queue
+import threading as _threading
+import requests as _requests
+
+NODE_SERVER_URL = os.environ.get("NODE_SERVER_URL", "http://localhost:8010")
+
+_reject_upload_q: "_queue.Queue" = _queue.Queue(maxsize=500)
+
+
+def _reject_uploader():
+    while True:
+        payload = _reject_upload_q.get()
+        try:
+            _requests.post(
+                f"{NODE_SERVER_URL}/api/v1/attendancemodule/liveness-rejected",
+                json=payload, timeout=5,
+            )
+        except Exception:
+            pass  # best-effort; never disturb the capture pipeline
+
+
+_threading.Thread(target=_reject_uploader, daemon=True,
+                  name="liveness-reject-uploader").start()
 
 # Module-level counter, not thread-local — multiple attendance runs across
 # different rooms can run concurrently (see state.face_lock comment), so a
@@ -269,7 +291,7 @@ def _digital_zoom(frame: np.ndarray, zoom_factor: float,
 
     zoomed_crop = frame[y1:y2, x1:x2]
     zoomed      = cv2.resize(zoomed_crop, (W, H),
-                             interpolation=cv2.INTER_LINEAR)
+                             interpolation=cv2.INTER_LANCZOS4)
 
     # scale_back: zoomed pixel → original frame pixel
     # zoomed is W wide but represents crop_w original pixels
@@ -384,10 +406,7 @@ def _detect_faces_tiled(face_app, frame: np.ndarray,
             cy_frac=pass_cfg["cy"],
         )
         zoom_boxes.append(bbox)
- 
-        if preview_cb:
-            preview_cb(frame, zoom_boxes, pass_idx)
- 
+
         enhanced = _apply_clahe(zoomed)
  
         try:
@@ -461,6 +480,12 @@ def _detect_faces_tiled(face_app, frame: np.ndarray,
                 getattr(face, "kps", None),
             ))
  
+    # One preview update per frame, with the complete box list — updating
+    # inside the pass loop redrew the buffer once per pass (~11×/frame with a
+    # growing box list), which made the live MJPEG preview strobe.
+    if preview_cb:
+        preview_cb(frame, zoom_boxes, len(ZOOM_PASSES) - 1)
+
     if not raw:
         if _debug:
             logger.info("[debug] Frame %d: 0 faces across all %d zoom passes",
@@ -576,21 +601,26 @@ def _detect_faces_tiled(face_app, frame: np.ndarray,
                 global _liveness_rejection_count
                 _liveness_rejection_count += 1
 
-                # Always save rejected crops here (when the setting is on) —
+                # Ship rejected crops to Node (when the setting is on) —
                 # this is a routine accuracy-audit trail, not a debug-only
                 # artifact, so it doesn't depend on the _debug flag the
-                # blur/size rejects above use.
+                # blur/size rejects above use. Node owns the storage; see
+                # _reject_uploader above.
                 if save_rejected:
                     try:
-                        os.makedirs(LIVENESS_REJECTED_DIR, exist_ok=True)
                         ts_ms = int(time.time() * 1000)
                         dept_prefix = f"{dept}_" if dept else ""
                         fname = (f"{ts_ms}_{dept_prefix}{live_method}{live_score:.2f}_"
                                  f"det{det_score:.2f}.jpg")
-                        cv2.imwrite(os.path.join(LIVENESS_REJECTED_DIR, fname), crop,
-                                    [cv2.IMWRITE_JPEG_QUALITY, 90])
+                        ok, buf = cv2.imencode(".jpg", crop,
+                                               [cv2.IMWRITE_JPEG_QUALITY, 90])
+                        if ok:
+                            _reject_upload_q.put_nowait({
+                                "filename": fname,
+                                "image":    _b64.b64encode(buf.tobytes()).decode("ascii"),
+                            })
                     except Exception:
-                        pass
+                        pass  # queue full or encode failure — drop silently
 
                 # Debug-mode copy alongside the existing blur/size rejects,
                 # for when you're actively investigating one capture session.
@@ -616,17 +646,22 @@ def _detect_faces_tiled(face_app, frame: np.ndarray,
         # Upscale small crops for better saved images
         ch, cw = crop.shape[:2]
         target = 300
-        if cw < target or ch < target:
+        was_upscaled = cw < target or ch < target
+        if was_upscaled:
             scale_up = max(target / cw, target / ch)
             new_w    = int(cw * scale_up)
             new_h    = int(ch * scale_up)
             crop     = cv2.resize(crop, (new_w, new_h),
                                   interpolation=cv2.INTER_CUBIC)
- 
-        # Sharpen
-        blur = cv2.GaussianBlur(crop, (0, 0), 1.5)
-        crop = cv2.addWeighted(crop, 1.5, blur, -0.5, 0)
-        crop = np.clip(crop, 0, 255).astype(np.uint8)
+
+            # Sharpen — only needed to counter the blur introduced by
+            # upscaling above; applying it to crops that were already
+            # native-resolution (e.g. the 1x front-row pass) just adds
+            # halos/noise on top of an already-sharp source image, making
+            # saved ground-truth crops look worse than the live RTSP feed.
+            blur = cv2.GaussianBlur(crop, (0, 0), 1.5)
+            crop = cv2.addWeighted(crop, 1.5, blur, -0.5, 0)
+            crop = np.clip(crop, 0, 255).astype(np.uint8)
  
         # Save accepted crop (attendance debug only)
         if _debug:

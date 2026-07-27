@@ -184,6 +184,7 @@ class RollAssignController {
                     folderName:    r.folderName,
                     currentFolder: r.currentFolder || r.folderName,
                     imageCount:    r.imageCount    || 0,
+                    imageFiles:    r.imageFiles    || [],
                     previewFiles:  r.previewFiles  || [],
                     status:        r.status,
                 }))
@@ -791,18 +792,37 @@ class RollAssignController {
 
                 await fsPromises.writeFile(infoPath, JSON.stringify(info, null, 2));
             }
-
             // ── Update DB record by ObjectId ──────────────────────────
-            await ClusterMatch.findByIdAndUpdate(id, {
-                $set: {
-                    currentFolder: finalRollNo,
-                    rollNo:        finalRollNo,
-                    status:        'approved',
-                    approved:      true,
-                    imageFiles,
-                    updated_at:    new Date(),
-                },
-            });
+            if (mergedIntoExisting) {
+                await ClusterMatch.findByIdAndDelete(id);
+                const allFinalFiles = fs.existsSync(folderPath) ? (await fsPromises.readdir(folderPath)).filter(f => /\.(jpg|jpeg|png|webp)$/i.test(f)).sort() : [];
+                await ClusterMatch.findOneAndUpdate(
+                    { batch, currentFolder: finalRollNo },
+                    {
+                        $set: {
+                            rollNo:        finalRollNo,
+                            status:        'approved',
+                            approved:      true,
+                            imageFiles:    allFinalFiles,
+                            imageCount:    allFinalFiles.length,
+                            previewFiles:  allFinalFiles.slice(0, 6),
+                            updated_at:    new Date(),
+                        }
+                    },
+                    { upsert: true }
+                );
+            } else {
+                await ClusterMatch.findByIdAndUpdate(id, {
+                    $set: {
+                        currentFolder: finalRollNo,
+                        rollNo:        finalRollNo,
+                        status:        'approved',
+                        approved:      true,
+                        imageFiles,
+                        updated_at:    new Date(),
+                    },
+                });
+            }
 
             // Clear any pending flag for this cluster
             const flags = await readFlags(batch);
@@ -836,8 +856,14 @@ class RollAssignController {
             const safeBatch    = batch ? path.basename(batch) : null;
 
             // 1. batch-specific subfolder: erp_photos/<batch>/<filename>
+            // This page uppercases the whole batch string while the ERP Upload
+            // page keeps the DB's casing, so the folder on disk rarely matches
+            // safeBatch byte-for-byte. Without resolveOnDisk the lookup misses on
+            // a case-sensitive filesystem and falls through to step 3, which
+            // happily serves a same-named photo from a *different* batch.
             if (safeBatch) {
-                const batchPath = path.join(ERP_PHOTOS_DIR, safeBatch, safeFilename);
+                const batchDir  = erpSync.resolveOnDisk(ERP_PHOTOS_DIR, safeBatch);
+                const batchPath = path.join(ERP_PHOTOS_DIR, batchDir, safeFilename);
                 if (fs.existsSync(batchPath)) return res.sendFile(batchPath);
             }
 
@@ -865,17 +891,21 @@ class RollAssignController {
     async erpEmbeddingStatus(req, res) {
         try {
             const { batch }  = req.params;
-            const parts      = batch.split('_');
-            const department = parts.slice(1, -1).join('_');
+            const department = erpSync.departmentFromBatch(batch);
 
             let pkgCheck = { available: false };
             try {
                 pkgCheck = await erpSync.checkErpEmbedding(batch, department);
             } catch (_) {}
 
-            // Count ERP photos as proxy for student count when ML doesn't provide it
-            const batchPhotoDir = path.join(ERP_PHOTOS_DIR, batch);
-            let studentCount = pkgCheck.student_count || pkgCheck.num_students || pkgCheck.count || 0;
+            // The count that matters is how many students are actually *in* the
+            // pkl — checkErpEmbedding gets it by inspecting the file. Photos in
+            // erp_photos/ are only a proxy: a photo whose face failed to embed
+            // still sits there, so counting files overstates the enrolment. Fall
+            // back to it only when the inspect could not run (ML service down),
+            // where roll_count is 0 but the pkl demonstrably exists.
+            const batchPhotoDir = erpSync.erpPhotoDir(batch);
+            let studentCount = pkgCheck.roll_count || 0;
             if (!studentCount && fs.existsSync(batchPhotoDir)) {
                 try {
                     studentCount = fs.readdirSync(batchPhotoDir)
@@ -902,25 +932,24 @@ class RollAssignController {
                 return res.status(404).json({ error: 'Batch not found' });
             }
 
-            const parts      = batch.split('_');
-            const department = parts.slice(1, -1).join('_');
+            const department = erpSync.departmentFromBatch(batch);
 
             const ERP_PHOTOS_BASE = ERP_PHOTOS_DIR;
-            const batchPhotoDir   = path.join(ERP_PHOTOS_BASE, batch);
+            const batchPhotoDir   = erpSync.erpPhotoDir(batch);
             const erpPhotosDir    = fs.existsSync(batchPhotoDir) ? batchPhotoDir : ERP_PHOTOS_BASE;
 
-            // ── Check for pre-built pkl ───────────────────────────────────
-            let pkgCheck = { available: false };
-            try {
-                pkgCheck = await erpSync.checkErpEmbedding(batch, department);
-            } catch (_) {}
-
-            // Require pre-built pkl — block before starting SSE stream
-            if (!pkgCheck.available) {
+            // ── Require pre-built pkl — block before starting SSE stream ──
+            // findErpPkl, not checkErpEmbedding: the latter's roll count comes
+            // from an /erp-embedding/inspect call that base64s the whole pkl to
+            // the ML service, and this route discarded that count while going on
+            // to upload the very same bytes again in the match request below.
+            // Existence is all the gate needs.
+            const pklFile = erpSync.findErpPkl(batch, department);
+            if (!pklFile) {
                 return res.status(422).json({ noEmbedding: true, batch, department });
             }
 
-            const pklData = erpSync.readPklBase64(pkgCheck.pkl_path);
+            const pklData = erpSync.readPklBase64(pklFile);
 
             // ── Build ERP photo filename map (mirrors the old Python 3-tier
             // search: batch-specific dir, parent erp_photos/ root, siblings) ──

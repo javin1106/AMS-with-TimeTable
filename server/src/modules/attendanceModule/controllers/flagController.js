@@ -9,6 +9,7 @@ const fs         = require('fs');
 const fsPromises = require('fs').promises;
 
 const ClusterMatch = require('../../../models/attendanceModule/clusterMatch');
+const erpSync      = require('./erpEmbeddingSyncHelper');
 
 const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'ground_truth');
 const ERP_PHOTOS_DIR   = process.env.ERP_PHOTOS_DIR ||
@@ -316,6 +317,40 @@ class FlagController {
 
             res.json({ ok: true, deleted: safeOriginal });
         } catch (err) {
+            console.error('deleteCluster error:', err);
+            res.status(500).json({ error: err.message });
+        }
+    }
+
+    // ── DELETE /cluster-multiple/:batch
+    // Bulk delete clusters. Expects req.body.folders as an array of original folder names.
+    async deleteMultipleClusters(req, res) {
+        try {
+            const { batch } = req.params;
+            const { folders } = req.body;
+            if (!Array.isArray(folders) || folders.length === 0) {
+                return res.status(400).json({ error: 'folders array is required' });
+            }
+
+            const deletedFolders = [];
+            for (const folder of folders) {
+                const safeOriginal = path.basename(folder);
+                const currentPath = path.join(GROUND_TRUTH_DIR, batch, safeOriginal);
+                
+                if (fs.existsSync(currentPath)) {
+                    await fsPromises.rm(currentPath, { recursive: true, force: true });
+                }
+                
+                await ClusterMatch.deleteOne({ batch, folderName: safeOriginal });
+                deletedFolders.push(safeOriginal);
+            }
+
+            const flags = await readFlags(batch);
+            await writeFlags(batch, flags.filter(f => !deletedFolders.includes(f.folderName)));
+
+            res.json({ ok: true, deleted: deletedFolders });
+        } catch (err) {
+            console.error('deleteMultipleClusters error:', err);
             res.status(500).json({ error: err.message });
         }
     }
@@ -431,8 +466,14 @@ class FlagController {
             const safeFilename = path.basename(filename);
             const safeBatch    = batch ? path.basename(batch) : null;
 
+            // resolveOnDisk: the Roll Assignment page uppercases the batch string
+            // while the ERP Upload page keeps the DB's casing, so this rarely
+            // matches the folder byte-for-byte on a case-sensitive filesystem.
+            // Missing here falls through to the scan below, which can serve a
+            // same-named photo belonging to another batch.
             if (safeBatch) {
-                const batchPath = path.join(ERP_PHOTOS_DIR, safeBatch, safeFilename);
+                const batchDir  = erpSync.resolveOnDisk(ERP_PHOTOS_DIR, safeBatch);
+                const batchPath = path.join(ERP_PHOTOS_DIR, batchDir, safeFilename);
                 if (fs.existsSync(batchPath)) return res.sendFile(batchPath);
             }
 
