@@ -185,18 +185,28 @@ export default function RollAssign({ fixedDepartment = '' }) {
                 fetch(`${GT_BASE}/batches/${encodeURIComponent(batchName)}/students`),
             ]);
             const clusterData = clusterRes.ok ? await clusterRes.json() : { unprocessed: [] };
-            setUnprocessed(clusterData.unprocessed || []);
+            const unprocessedFromServer = clusterData.unprocessed || [];
 
             if (matchRes.ok) {
                 const { matchMap = {} } = await matchRes.json();
+                for (const u of unprocessedFromServer) {
+                    if (!matchMap[u.folderName]) matchMap[u.folderName] = u;
+                }
                 const records = Object.values(matchMap);
                 setPendingReview(records.filter(r => r.status === 'matched' && !r.approved));
                 // CHANGE 3: sort approved by rollNo
                 setApprovedItems(records.filter(r => r.approved).sort((a, b) => (a.rollNo || '').localeCompare(b.rollNo || '')));
-                setUnmatchedItems(records.filter(r => r.status === 'unmatched'));
+                
+                const allUnmatched = records.filter(r => r.status === 'unmatched');
+                const isUnprocessed = r => !r.error && r.imageCount > 0;
+                setUnprocessed(allUnmatched.filter(isUnprocessed));
+                setUnmatchedItems(allUnmatched.filter(r => !isUnprocessed(r)));
+                
                 setCrossDeptItems(records.filter(r => r.status === 'cross_dept'));
                 setFlaggedItems(records.filter(r => r.status === 'flagged'));
                 setMergedItems(records.filter(r => r.status === 'merged_unapproved'));
+            } else {
+                setUnprocessed(unprocessedFromServer);
             }
 
             if (studentsRes.ok) {
@@ -453,6 +463,26 @@ export default function RollAssign({ fixedDepartment = '' }) {
             if (!res.ok) throw new Error(data.error || 'Delete failed');
             showToast(`Deleted ${data.deleted.length} unmatched clusters`);
             setCrossDeptItems([]);
+            broadcastRefresh(batchName);
+        } catch (err) { showToast(err.message, 'error'); }
+        finally { setLoading(false); }
+    };
+
+    const deleteAllNoFace = async () => {
+        if (!unmatchedItems.length) return;
+        if (!window.confirm(`Delete ALL ${unmatchedItems.length} undetected face clusters permanently?\n\nThis cannot be undone.`)) return;
+        setLoading(true);
+        try {
+            const folders = unmatchedItems.map(c => c.folderName);
+            const res = await fetch(`${FLAG_BASE}/cluster-multiple/${encodeURIComponent(batchName)}`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ folders })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Delete failed');
+            showToast(`Deleted ${data.deleted.length} undetected clusters`);
+            setUnmatchedItems([]);
             broadcastRefresh(batchName);
         } catch (err) { showToast(err.message, 'error'); }
         finally { setLoading(false); }
@@ -940,7 +970,22 @@ export default function RollAssign({ fixedDepartment = '' }) {
                         ))}
                     </Section>
 
-                    <Section title="No Face Detected" count={unmatchedItems.length} accentColor={theme.textMuted} emptyText="No undetected clusters">
+                    <Section 
+                        title="No Face Detected" 
+                        count={unmatchedItems.length} 
+                        accentColor={theme.textMuted} 
+                        emptyText="No undetected clusters"
+                        rightElement={
+                            unmatchedItems.length > 0 && (
+                                <button 
+                                    onClick={deleteAllNoFace} 
+                                    style={{ fontSize: '11px', fontWeight: 600, padding: '4px 10px', borderRadius: 6, cursor: 'pointer', background: 'transparent', color: theme.danger, border: `1px solid ${theme.danger}`, outline: 'none' }}
+                                >
+                                    Delete All
+                                </button>
+                            )
+                        }
+                    >
                         {unmatchedItems.map(item => (
                             <ClusterCard key={item.folderName} item={item} batchName={batchName} photoUrl={photoUrl} erpPhotoUrl={erpPhotoUrl}
                                 isUnmatched
