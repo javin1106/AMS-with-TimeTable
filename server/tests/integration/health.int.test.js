@@ -20,9 +20,14 @@ beforeAll(async () => {
 afterEach(clearDatabase);
 afterAll(disconnect);
 
+const healthRouter = require("../../src/modules/attendanceModule/routes/healthRoutes");
+
 // mlServiceClient.getTargetInfo is called unconditionally by getHealthStatus;
 // give it a stable shape for every test in this file.
 beforeEach(() => {
+  if (healthRouter._resetState) {
+    healthRouter._resetState();
+  }
   mlServiceClient.getTargetInfo.mockReturnValue({
     kind: "local", label: "Local ML service", host: "localhost", port: "8500", display: "localhost:8500",
   });
@@ -49,15 +54,32 @@ describe("GET /health/status", () => {
     expect(res.body.services.ml.studentsEnrolled).toBe(42);
   });
 
-  it("reports ml offline and fires notifyServerDown on the online->offline edge", async () => {
-    // Previous test left module state at prevMlStatus="online" — this call
-    // transitions it to offline for the first time, which should alert.
+  it("reports ml offline and fires notifyServerDown after 3 consecutive failures", async () => {
+    // Previous test left module state at prevMlStatus="online"
     mlServiceClient.healthCheck.mockRejectedValue(new Error("connection refused"));
-    const res = await request(app).get(STATUS_URL).set("Cookie", authCookie());
+    
+    // 1st failure
+    const now = Date.now();
+    jest.spyOn(Date, "now").mockReturnValue(now);
+    let res = await request(app).get(STATUS_URL).set("Cookie", authCookie());
     expect(res.status).toBe(200);
+    expect(res.body.services.ml.status).toBe("offline");
+    expect(alertNotifier.notifyServerDown).not.toHaveBeenCalled();
+
+    // 2nd failure (advance time by 2s to bypass throttle)
+    jest.spyOn(Date, "now").mockReturnValue(now + 2000);
+    res = await request(app).get(STATUS_URL).set("Cookie", authCookie());
+    expect(res.body.services.ml.status).toBe("offline");
+    expect(alertNotifier.notifyServerDown).not.toHaveBeenCalled();
+
+    // 3rd failure (advance time by another 2s)
+    jest.spyOn(Date, "now").mockReturnValue(now + 4000);
+    res = await request(app).get(STATUS_URL).set("Cookie", authCookie());
     expect(res.body.services.ml.status).toBe("offline");
     expect(alertNotifier.notifyServerDown).toHaveBeenCalledTimes(1);
     expect(alertNotifier.notifyServerDown).toHaveBeenCalledWith("ML Service", expect.any(String));
+    
+    jest.spyOn(Date, "now").mockRestore();
   });
 
   it("does not re-fire notifyServerDown while ml stays offline", async () => {
