@@ -20,6 +20,7 @@ afterEach(() => {
 describe('ERP embedding job manager', () => {
     it('tracks real progress and preserves roll numbers whose faces were not detected', async () => {
         const failed = new Set(['22BCE002', '22BCE004']);
+        const onComplete = jest.fn();
         const syncFn = jest.fn(async (_batch, _department, rollNos) => ({
             processed: rollNos.filter((rollNo) => !failed.has(rollNo)).length,
             skipped: rollNos.filter((rollNo) => failed.has(rollNo)),
@@ -29,7 +30,7 @@ describe('ERP embedding job manager', () => {
             batch: 'BTECH_CSE_2022',
             department: 'CSE',
             rollNos: ['22BCE001', '22BCE002', '22BCE003', '22BCE004'],
-        }, { syncFn });
+        }, { syncFn, onComplete });
 
         expect(initial).toMatchObject({
             status: 'queued',
@@ -53,6 +54,12 @@ describe('ERP embedding job manager', () => {
             failedRollNos: ['22BCE002', '22BCE004'],
         });
         expect(syncFn).toHaveBeenCalledTimes(4);
+        expect(onComplete).toHaveBeenCalledWith({
+            batch: 'BTECH_CSE_2022',
+            department: 'CSE',
+            rollNos: ['22BCE001', '22BCE002', '22BCE003', '22BCE004'],
+            failedRollNos: ['22BCE002', '22BCE004'],
+        });
     });
 
     it('marks the job as failed when the ML result cannot account for every photo', async () => {
