@@ -211,6 +211,22 @@ function templateVariables(template) {
   return [...found];
 }
 
+const stripTags = (value) => String(value ?? '').replace(/<[^>]+>/g, '');
+
+/**
+ * Finds placeholders that markup has broken apart.
+ *
+ * Prompts are authored in a rich text editor, so a teacher who selects part of
+ * `{{R}}` and bolds it stores `{{<strong>R</strong>}}`. The substitution regex
+ * would never match that, and the student would be shown literal braces. This
+ * spots the case by comparing the placeholders visible in the raw HTML with
+ * those visible once tags are removed.
+ */
+function splitPlaceholders(template) {
+  const raw = new Set(templateVariables(template));
+  return templateVariables(stripTags(template)).filter((name) => !raw.has(name));
+}
+
 /**
  * Marks one student answer against its expected value.
  *
@@ -250,6 +266,8 @@ module.exports = {
   generateVariant,
   renderTemplate,
   templateVariables,
+  splitPlaceholders,
+  stripTags,
   gradeAnswer,
   roundTo,
   MAX_CONSTRAINT_ATTEMPTS,

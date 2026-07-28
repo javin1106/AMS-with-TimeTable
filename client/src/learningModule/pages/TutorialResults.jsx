@@ -29,6 +29,7 @@ import {
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import { EmptyState, ErrorState, Loading, SectionCard, StatTile } from '../components/common';
+import { richTextToPlain } from '../richTextUtils';
 import { formatDateTime } from '../format';
 
 /**
@@ -226,7 +227,7 @@ export default function TutorialResults() {
                     {(attempt.questions || []).map((question, index) => (
                       <Box key={index} mb={4} borderLeftWidth="3px" borderColor="gray.200" pl={3}>
                         <Text fontSize="sm" fontWeight="500">
-                          Q{index + 1}. {question.prompt}
+                          Q{index + 1}. {richTextToPlain(question.prompt)}
                         </Text>
                         <HStack fontSize="xs" color="gray.500" mt={1} wrap="wrap">
                           {Object.entries(question.values || {}).map(([name, value]) => (

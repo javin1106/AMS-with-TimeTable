@@ -38,6 +38,7 @@ import {
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import Markdown from '../components/Markdown';
+import RichTextEditor from '../components/RichTextEditor';
 import { EmptyState, ErrorState, Loading, SectionCard } from '../components/common';
 import { formatDate, relativeTime } from '../format';
 
@@ -245,13 +246,14 @@ function QuestionEditor({ question, index, onChange, onRemove }) {
         </HStack>
       </Flex>
 
-      <Textarea
-        size="sm"
-        rows={2}
-        value={question.question}
-        onChange={(e) => set('question', e.target.value)}
-        mb={2}
-      />
+      <Box mb={2}>
+        <RichTextEditor
+          compact
+          value={question.question}
+          onChange={(html) => set('question', html)}
+          placeholder="Question text"
+        />
+      </Box>
 
       {isChoice && (
         <Stack spacing={1} mb={2}>
@@ -271,15 +273,19 @@ function QuestionEditor({ question, index, onChange, onRemove }) {
                   set('correctAnswers', next);
                 }}
               />
-              <Input
-                size="sm"
-                value={option}
-                onChange={(event) => {
-                  const options = [...question.options];
-                  options[optionIndex] = event.target.value;
-                  set('options', options);
-                }}
-              />
+              <Box flex="1">
+                <RichTextEditor
+                  compact
+                  minH="46px"
+                  value={option}
+                  onChange={(html) => {
+                    const options = [...question.options];
+                    options[optionIndex] = html;
+                    set('options', options);
+                  }}
+                  placeholder={`Option ${optionIndex + 1}`}
+                />
+              </Box>
             </Flex>
           ))}
           <Button size="xs" variant="link" alignSelf="flex-start" onClick={() => set('options', [...(question.options || []), ''])}>
@@ -298,12 +304,12 @@ function QuestionEditor({ question, index, onChange, onRemove }) {
         />
       )}
 
-      <Textarea
-        size="sm"
-        rows={2}
-        placeholder="Explanation shown after submission"
+      <RichTextEditor
+        compact
+        minH="56px"
         value={question.explanation || ''}
-        onChange={(e) => set('explanation', e.target.value)}
+        onChange={(html) => set('explanation', html)}
+        placeholder="Explanation shown after submission"
       />
       {question.sourceExcerpt && (
         <Text fontSize="xs" color="gray.500" mt={2} fontStyle="italic" noOfLines={2}>

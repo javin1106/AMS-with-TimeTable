@@ -32,6 +32,8 @@ import {
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import { ErrorState, Loading, SectionCard } from '../components/common';
+import RichText from '../components/RichText';
+import RichTextEditor from '../components/RichTextEditor';
 
 const BLANK_VARIABLE = { name: '', type: 'range', min: 1, max: 10, step: 0, decimals: 2, values: [], unit: '' };
 const BLANK_ANSWER = { key: '', label: '', formula: '', unit: '', tolerancePercent: 1, toleranceAbs: 0, marks: 1 };
@@ -286,13 +288,14 @@ function QuestionCard({ classId, question, index, onChange, onRemove }) {
 
       <FormControl mb={1}>
         <FormLabel fontSize="sm">
-          Prompt — write <Code fontSize="xs">{'{{name}}'}</Code> where a variable should appear
+          Prompt — use the buttons below to drop a <Code fontSize="xs">{'{{variable}}'}</Code> at the cursor
         </FormLabel>
-        <Textarea
-          rows={3}
+        <RichTextEditor
           value={question.prompt}
+          onChange={(html) => set('prompt', html)}
           placeholder="A resistor of {{R}} Ω carries {{I}} A. Find the power dissipated."
-          onChange={(e) => set('prompt', e.target.value)}
+          variables={variableNames}
+          minH="110px"
         />
       </FormControl>
       {missingInPrompt.length > 0 && (
@@ -382,17 +385,24 @@ function QuestionCard({ classId, question, index, onChange, onRemove }) {
         </FormControl>
         <FormControl>
           <FormLabel fontSize="sm">Hint (optional)</FormLabel>
-          <Input size="sm" value={question.hint} onChange={(e) => set('hint', e.target.value)} />
+          <RichTextEditor
+            compact
+            minH="56px"
+            value={question.hint}
+            onChange={(html) => set('hint', html)}
+            placeholder="Ohm's law relates V, I and R"
+          />
         </FormControl>
       </SimpleGrid>
 
       <FormControl mt={4}>
-        <FormLabel fontSize="sm">Worked solution — shown after submitting, supports {'{{name}}'}</FormLabel>
-        <Textarea
-          rows={3}
+        <FormLabel fontSize="sm">Worked solution — shown after submitting</FormLabel>
+        <RichTextEditor
           value={question.solutionSteps}
+          onChange={(html) => set('solutionSteps', html)}
           placeholder="P = I²R = {{I}}² × {{R}}"
-          onChange={(e) => set('solutionSteps', e.target.value)}
+          variables={variableNames}
+          minH="110px"
         />
       </FormControl>
     </SectionCard>
@@ -459,9 +469,7 @@ function PreviewPanel({ classId, tutorialId, dirty }) {
             <Badge mb={2}>{sample.label}</Badge>
             {sample.questions.map((question, index) => (
               <Box key={index} mb={3}>
-                <Text fontSize="sm" fontWeight="500">
-                  {question.prompt}
-                </Text>
+                <RichText>{question.prompt}</RichText>
                 <HStack fontSize="xs" color="gray.500" mt={1} wrap="wrap">
                   {Object.entries(question.values).map(([name, value]) => (
                     <Code key={name} fontSize="xs">

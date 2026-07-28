@@ -109,14 +109,28 @@ function prepareQuestions(input) {
       }
     });
 
-    // Placeholders in the prompt must resolve, or students see raw {{x}}.
-    variants.templateVariables(question.prompt).forEach((name) => {
-      if (!names.includes(name)) {
-        errors.push(`${where}: the prompt uses {{${name}}} but no such variable is declared.`);
-      }
+    // Placeholders in the prompt and worked solution must resolve, or students
+    // see raw {{x}} on their paper.
+    ['prompt', 'solutionSteps'].forEach((field) => {
+      const label = field === 'prompt' ? 'prompt' : 'worked solution';
+      variants.templateVariables(question[field]).forEach((name) => {
+        if (!names.includes(name)) {
+          errors.push(`${where}: the ${label} uses {{${name}}} but no such variable is declared.`);
+        }
+      });
+      // Rich text authoring makes it easy to bold half of a placeholder, which
+      // silently stops it substituting. Catch it at save time.
+      variants.splitPlaceholders(question[field]).forEach((name) => {
+        errors.push(
+          `${where}: the ${label}'s {{${name}}} placeholder has formatting inside the braces, so it will not be replaced. Delete it and re-insert it with the variable button.`,
+        );
+      });
     });
 
-    if (!String(question.prompt || '').trim()) errors.push(`${where}: the prompt is empty.`);
+    // The prompt arrives as HTML, so an "empty" editor still sends <p><br></p>.
+    if (!variants.stripTags(question.prompt).replace(/&nbsp;|\s/g, '')) {
+      errors.push(`${where}: the prompt is empty.`);
+    }
 
     const constraint = String(question.constraint || '').trim();
     if (constraint) {
@@ -160,6 +174,10 @@ function prepareQuestions(input) {
 
   return { questions, errors };
 }
+
+// Exported for unit testing: this function gates every tutorial write, so its
+// validation rules are worth pinning down without needing a database.
+exports.prepareQuestions = prepareQuestions;
 
 exports.listTutorials = async (req, res) => {
   const filter = { classId: req.lmClass._id, ...(req.lmIsTeacher ? {} : { published: true }) };

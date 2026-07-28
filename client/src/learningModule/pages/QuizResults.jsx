@@ -18,6 +18,7 @@ import {
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import { EmptyState, ErrorState, Loading, SectionCard, StatTile } from '../components/common';
+import { richTextToPlain } from '../richTextUtils';
 import { formatDateTime } from '../format';
 
 export default function QuizResults() {
@@ -78,7 +79,7 @@ export default function QuizResults() {
               <Box key={entry.questionId} py={3} borderBottomWidth="1px" borderColor="gray.100">
                 <Flex justify="space-between" gap={3} mb={1}>
                   <Text fontSize="sm" noOfLines={2}>
-                    Q{index + 1}. {entry.question}
+                    Q{index + 1}. {richTextToPlain(entry.question)}
                   </Text>
                   <Badge
                     flexShrink={0}

@@ -18,6 +18,7 @@ import {
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import { ErrorState, Loading, SectionCard } from '../components/common';
+import RichTextEditor from '../components/RichTextEditor';
 
 const BLANK_QUESTION = {
   question: '',
@@ -85,13 +86,14 @@ function QuestionCard({ question, index, onChange, onRemove }) {
         </HStack>
       </Flex>
 
-      <Textarea
-        rows={2}
-        placeholder="Question text"
-        value={question.question}
-        onChange={(e) => set('question', e.target.value)}
-        mb={3}
-      />
+      <Box mb={3}>
+        <RichTextEditor
+          value={question.question}
+          onChange={(html) => set('question', html)}
+          placeholder="Question text — formatting, sub/superscripts and images are supported"
+          minH="110px"
+        />
+      </Box>
 
       {isChoice && (
         <Stack spacing={2} mb={3}>
@@ -116,17 +118,22 @@ function QuestionCard({ question, index, onChange, onRemove }) {
                   set('correctAnswers', next);
                 }}
               />
-              <Input
-                size="sm"
-                value={option}
-                placeholder={`Option ${optionIndex + 1}`}
-                onChange={(event) => {
-                  const options = [...question.options];
-                  options[optionIndex] = event.target.value;
-                  set('options', options);
-                }}
-                isReadOnly={question.type === 'truefalse'}
-              />
+              {question.type === 'truefalse' ? (
+                <Input size="sm" value={option} isReadOnly />
+              ) : (
+                <Box flex="1">
+                  <RichTextEditor
+                    compact
+                    value={option}
+                    onChange={(html) => {
+                      const options = [...question.options];
+                      options[optionIndex] = html;
+                      set('options', options);
+                    }}
+                    placeholder={`Option ${optionIndex + 1}`}
+                  />
+                </Box>
+              )}
               {question.type !== 'truefalse' && question.options.length > 2 && (
                 <Button
                   size="xs"
@@ -165,12 +172,11 @@ function QuestionCard({ question, index, onChange, onRemove }) {
         />
       )}
 
-      <Textarea
-        rows={2}
-        size="sm"
-        placeholder="Explanation shown to students after they submit"
+      <RichTextEditor
+        compact
         value={question.explanation || ''}
-        onChange={(e) => set('explanation', e.target.value)}
+        onChange={(html) => set('explanation', html)}
+        placeholder="Explanation shown to students after they submit"
       />
     </SectionCard>
   );

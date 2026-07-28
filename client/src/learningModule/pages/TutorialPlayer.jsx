@@ -20,6 +20,7 @@ import {
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import { ErrorState, Loading, SectionCard, StatTile } from '../components/common';
+import RichText from '../components/RichText';
 import { formatDateTime } from '../format';
 
 const answerId = (questionId, key) => `${questionId}:${key}`;
@@ -261,9 +262,9 @@ export default function TutorialPlayer() {
             </Badge>
           </Flex>
 
-          <Text fontSize="sm" color="gray.800" mb={3} whiteSpace="pre-wrap">
-            {question.prompt}
-          </Text>
+          <Box mb={3}>
+            <RichText>{question.prompt}</RichText>
+          </Box>
 
           <HStack fontSize="xs" color="gray.500" mb={3} wrap="wrap">
             <Text>Your values:</Text>
@@ -275,9 +276,12 @@ export default function TutorialPlayer() {
           </HStack>
 
           {question.hint && !submitted && (
-            <Text fontSize="xs" color="blue.600" mb={3}>
-              💡 {question.hint}
-            </Text>
+            <Flex fontSize="xs" color="blue.600" mb={3} gap={1}>
+              <Text>💡</Text>
+              <RichText fontSize="xs" color="blue.600">
+                {question.hint}
+              </RichText>
+            </Flex>
           )}
 
           {question.answers.map((answer) => {
@@ -330,9 +334,7 @@ export default function TutorialPlayer() {
               <Text fontSize="xs" fontWeight="600" color="gray.600" mb={1}>
                 Worked solution
               </Text>
-              <Text fontSize="sm" color="gray.700" whiteSpace="pre-wrap">
-                {question.solution}
-              </Text>
+              <RichText>{question.solution}</RichText>
             </>
           )}
         </SectionCard>

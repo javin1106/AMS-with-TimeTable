@@ -154,6 +154,46 @@ class — a low percentage means the method needs revisiting, which a single
 correct value could never tell you. Manual mark adjustment with feedback sits on
 top of auto-marking for partial credit.
 
+## Rich text authoring
+
+Every authoring surface uses a Quill-based editor (`components/RichTextEditor`):
+question stems, MCQ options, explanations, tutorial prompts, hints and worked
+solutions, announcements, and assignment/material content. react-quill was
+chosen because the quiz module already uses it, so staff meet one editor rather
+than three. Formatting, sub/superscripts, lists, tables, links and inline
+images (including pasted diagrams) are supported.
+
+**Sanitisation happens at render time, not on save.** `components/RichText`
+runs DOMPurify with an explicit tag/attribute allowlist every time content is
+displayed. That is the correct boundary: the client cannot be trusted, since
+anyone can POST raw HTML straight to the API, so validating on the way in would
+not actually protect a reader. Scripts, inline handlers, iframes, forms and
+`javascript:` URLs are all stripped — asserted by tests.
+
+`RichText` handles three content shapes, because the module predates the editor
+and AI generation emits Markdown:
+
+| Shape | Route | Where it comes from |
+| --- | --- | --- |
+| HTML | sanitised and rendered | anything the editor produced |
+| Markdown | `<Markdown>` | AI-generated notes and tutorials |
+| plain text | rendered with newlines kept | older posts, pasted text |
+
+Two consequences worth knowing:
+
+- **Empty checks must not use `.trim()`.** Quill's empty document is
+  `<p><br></p>`, which is truthy. Use `isRichTextEmpty()` from
+  `richTextUtils.js`; the server applies the same rule via `stripTags`.
+- **Placeholders can be broken by formatting.** Bolding half of `{{R}}` stores
+  `{{<strong>R</strong>}}`, which the substitution regex will never match. The
+  editor's variable buttons insert placeholders as plain text to avoid this, and
+  the server rejects a split placeholder at save time with a message telling the
+  teacher to re-insert it.
+
+Notification and email bodies are flattened to plain text and HTML-escaped
+before being stored or mailed, so a rich-text excerpt cannot corrupt (or inject
+into) an email body.
+
 ## Account provisioning on invite
 
 Inviting an unknown email address can create the platform account for it. There

@@ -18,13 +18,14 @@ import {
   MenuItem,
   MenuList,
   Text,
-  Textarea,
   useToast,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import { AttachmentList, AttachmentPicker } from '../components/Attachments';
 import CommentThread from '../components/CommentThread';
-import Markdown from '../components/Markdown';
+import RichText from '../components/RichText';
+import RichTextEditor from '../components/RichTextEditor';
+import { isRichTextEmpty } from '../richTextUtils';
 import { DueBadge, EmptyState, ErrorState, Loading, StateBadge } from '../components/common';
 import { WORK_TYPE_META, relativeTime } from '../format';
 
@@ -46,7 +47,7 @@ function Composer({ classId, onPosted }) {
   };
 
   const submit = async () => {
-    if (!text.trim() && !attachments.length) return;
+    if (isRichTextEmpty(text) && !attachments.length) return;
     setPosting(true);
     try {
       await lmApi.createAnnouncement(classId, {
@@ -81,14 +82,13 @@ function Composer({ classId, onPosted }) {
         </Flex>
       ) : (
         <Box>
-          <Textarea
-            autoFocus
-            rows={4}
-            placeholder="Share an update, a reminder, or a resource…"
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-            mb={3}
-          />
+          <Box mb={3}>
+            <RichTextEditor
+              value={text}
+              onChange={setText}
+              placeholder="Share an update, a reminder, or a resource…"
+            />
+          </Box>
           <AttachmentPicker attachments={attachments} onChange={setAttachments} disabled={posting} />
           <Flex mt={4} gap={3} align="center" wrap="wrap">
             <Checkbox size="sm" isChecked={pinned} onChange={(e) => setPinned(e.target.checked)}>
@@ -115,7 +115,7 @@ function Composer({ classId, onPosted }) {
               colorScheme="blue"
               onClick={submit}
               isLoading={posting}
-              isDisabled={!text.trim() && !attachments.length}
+              isDisabled={isRichTextEmpty(text) && !attachments.length}
             >
               {scheduledFor ? 'Schedule' : 'Post'}
             </Button>
@@ -181,9 +181,9 @@ function AnnouncementCard({ item, classId, isTeacher, me, onChanged }) {
             {item.status === 'draft' && <Badge colorScheme="gray">Draft</Badge>}
             {item.audience?.length > 0 && <Badge colorScheme="cyan">Targeted</Badge>}
           </Flex>
-          <Text mt={2} whiteSpace="pre-wrap" color="gray.700" fontSize="sm" lineHeight="1.7">
-            {item.text}
-          </Text>
+          <Box mt={2}>
+            <RichText>{item.text}</RichText>
+          </Box>
           <AttachmentList attachments={item.attachments} />
         </Box>
 
@@ -287,7 +287,7 @@ function CourseworkStreamCard({ item, classId }) {
       )}
       {item.workType === 'material' && item.instructions && (
         <Box mt={3} maxH="140px" overflow="hidden" position="relative">
-          <Markdown>{item.instructions.slice(0, 600)}</Markdown>
+          <RichText>{item.instructions.slice(0, 600)}</RichText>
           <Box
             position="absolute"
             bottom={0}

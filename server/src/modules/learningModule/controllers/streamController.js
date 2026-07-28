@@ -111,7 +111,7 @@ exports.createAnnouncement = async (req, res) => {
       excludeUserId: req.lmUser.id,
       type: "announcement",
       title: `New post in ${req.lmClass.name}`,
-      body: text.slice(0, 200),
+      body: text,
       link: `/learning/class/${req.lmClass._id}`,
       actorName: req.lmUser.name,
       email: true,
