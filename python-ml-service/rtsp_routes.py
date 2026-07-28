@@ -200,6 +200,7 @@ class RTSPRequest(BaseModel):
     detSize:             Optional[int]   = None
     frameSkip:           Optional[int]   = None
     targetImgsPerPerson: Optional[int]   = None
+    maxImgsPerRun:       Optional[int]   = None
     minSamples:          Optional[int]   = None
     clusterThreshold:    Optional[float] = None
     jobId:               str   = ""
@@ -358,6 +359,8 @@ def extract_rtsp_stream(req: RTSPRequest):
         req.frameSkip = seeded["frameSkip"] = _gt.get("frame_skip", 10)
     if req.targetImgsPerPerson is None:
         req.targetImgsPerPerson = seeded["targetImgsPerPerson"] = _gt.get("target_imgs_per_person", 10)
+    if req.maxImgsPerRun is None:
+        req.maxImgsPerRun = seeded["maxImgsPerRun"] = _gt.get("max_imgs_per_run", 0)
     if req.minSamples is None:
         req.minSamples = seeded["minSamples"] = _gt.get("min_samples", 3)
     if req.clusterThreshold is None:
@@ -452,6 +455,9 @@ def extract_rtsp_stream(req: RTSPRequest):
         reconnect_attempts = 0
         MAX_RECONNECTS     = 5
 
+        run_counts       = {}  # tracks images saved per person during this API call
+
+
         _cluster_passes      = 0
         _last_person_count   = 0
         _last_new_person_t   = time.time()
@@ -540,10 +546,11 @@ def extract_rtsp_stream(req: RTSPRequest):
 
                 if cluster_future is not None and cluster_future.done():
                     try:
-                        new_serial, updated, new_mean_embs, new_pcounts, crops_to_emit, returned_fstate = cluster_future.result()
+                        new_serial, updated, new_mean_embs, new_pcounts, crops_to_emit, returned_fstate, returned_rc = cluster_future.result()
                         next_serial = new_serial
                         existing_mean_embs.update(new_mean_embs)
                         person_counts.update(new_pcounts)
+                        run_counts.update(returned_rc)
                         for k, v in returned_fstate.items():
                             folder_state[k] = v
                         _cluster_passes += 1
@@ -573,8 +580,9 @@ def extract_rtsp_stream(req: RTSPRequest):
                     pc_snap     = dict(person_counts)
                     serial_now  = next_serial
                     fstate_snap = {k: {"scores": dict(v.get("scores", {}))} for k, v in folder_state.items()}
+                    rc_snap     = dict(run_counts)
 
-                    def _cluster_job(embs, imgs, tss, qs, mean_embs, pcounts, serial, p, fstate):
+                    def _cluster_job(embs, imgs, tss, qs, mean_embs, pcounts, serial, p, fstate, rc):
                         t0 = time.time()
                         lbl, ulbl = _cluster(embs, req.clusterThreshold, req.minSamples)
                         logger.info("  pass #%d: DBSCAN %.0fms — %d clusters", p, (time.time()-t0)*1000, len(ulbl))
@@ -583,12 +591,14 @@ def extract_rtsp_stream(req: RTSPRequest):
                                                             req.targetImgsPerPerson, pcounts,
                                                             req.clusterThreshold, fstate,
                                                             top_n=req.targetImgsPerPerson,
-                                                            embed_n=state.gt_config.get("embed_n", 5))
-                        return new_s, upd, mean_embs, pcounts, crops, fstate
+                                                            embed_n=state.gt_config.get("embed_n", 5),
+                                                            max_imgs_per_run=req.maxImgsPerRun,
+                                                            run_counts=rc)
+                        return new_s, upd, mean_embs, pcounts, crops, fstate, rc
 
                     cluster_future = cluster_pool.submit(
                         _cluster_job, embs_snap, imgs_snap, ts_snap, q_snap,
-                        mean_snap, pc_snap, serial_now, pass_num, fstate_snap)
+                        mean_snap, pc_snap, serial_now, pass_num, fstate_snap, rc_snap)
 
                 now = time.time()
                 if now - last_progress_t >= PROGRESS_EVERY:
@@ -601,7 +611,7 @@ def extract_rtsp_stream(req: RTSPRequest):
                 secs_since_new = time.time() - _last_new_person_t
                 if (not req.continuous
                         and person_counts
-                        and all(c >= req.targetImgsPerPerson for c in person_counts.values())
+                        and all((c >= req.targetImgsPerPerson or (req.maxImgsPerRun > 0 and run_counts.get(p, 0) >= req.maxImgsPerRun)) for p, c in person_counts.items())
                         and secs_since_new >= NEW_PERSON_TIMEOUT):
                     yield sse({"type": "stage",
                                "message": f"All persons reached target — no new person for {int(secs_since_new)}s, stopping"})
@@ -624,7 +634,9 @@ def extract_rtsp_stream(req: RTSPRequest):
                     next_serial, req.targetImgsPerPerson, person_counts, req.clusterThreshold,
                     fstate_final,
                     top_n=req.targetImgsPerPerson,
-                    embed_n=state.gt_config.get("embed_n", 5))
+                    embed_n=state.gt_config.get("embed_n", 5),
+                    max_imgs_per_run=req.maxImgsPerRun,
+                    run_counts=run_counts)
                 for crop_event in crops_to_emit:
                     yield sse(crop_event)
                 for person_id, new_count in updated.items():
@@ -1976,12 +1988,15 @@ def _select_diverse(pool, stored_embs, new_embs, n):
 def _save_clusters(labels, unique_labels, all_embeddings, all_face_images,
                     all_timestamps, all_quality, batch_dir, existing_mean_embs,
                     next_serial, target_per_person, person_counts,
-                    cluster_threshold, folder_state, top_n=10, embed_n=5):
+                    cluster_threshold, folder_state, top_n=10, embed_n=5,
+                    max_imgs_per_run=0, run_counts=None):
     """
     Returns (next_serial, updated, crops_to_emit).
     crops_to_emit is a list of SSE event dicts (mkdir, crop_save, info_save, file_delete).
     Node.js intercepts these and saves the files — Python writes nothing to disk here.
     """
+    if run_counts is None:
+        run_counts = {}
     updated       = {}
     crops_to_emit = []
     MATCH_THRESHOLD = max(cluster_threshold, 0.50)
@@ -2032,6 +2047,9 @@ def _save_clusters(labels, unique_labels, all_embeddings, all_face_images,
                 continue
             fname = f"gt_{ts:.1f}s_f{idx}.jpg"
             if fname not in existing_scores:
+                if max_imgs_per_run > 0 and run_counts.get(folder_name, 0) >= max_imgs_per_run:
+                    continue
+                
                 _, buf = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, 100])
                 crops_to_emit.append({
                     "type":     "crop_save",
@@ -2041,6 +2059,8 @@ def _save_clusters(labels, unique_labels, all_embeddings, all_face_images,
                 })
                 new_scores[fname] = round(quality, 4)
                 new_embs[fname]   = all_embeddings[idx]  # already L2-normalised
+                
+                run_counts[folder_name] = run_counts.get(folder_name, 0) + 1
 
         if not new_scores:
             continue
@@ -2361,6 +2381,7 @@ class GTConfigUpdate(BaseModel):
     top_n:                  Optional[int]   = None
     embed_n:                Optional[int]   = None
     camera_switch_sec:      Optional[int]   = None
+    max_imgs_per_run:       Optional[int]   = None
 
 
 @router.get("/gt-config")
@@ -2388,6 +2409,7 @@ def update_gt_config_ep(req: GTConfigUpdate):
         "top_n":                  (5, 30),
         "embed_n":                (3, 15),
         "camera_switch_sec":      (5, 300),
+        "max_imgs_per_run":       (0, 50),
     }
     for key, (lo, hi) in float_ranges.items():
         if key in updates and not (lo <= updates[key] <= hi):

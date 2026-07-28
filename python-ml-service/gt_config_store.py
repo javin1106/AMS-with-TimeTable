@@ -29,6 +29,7 @@ DEFAULTS = {
     "camera_switch_sec":       30,
     "top_n":                   10,
     "embed_n":                 5,
+    "max_imgs_per_run":        0,
 }
 
 
