@@ -97,7 +97,16 @@ function handleGroundTruthEvent(event, batch, pythonFolderMap) {
         } else if (event.type === 'info_save') {
             const folderPath = path.join(batchDir, event.folder);
             fs.mkdirSync(folderPath, { recursive: true });
-            fs.writeFileSync(path.join(folderPath, '_info.json'), JSON.stringify(event.info, null, 2));
+            
+            const infoPath = path.join(folderPath, '_info.json');
+            let existingInfo = {};
+            if (fs.existsSync(infoPath)) {
+                try { existingInfo = JSON.parse(fs.readFileSync(infoPath, 'utf8')); } catch (_) {}
+            }
+            // Preserve approved_files and other keys that Python might not send
+            const newInfo = { ...existingInfo, ...event.info };
+            
+            fs.writeFileSync(infoPath, JSON.stringify(newInfo, null, 2));
 
             const oidStr = pythonFolderMap[event.folder];
             if (oidStr && event.info) {

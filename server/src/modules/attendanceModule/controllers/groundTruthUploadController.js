@@ -8,6 +8,7 @@ const crypto     = require('crypto');
 const Batch      = require('../../../models/attendanceModule/batch');
 const erpSync    = require('./erpEmbeddingSyncHelper');
 const embeddingJobManager = require('./erpEmbeddingJobManager');
+const embeddingSummaryStore = require('./erpEmbeddingSummaryStore');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const ERP_PHOTOS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'erp_photos');
@@ -237,6 +238,7 @@ class GroundTruthUploadController {
                 if (pklPath) {
                     await fsPromises.unlink(pklPath);
                 }
+                embeddingSummaryStore.clearBatchSummary(batch);
                 console.log(`[GT Upload] Replaced existing embeddings database for batch=${batch}`);
             }
 
@@ -362,7 +364,7 @@ class GroundTruthUploadController {
                     batch,
                     department: departmentFromBatch(batch),
                     rollNos: roll_nos,
-                })
+                }, { onComplete: embeddingSummaryStore.replaceBatchSummary })
                 : null;
 
             res.json({
@@ -446,7 +448,7 @@ class GroundTruthUploadController {
                 batch,
                 department: departmentFromBatch(batch),
                 rollNos: [safeRollNo],
-            });
+            }, { onComplete: embeddingSummaryStore.patchBatchSummary });
 
             res.json({
                 message: 'Photo uploaded successfully',
@@ -524,6 +526,7 @@ class GroundTruthUploadController {
                 old_roll_no: safeOldRollNo,
                 new_roll_no: safeNewRollNo
             });
+            embeddingSummaryStore.renameFailedRollNo(batch, safeOldRollNo, safeNewRollNo);
 
             res.json({
                 message: `Successfully renamed ${safeOldRollNo} to ${safeNewRollNo}`,
@@ -579,6 +582,7 @@ class GroundTruthUploadController {
                 batch: batch,
                 roll_no: safeRollNo
             });
+            embeddingSummaryStore.removeFailedRollNos(batch, [safeRollNo]);
 
             res.json({
                 message: 'Photo deleted successfully',
@@ -629,6 +633,7 @@ class GroundTruthUploadController {
             for (const roll_no of deletedRollNos) {
                 job = triggerEmbeddingSync('delete', { batch, roll_no });
             }
+            embeddingSummaryStore.clearBatchSummary(batch);
 
             res.json({
                 message: `Deleted ${deletedRollNos.length} photo(s)`,
@@ -668,7 +673,7 @@ class GroundTruthUploadController {
                 batch,
                 department: departmentFromBatch(batch),
                 rollNos: roll_nos,
-            });
+            }, { onComplete: embeddingSummaryStore.replaceBatchSummary });
 
             res.status(202).json({
                 message: `Embedding generation queued for ${roll_nos.length} photos`,
@@ -730,7 +735,22 @@ class GroundTruthUploadController {
                     hasEmbedding = true;
                     try { embeddingUpdatedAt = fs.statSync(pklPath).mtime; } catch (_) {}
                 }
-                batches.push({ batch: entry.name, count, hasEmbedding, embeddingUpdatedAt });
+                const embeddingSummary = embeddingSummaryStore.readBatchSummary(entry.name);
+                const failedRollNos = embeddingSummary?.failedRollNos || [];
+                batches.push({
+                    batch: entry.name,
+                    count,
+                    hasEmbedding,
+                    embeddingUpdatedAt,
+                    completedEmbeddingCount: embeddingSummary
+                        ? Math.max(0, count - failedRollNos.length)
+                        : null,
+                    faceNotDetectedCount: embeddingSummary
+                        ? failedRollNos.length
+                        : null,
+                    failedRollNos,
+                    embeddingSummaryUpdatedAt: embeddingSummary?.updatedAt || null,
+                });
             }
 
             batches.sort((a, b) => a.batch.localeCompare(b.batch));

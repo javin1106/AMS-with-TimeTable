@@ -20,6 +20,7 @@ const rateLimit = require("express-rate-limit");
 require("./modules/attendanceModule/controllers/mlServiceAuth");
 const v1router = require("./routes");
 const { startAutoScheduler } = require('./modules/attendanceModule/controllers/autoAttendanceScheduler');
+const { startGpuMetricsCollector } = require('./modules/attendanceModule/controllers/gpuMetricsCollector');
 const alertNotifier = require("./modules/attendanceModule/controllers/alertNotifier");
 
 process.on('uncaughtException',  (err) => console.error('UNCAUGHT EXCEPTION:', err));
@@ -269,6 +270,11 @@ mongoose
       // CLIENT_HEALTH_URL / SERVER_HEALTH_URL (plus ML_SERVICE_URL / ERP_API_URL).
       const { startUptimeDigestScheduler } = require('./modules/attendanceModule/controllers/uptimeDigestScheduler');
       startUptimeDigestScheduler();
+
+      // ── Continuous GPU Metrics Collection (Issue #1739) ──────
+      // Samples the ML/GPU service independently of the View Metrics page.
+      // MongoDB TTL retention keeps the history bounded.
+      startGpuMetricsCollector();
 
     });
     server.setTimeout(600000); // 10 min — prevents Node killing long SSE connections

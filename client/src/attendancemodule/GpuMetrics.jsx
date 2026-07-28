@@ -12,14 +12,16 @@ import {
 import { theme } from './config';
 import ServiceConsole from './ServiceConsole';
 
-const HISTORY_LIMIT = 28800;
+const HISTORY_LIMIT = 5000;
+const HISTORY_MAX_POINTS = 2000;
+const HISTORY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const POLL_MS = 3000;
-const HISTORY_KEY = 'ams_gpu_metrics_history_v1';
 // Only the Node proxy — direct-to-Python fallback URLs used to live here,
 // but that let anyone bypass Node's admin-only gate on this endpoint (GPU
 // metrics are restricted to admin/iams-admin — see mlRoutes.js) by just
 // hitting the Python service's port directly.
-const METRICS_URLS = ['/api/v1/ml/gpu-metrics'];
+const METRICS_URL = '/api/v1/ml/gpu-metrics';
+const METRICS_HISTORY_URL = '/api/v1/ml/gpu-metrics/history';
 const LOGS_URL = '/api/v1/ml/logs';
 const RANGE_OPTIONS = [
   { id: 'live', label: 'Live' },
@@ -69,18 +71,26 @@ function formatAxisDate(timestamp) {
   });
 }
 
-function readHistory() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
-    return Array.isArray(parsed) ? parsed.filter((sample) => sample?.timestamp).slice(-HISTORY_LIMIT) : [];
-  } catch {
-    return [];
-  }
+function normalizeSample(sample) {
+  const timestamp = new Date(sample?.timestamp).getTime();
+  if (!Number.isFinite(timestamp)) return null;
+  return {
+    timestamp,
+    utilPercent: asNumber(sample.utilPercent),
+    memPercent: asNumber(sample.memPercent),
+    memUsedMiB: asNumber(sample.memUsedMiB),
+    memTotalMiB: asNumber(sample.memTotalMiB),
+    tempC: asNumber(sample.tempC),
+    powerW: asNumber(sample.powerW),
+    available: sample.available !== false,
+    error: sample.error || '',
+  };
 }
 
 export default function GpuMetrics() {
-  const [samples, setSamples] = useState(readHistory);
+  const [samples, setSamples] = useState([]);
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
   const [range, setRange] = useState('live');
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
@@ -89,72 +99,87 @@ export default function GpuMetrics() {
 
   useEffect(() => {
     let cancelled = false;
+    let interval = null;
 
-    async function fetchMetrics() {
+    function appendSample(sample) {
+      setSamples((previous) => {
+        const existingIndex = previous.findIndex((item) => item.timestamp === sample.timestamp);
+        if (existingIndex >= 0) {
+          const next = [...previous];
+          next[existingIndex] = sample;
+          return next;
+        }
+        return [...previous, sample]
+          .sort((left, right) => left.timestamp - right.timestamp)
+          .slice(-HISTORY_LIMIT);
+      });
+    }
+
+    async function loadHistory() {
+      const response = await axios.get(METRICS_HISTORY_URL, {
+        timeout: 10000,
+        params: {
+          from: new Date(Date.now() - HISTORY_WINDOW_MS).toISOString(),
+          maxPoints: HISTORY_MAX_POINTS,
+        },
+      });
+      if (!Array.isArray(response.data?.samples)) {
+        throw new Error('GPU metrics history endpoint returned an invalid response');
+      }
+
+      const history = response.data.samples
+        .map(normalizeSample)
+        .filter(Boolean);
+      if (!cancelled) setSamples(history.slice(-HISTORY_LIMIT));
+    }
+
+    async function fetchLatestMetric() {
       try {
-        let data = null;
-        let lastError = null;
-
-        for (const url of METRICS_URLS) {
-          try {
-            const response = await axios.get(url, { timeout: 5000 });
-            if (response.data && typeof response.data === 'object') {
-              data = response.data;
-              break;
-            }
-            lastError = new Error('GPU metrics endpoint did not return JSON metrics');
-          } catch (err) {
-            lastError = err;
-          }
-        }
-
-        if (!data) {
-          throw lastError || new Error('GPU metrics unavailable');
-        }
-
-        if (cancelled) return;
-
-        if (!data || typeof data !== 'object' || !('utilPercent' in data)) {
+        const response = await axios.get(METRICS_URL, { timeout: 5000 });
+        const sample = normalizeSample(response.data);
+        if (!sample) {
           throw new Error('GPU metrics endpoint did not return JSON metrics');
         }
+        if (cancelled) return;
 
-        if (data.available === false) {
-          setError(data.error || 'GPU metrics unavailable');
-          return;
-        }
-
-        setError('');
-        setSamples((prev) => {
-          const timestamp = Date.now();
-          const next = {
-            timestamp,
-            time: formatClock(timestamp),
-            utilPercent: asNumber(data.utilPercent) ?? 0,
-            memPercent: asNumber(data.memPercent) ?? 0,
-            memUsedMiB: asNumber(data.memUsedMiB),
-            memTotalMiB: asNumber(data.memTotalMiB),
-            tempC: asNumber(data.tempC),
-            powerW: asNumber(data.powerW),
-            available: data.available !== false,
-          };
-          return [...prev, next].slice(-HISTORY_LIMIT);
-        });
+        appendSample(sample);
+        setError(sample.available ? '' : (sample.error || 'GPU metrics unavailable'));
       } catch (err) {
-        if (!cancelled) setError(err.message || 'GPU metrics unavailable');
+        if (!cancelled) {
+          setError(
+            err.response?.data?.error
+            || err.message
+            || 'GPU metrics unavailable'
+          );
+        }
       }
     }
 
-    fetchMetrics();
-    const interval = setInterval(fetchMetrics, POLL_MS);
+    async function startReadingBackendHistory() {
+      try {
+        await loadHistory();
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            err.response?.data?.error
+            || err.message
+            || 'GPU metrics history unavailable'
+          );
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+
+      await fetchLatestMetric();
+      if (!cancelled) interval = setInterval(fetchLatestMetric, POLL_MS);
+    }
+
+    void startReadingBackendHistory();
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      if (interval) clearInterval(interval);
     };
   }, []);
-
-  useEffect(() => {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(samples.slice(-HISTORY_LIMIT)));
-  }, [samples]);
 
   const latest = samples[samples.length - 1];
   const chartSamples = useMemo(() => {
@@ -204,7 +229,7 @@ export default function GpuMetrics() {
             borderColor: error ? '#fecaca' : '#bbf7d0',
           }}
         >
-          {error ? 'Unavailable' : 'Live'}
+          {loading ? 'Loading' : error ? 'Unavailable' : 'Live'}
         </span>
       </header>
 

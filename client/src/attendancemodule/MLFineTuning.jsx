@@ -49,6 +49,7 @@ const GT_OPTIONS = {
     top_n:                  [5, 8, 10, 15, 20, 30],
     embed_n:                [3, 4, 5, 7, 10],
     camera_switch_sec:      [5, 10, 15, 20, 30, 45, 60, 90, 120],
+    max_imgs_per_run:       [0, 1, 2, 3, 4, 5, 8, 10],
 };
 
 const GT_LABELS = {
@@ -64,6 +65,7 @@ const GT_LABELS = {
     top_n:                  { label: 'Max images / person',    unit: 'images',  hint: 'Maximum images kept per person folder (lowest-quality ones are deleted).' },
     embed_n:                { label: 'Embedding images',       unit: 'images',  hint: 'Of the top-N kept, how many are used to compute the mean embedding.' },
     camera_switch_sec:      { label: 'Camera switch interval', unit: 'sec',     hint: 'When two cameras are configured for a session, how long to capture from each before switching to the other.' },
+    max_imgs_per_run:       { label: 'Max images per person per run', unit: 'images', hint: 'Stop collecting for a person in a single camera run once this many are saved. 0 = unlimited.' },
 };
 
 const ATTEND_OPTIONS = {
@@ -778,7 +780,7 @@ export default function MLFineTuning() {
                             Session Parameters
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, marginBottom: 20 }}>
-                            {['frame_skip', 'target_imgs_per_person', 'cluster_threshold', 'min_samples', 'det_size'].map(key => {
+                            {['frame_skip', 'target_imgs_per_person', 'max_imgs_per_run', 'cluster_threshold', 'min_samples', 'det_size'].map(key => {
                                 const meta = GT_LABELS[key];
                                 const opts = GT_OPTIONS[key];
                                 return (
@@ -792,7 +794,7 @@ export default function MLFineTuning() {
                                         >
                                             {opts.map(v => (
                                                 <option key={v} value={v}>
-                                                    {v}{v === (key === 'frame_skip' ? 10 : key === 'target_imgs_per_person' ? 10 : key === 'cluster_threshold' ? 0.45 : key === 'min_samples' ? 3 : 320) ? ' (default)' : ''}
+                                                    {v}{v === (key === 'frame_skip' ? 10 : key === 'target_imgs_per_person' ? 10 : key === 'max_imgs_per_run' ? 0 : key === 'cluster_threshold' ? 0.45 : key === 'min_samples' ? 3 : 320) ? ' (default)' : ''}{key === 'max_imgs_per_run' && v === 0 ? ' (Unlimited)' : ''}
                                                 </option>
                                             ))}
                                         </select>
