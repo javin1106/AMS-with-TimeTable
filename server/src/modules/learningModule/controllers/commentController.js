@@ -95,7 +95,7 @@ exports.createComment = async (req, res) => {
       klass: req.lmClass,
       type: "comment",
       title: `Private comment in ${req.lmClass.name}`,
-      body: text.slice(0, 200),
+      body: text,
       link: `/learning/class/${req.lmClass._id}/work/${
         (await LmSubmission.findById(targetId).select("courseworkId").lean())?.courseworkId
       }`,
@@ -114,7 +114,7 @@ exports.createComment = async (req, res) => {
         excludeUserId: req.lmUser.id,
         type: "comment",
         title: `New comment in ${req.lmClass.name}`,
-        body: `${req.lmUser.name}: ${text.slice(0, 160)}`,
+        body: `${req.lmUser.name}: ${text}`,
         link: `/learning/class/${req.lmClass._id}`,
         actorName: req.lmUser.name,
       });

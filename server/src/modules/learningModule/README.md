@@ -78,6 +78,8 @@ answer; time limit, attempt cap, shuffling, negative marking, pass mark,
 availability window; auto-grading that writes straight into the gradebook;
 per-question difficulty analysis for the teacher.
 
+**Parameterised tutorials** — see below.
+
 **AI Studio** — see below.
 
 **Everywhere else** — cross-class to-do list, month calendar of due dates,
@@ -85,6 +87,135 @@ in-app notification feed with email fan-out, and a per-class insights page
 (submission rate, late rate, averages, at-risk students).
 
 ---
+
+## Parameterised tutorials
+
+A teacher authors a numerical question **once**, with variables and ranges, and
+every student is given their own figures. Answers are marked against a formula
+rather than a fixed key, so copying a classmate's final number is useless while
+comparing method still works.
+
+```
+lm_tutorial (authored once)
+  question
+    prompt      "A resistor of {{R}} Ω carries {{I}} A. Find the power."
+    variables   R: integer 10–100 step 5     I: decimal 0.5–3 step 0.5
+    constraint  R > 0                        ← re-draws until true
+    answers     Power = I^2*R   ±1%   5 marks
+    solution    "P = I²R = {{I}}² × {{R}}"
+        │
+        ▼   generateVariant(tutorial, studentId, attemptNumber)
+lm_tutorial_attempt (one per student per attempt)
+    seed        sha256(tutorialId|studentId|attemptNumber) → mulberry32
+    values      { R: 45, I: 1.5 }
+    prompt      "A resistor of 45 Ω carries 1.5 A. Find the power."
+    expected    [{ key: 'p', value: 101.25, marks: 5 }]
+        │
+        ▼   student types an answer (a number, or "45*1.5^2")
+    responses   [{ raw: '101.3', value: 101.3, correct: true, awarded: 5 }]
+        │
+        └──►  mirrored into lm_submission, so it lands in the gradebook
+              alongside every other piece of classwork
+```
+
+### Design decisions worth knowing
+
+**Formulas are never `eval`'d.** A teacher-authored formula is untrusted input
+executed on the server, so `services/formulaEngine.js` is a hand-written
+tokeniser + recursive-descent parser with an explicit function whitelist.
+There is no property access, no assignment and no way to reach the JS runtime;
+the test suite asserts that for `process.exit(1)`, `require("fs")`,
+`constructor.constructor`, arrow functions and eight other escape shapes.
+
+**Values are deterministic, and also persisted.** The seed is derived from
+`(tutorialId, studentId, attemptNumber)`, so a reload gives the same paper. But
+the drawn values, the rendered prompt and the computed expected answers are all
+*stored on the attempt* — the seed is only a reproducibility aid. That means a
+teacher editing a question or its formula afterwards cannot retroactively change
+what an in-progress student was asked, nor silently re-mark submitted work.
+
+**Constraints prevent unanswerable papers.** Random values can produce a
+divide-by-zero or the root of a negative. A question may declare a constraint
+(`b != c`, `R > 0`) which generation re-rolls until satisfied. Publishing samples
+five variants first and **refuses** to publish if any of them fails, so the
+failure surfaces to the teacher rather than to a student. If a constraint proves
+unsatisfiable at generation time the student still gets a usable paper and the
+teacher gets a warning on the results page.
+
+**Marking is tolerance-based, on two axes.** Each answer carries a relative
+tolerance (default 1%) and an absolute one; the allowance is the larger of the
+two. The absolute floor matters because 1% of `0.0001` is impossible to hit.
+Students may type an expression (`2*pi*3`) rather than pre-computing, parsed by
+the same safe engine.
+
+**Method analysis, not answer analysis.** Since no two students share figures,
+the teacher's results page reports the success rate *per answer slot* across the
+class — a low percentage means the method needs revisiting, which a single
+correct value could never tell you. Manual mark adjustment with feedback sits on
+top of auto-marking for partial credit.
+
+## Rich text authoring
+
+Every authoring surface uses a Quill-based editor (`components/RichTextEditor`):
+question stems, MCQ options, explanations, tutorial prompts, hints and worked
+solutions, announcements, and assignment/material content. react-quill was
+chosen because the quiz module already uses it, so staff meet one editor rather
+than three. Formatting, sub/superscripts, lists, tables, links and inline
+images (including pasted diagrams) are supported.
+
+**Sanitisation happens at render time, not on save.** `components/RichText`
+runs DOMPurify with an explicit tag/attribute allowlist every time content is
+displayed. That is the correct boundary: the client cannot be trusted, since
+anyone can POST raw HTML straight to the API, so validating on the way in would
+not actually protect a reader. Scripts, inline handlers, iframes, forms and
+`javascript:` URLs are all stripped — asserted by tests.
+
+`RichText` handles three content shapes, because the module predates the editor
+and AI generation emits Markdown:
+
+| Shape | Route | Where it comes from |
+| --- | --- | --- |
+| HTML | sanitised and rendered | anything the editor produced |
+| Markdown | `<Markdown>` | AI-generated notes and tutorials |
+| plain text | rendered with newlines kept | older posts, pasted text |
+
+Two consequences worth knowing:
+
+- **Empty checks must not use `.trim()`.** Quill's empty document is
+  `<p><br></p>`, which is truthy. Use `isRichTextEmpty()` from
+  `richTextUtils.js`; the server applies the same rule via `stripTags`.
+- **Placeholders can be broken by formatting.** Bolding half of `{{R}}` stores
+  `{{<strong>R</strong>}}`, which the substitution regex will never match. The
+  editor's variable buttons insert placeholders as plain text to avoid this, and
+  the server rejects a split placeholder at save time with a message telling the
+  teacher to re-insert it.
+
+Notification and email bodies are flattened to plain text and HTML-escaped
+before being stored or mailed, so a rich-text excerpt cannot corrupt (or inject
+into) an email body.
+
+## Account provisioning on invite
+
+Inviting an unknown email address can create the platform account for it. There
+is deliberately **no second login system**: a provisioned account is an ordinary
+platform account (bcrypt password, JWT cookie, same `/login`), created by a
+teacher instead of an admin.
+
+- The account is created with a **random 32-byte password nobody ever learns**,
+  so it cannot be signed into until claimed. No password is ever emailed.
+- The invitee receives the platform's existing welcome email and sets their own
+  password through the existing OTP flow at `/forgot-password`.
+- A teacher may only grant `STUDENT` (for students) or `FACULTY` (for
+  co-teachers). Anything above that stays an administrator's decision, so a
+  compromised teacher account cannot escalate anyone.
+- Roles are **not** added to accounts that already exist unless the teacher
+  explicitly ticks that option — silently changing someone's platform roles
+  because they were added to a class is a surprise.
+- Provisioning is idempotent and race-safe: a duplicate-key collision from a
+  concurrent invite re-reads the winner rather than reporting a failure.
+
+Turn it off per-invite and the old behaviour applies: an `invited` membership row
+is stored and claimed on that person's first sign-in.
 
 ## The AI Studio pipeline
 
@@ -192,7 +323,10 @@ PATCH  /topics/:topicId      T   rename / reorder
 DELETE /topics/:topicId      T   delete (items fall back to untopiced)
 
 GET    /members                  roster (teachers see pending/invited too)
-POST   /members/invite       T   bulk invite by email
+POST   /members/invite       T   bulk invite by email; `createAccounts` (default
+                                 true) provisions platform accounts for unknown
+                                 addresses, `grantRoleToExisting` (default false)
+                                 adds the role to accounts that lack it
 POST   /members/:id/decide   T   approve / decline a join request
 PATCH  /members/:id          T   role, mute, roll number
 DELETE /members/:id          T   remove
@@ -238,6 +372,21 @@ GET    /quizzes/:quizId/results  T   attempts + per-question analysis
 POST   /quizzes/:quizId/attempts     start (resumes an in-progress attempt)
 POST   /attempts/:attemptId/submit   auto-grade and mirror into the gradebook
 GET    /attempts/:attemptId
+
+GET    /tutorials                            parameterised tutorials
+POST   /tutorials                        T   create
+GET    /tutorials/formula-reference           whitelisted functions/constants
+POST   /tutorials/validate-formula       T   authoring-time formula check
+GET    /tutorials/:id                        teachers get formulas, students do not
+PATCH  /tutorials/:id                    T
+DELETE /tutorials/:id                    T
+POST   /tutorials/:id/preview            T   roll sample papers
+POST   /tutorials/:id/publish            T   validates generation first
+GET    /tutorials/:id/results            T   per-answer method analysis
+GET    /tutorials/:id/attempt                get-or-create the caller's variant
+POST   /tutorial-attempts/:id/save           save a draft
+POST   /tutorial-attempts/:id/submit         auto-mark against stored expected values
+POST   /tutorial-attempts/:id/adjust     T   manual override + feedback
 
 GET    /studio/status                    T   which providers are configured
 GET    /studio/recordings                T   attendance-module recordings

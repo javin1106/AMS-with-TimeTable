@@ -35,6 +35,7 @@ import {
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import { AttachmentPicker } from '../components/Attachments';
+import RichTextEditor from '../components/RichTextEditor';
 import { DueBadge, EmptyState, ErrorState, Loading, StateBadge } from '../components/common';
 import { WORK_TYPE_META, formatDate } from '../format';
 
@@ -134,11 +135,12 @@ function CourseworkModal({ isOpen, onClose, classId, topics, onSaved, initial })
           </FormControl>
 
           <FormControl mb={4}>
-            <FormLabel fontSize="sm">{isMaterial ? 'Content (Markdown supported)' : 'Instructions'}</FormLabel>
-            <Textarea
+            <FormLabel fontSize="sm">{isMaterial ? 'Content' : 'Instructions'}</FormLabel>
+            <RichTextEditor
               value={form.instructions}
-              onChange={(e) => set('instructions', e.target.value)}
-              rows={isMaterial ? 10 : 5}
+              onChange={(html) => set('instructions', html)}
+              minH={isMaterial ? '260px' : '150px'}
+              placeholder={isMaterial ? 'Reading material, notes, links…' : 'What should students do?'}
             />
           </FormControl>
 

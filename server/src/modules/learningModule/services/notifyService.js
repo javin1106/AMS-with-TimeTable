@@ -10,11 +10,47 @@ try {
   console.warn("[LearningModule] mailer unavailable, notifications will be in-app only");
 }
 
+/**
+ * Notification and email bodies are excerpts of user-authored content, which is
+ * now rich text. Two reasons to flatten it here rather than pass it through:
+ * a half-open `<p` from `.slice(0, 200)` would corrupt the surrounding email
+ * markup, and interpolating author-controlled HTML into an email body is a
+ * needless injection surface. Notifications are a one-line summary anyway.
+ */
+const toPlainExcerpt = (value, limit = 200) => {
+  const text = String(value ?? '')
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<\/(p|div|li|h[1-6])>/gi, ' ')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text.length > limit ? `${text.slice(0, limit).trimEnd()}…` : text;
+};
+
+// Escaped before interpolation so a stray < or & from the excerpt cannot break
+// (or inject into) the email markup.
+const escapeHtml = (value) =>
+  String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[ch]));
+
+// `body` may already be trusted HTML (the invite mail composes its own), so
+// callers pass pre-escaped content; `title` is always plain and is escaped here.
 const emailShell = (title, body, link) => `
   <div style="font-family:Segoe UI,Arial,sans-serif;max-width:560px;margin:auto">
-    <h2 style="color:#1967d2;margin-bottom:4px">${title}</h2>
+    <h2 style="color:#1967d2;margin-bottom:4px">${escapeHtml(title)}</h2>
     <p style="color:#3c4043;line-height:1.6">${body}</p>
-    ${link ? `<p><a href="${link}" style="color:#1967d2">Open in XCEED Learning</a></p>` : ""}
+    ${link ? `<p><a href="${escapeHtml(link)}" style="color:#1967d2">Open in XCEED Learning</a></p>` : ""}
     <hr style="border:none;border-top:1px solid #e0e0e0;margin:24px 0" />
     <p style="color:#80868b;font-size:12px">XCEED Learning Module — NIT Jalandhar</p>
   </div>`;
@@ -70,6 +106,8 @@ async function notifyClass(opts) {
     const finalRecipients = recipients.filter((id) => String(id) !== String(excludeUserId));
     if (!finalRecipients.length) return;
 
+    const plainBody = toPlainExcerpt(body);
+
     await LmNotification.insertMany(
       finalRecipients.map((userId) => ({
         userId,
@@ -77,7 +115,7 @@ async function notifyClass(opts) {
         className: klass.name,
         type,
         title,
-        body,
+        body: plainBody,
         link,
         actorName,
       })),
@@ -86,7 +124,11 @@ async function notifyClass(opts) {
     if (email && sendMail && klass.settings?.emailNotifications && emailAddresses.length) {
       // Digest-style single send rather than one mail per member — the SMTP
       // pool in mailer.js is shared with the rest of the platform.
-      await sendMail(emailAddresses.join(","), `[${klass.name}] ${title}`, emailShell(title, body, link)).catch(
+      await sendMail(
+        emailAddresses.join(","),
+        `[${klass.name}] ${title}`,
+        emailShell(title, escapeHtml(plainBody), link),
+      ).catch(
         (err) => console.error("[LearningModule] notification mail failed:", err.message),
       );
     }
@@ -105,7 +147,7 @@ async function notifyUser({ userId, klass, type, title, body = "", link = "", ac
       className: klass?.name || "",
       type,
       title,
-      body,
+      body: toPlainExcerpt(body),
       link,
       actorName,
     });
@@ -117,9 +159,11 @@ async function notifyUser({ userId, klass, type, title, body = "", link = "", ac
 async function sendInviteMail(to, klass, inviterName) {
   if (!sendMail || !to) return;
   const title = `You have been added to ${klass.name}`;
-  const body = `${inviterName} added you to the class <b>${klass.name}</b>${
-    klass.section ? ` (${klass.section})` : ""
-  }. Sign in to XCEED and open the Learning module, or join manually with the class code <b>${klass.code}</b>.`;
+  // A class name, section and the inviter's name are all user-supplied, so they
+  // are escaped before landing in the email markup.
+  const body = `${escapeHtml(inviterName)} added you to the class <b>${escapeHtml(klass.name)}</b>${
+    klass.section ? ` (${escapeHtml(klass.section)})` : ""
+  }. Sign in to XCEED and open the Learning module, or join manually with the class code <b>${escapeHtml(klass.code)}</b>.`;
   await sendMail(to, `[XCEED Learning] ${title}`, emailShell(title, body, "")).catch((err) =>
     console.error("[LearningModule] invite mail failed:", err.message),
   );

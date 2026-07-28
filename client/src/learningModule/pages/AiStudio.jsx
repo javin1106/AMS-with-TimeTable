@@ -38,6 +38,7 @@ import {
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import Markdown from '../components/Markdown';
+import RichTextEditor from '../components/RichTextEditor';
 import { EmptyState, ErrorState, Loading, SectionCard } from '../components/common';
 import { formatDate, relativeTime } from '../format';
 
@@ -245,13 +246,14 @@ function QuestionEditor({ question, index, onChange, onRemove }) {
         </HStack>
       </Flex>
 
-      <Textarea
-        size="sm"
-        rows={2}
-        value={question.question}
-        onChange={(e) => set('question', e.target.value)}
-        mb={2}
-      />
+      <Box mb={2}>
+        <RichTextEditor
+          compact
+          value={question.question}
+          onChange={(html) => set('question', html)}
+          placeholder="Question text"
+        />
+      </Box>
 
       {isChoice && (
         <Stack spacing={1} mb={2}>
@@ -271,15 +273,19 @@ function QuestionEditor({ question, index, onChange, onRemove }) {
                   set('correctAnswers', next);
                 }}
               />
-              <Input
-                size="sm"
-                value={option}
-                onChange={(event) => {
-                  const options = [...question.options];
-                  options[optionIndex] = event.target.value;
-                  set('options', options);
-                }}
-              />
+              <Box flex="1">
+                <RichTextEditor
+                  compact
+                  minH="46px"
+                  value={option}
+                  onChange={(html) => {
+                    const options = [...question.options];
+                    options[optionIndex] = html;
+                    set('options', options);
+                  }}
+                  placeholder={`Option ${optionIndex + 1}`}
+                />
+              </Box>
             </Flex>
           ))}
           <Button size="xs" variant="link" alignSelf="flex-start" onClick={() => set('options', [...(question.options || []), ''])}>
@@ -298,12 +304,12 @@ function QuestionEditor({ question, index, onChange, onRemove }) {
         />
       )}
 
-      <Textarea
-        size="sm"
-        rows={2}
-        placeholder="Explanation shown after submission"
+      <RichTextEditor
+        compact
+        minH="56px"
         value={question.explanation || ''}
-        onChange={(e) => set('explanation', e.target.value)}
+        onChange={(html) => set('explanation', html)}
+        placeholder="Explanation shown after submission"
       />
       {question.sourceExcerpt && (
         <Text fontSize="xs" color="gray.500" mt={2} fontStyle="italic" noOfLines={2}>
@@ -650,7 +656,9 @@ function SessionWorkspace({ classId, sessionId, topics, onChanged, onClose }) {
                     size="sm"
                     colorScheme="green"
                     isLoading={working === 'publishTutorial'}
-                    onClick={() => run('publishTutorial', () => lmApi.publishTutorial(classId, sessionId), 'Tutorial published')}
+                    onClick={() =>
+                      run('publishTutorial', () => lmApi.publishSessionTutorial(classId, sessionId), 'Tutorial published')
+                    }
                   >
                     {session.tutorial.publishedCourseworkId ? 'Re-publish' : 'Publish to class'}
                   </Button>
@@ -735,6 +743,41 @@ function SessionWorkspace({ classId, sessionId, topics, onChanged, onClose }) {
                   {session.tutorial.markdown && (
                     <>
                       <Divider my={4} />
+                      <Textarea
+                        rows={8}
+                        fontSize="sm"
+                        fontFamily="mono"
+                        value={session.tutorial.markdown}
+                        onChange={(event) =>
+                          setSession((prev) => ({
+                            ...prev,
+                            tutorial: { ...prev.tutorial, markdown: event.target.value },
+                          }))
+                        }
+                        mb={2}
+                      />
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        mb={5}
+                        isLoading={working === 'saveTutorial'}
+                        onClick={() =>
+                          run(
+                            'saveTutorial',
+                            () =>
+                              lmApi.updateSession(classId, sessionId, {
+                                tutorialMarkdown: session.tutorial.markdown,
+                              }),
+                            'Tutorial saved',
+                          )
+                        }
+                      >
+                        Save edits
+                      </Button>
+                      <Divider mb={4} />
+                      <Text fontSize="xs" color="gray.500" mb={2}>
+                        Preview
+                      </Text>
                       <Markdown>{session.tutorial.markdown}</Markdown>
                     </>
                   )}
