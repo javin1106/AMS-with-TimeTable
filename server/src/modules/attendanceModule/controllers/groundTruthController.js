@@ -14,6 +14,9 @@ const {
     buildBatchEmbeddingsPkl,
 } = require('./embeddingSyncHelper');
 const { checkAttendanceRunAllowed } = require('./timeWindowGuard');
+const {
+    batchBelongsToAnyDepartment,
+} = require('../middleware/attendanceAccess');
 
 const ML_SERVICE_URL   = process.env.ML_SERVICE_URL || 'http://localhost:8500';
 const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'ground_truth');
@@ -165,14 +168,10 @@ class GroundTruthController {
                 if (!entry.isDirectory()) continue;
                 if (
                     !req.attendanceFullAccess
-                    && !req.attendanceDepartment
-                ) continue;
-                if (
-                    !req.attendanceFullAccess
-                    && !new RegExp(
-                        `^[^_]+_${req.attendanceDepartment.trim().replace(/[\s-]+/g, '_').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}_`,
-                        'i',
-                    ).test(entry.name)
+                    && !batchBelongsToAnyDepartment(
+                        entry.name,
+                        req.attendanceDepartments,
+                    )
                 ) continue;
                 const batchPath = path.join(GROUND_TRUTH_DIR, entry.name);
                 const students  = await fsPromises.readdir(batchPath, { withFileTypes: true });

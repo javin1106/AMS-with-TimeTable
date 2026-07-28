@@ -7,8 +7,31 @@ const mongoose = require('mongoose');
 const GroundTruthController = require('../controllers/groundTruthController');
 const TimeTable = require('../../../models/timetable');
 const ClusterMatch = require('../../../models/attendanceModule/clusterMatch');
+const {
+    uniqueDepartments,
+} = require('../middleware/attendanceAccess');
 
 const controller = new GroundTruthController();
+
+const escapeRegex = (value) =>
+    String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const assignedDepartments = (req) => uniqueDepartments([
+    req.attendanceDepartment,
+    ...(Array.isArray(req.attendanceDepartments) ? req.attendanceDepartments : []),
+]);
+
+const batchDepartmentRegexes = (req) => assignedDepartments(req).map(
+    (department) => new RegExp(
+        `^[^_]+_${escapeRegex(department.trim().replace(/[\s-]+/g, '_'))}_`,
+        'i',
+    ),
+);
+
+const departmentFromBatch = (batch) => {
+    const parts = String(batch || '').split('_').filter(Boolean);
+    return parts.length >= 3 ? parts.slice(1, -1).join('_') : '';
+};
 
 
 // ─── Ground Truth Management ──────────────────────────────────────
@@ -20,7 +43,13 @@ router.get('/departments', async (req, res) => {
     try {
         const timetableFilter = req.attendanceFullAccess
             ? {}
-            : { dept: { $regex: new RegExp(`^${req.attendanceDepartment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } };
+            : {
+                dept: {
+                    $in: assignedDepartments(req).map(
+                        (department) => new RegExp(`^${escapeRegex(department)}$`, 'i'),
+                    ),
+                },
+            };
         const timetables = await TimeTable.find(timetableFilter, 'dept session code currentSession').lean();
         // Deduplicate by dept (case-insensitive)
         const seen = new Set();
@@ -41,7 +70,7 @@ router.get('/stats', async (req, res) => {
     try {
         const match = req.attendanceFullAccess
             ? {}
-            : { batch: { $regex: new RegExp(`^[^_]+_${req.attendanceDepartment.trim().replace(/[\s-]+/g, '_').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}_`, 'i') } };
+            : { batch: { $in: batchDepartmentRegexes(req) } };
         const agg = await ClusterMatch.aggregate([{ $match: match }, { $facet: {
             total:     [{ $count: 'n' }],
             approved:  [{ $match: { status: 'approved' } }, { $count: 'n' }],
@@ -294,8 +323,8 @@ async function resolveStartedByName(req) {
     }
 }
 
-// Start a job. `enforceAttendanceDepartment` (mounted on /ground-truth) already
-// rejects a batch outside the caller's department, so no extra check needed.
+// The route-specific guard mounted on /ground-truth accepts only departments
+// assigned to this user's Ground Truth / Roll Assignment dropdown.
 router.post('/gt-acquisition/start', async (req, res) => {
     const gate = await checkGroundTruthAllowed();
     if (!gate.allowed) return res.status(403).json({ error: gate.reason });
@@ -326,7 +355,7 @@ router.post('/gt-acquisition/start', async (req, res) => {
             clusterThreshold:    Number(clusterThreshold)    || undefined,
         },
         startedByName: await resolveStartedByName(req),
-        department:    req.attendanceDepartment,
+        department:    departmentFromBatch(batch),
     });
 
     res.json({ acquisitionId });
@@ -337,7 +366,7 @@ router.post('/gt-acquisition/start', async (req, res) => {
 router.get('/gt-acquisition/status', (req, res) => {
     res.json({
         jobs: gtManager.listJobs({
-            department:  req.attendanceDepartment,
+            departments: assignedDepartments(req),
             fullAccess:  req.attendanceFullAccess,
         }),
     });

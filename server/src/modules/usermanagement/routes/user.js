@@ -87,7 +87,7 @@ userRouter.post("/deleterole", checkRole(['admin']), async (req, res) => {
   }
 });
 
-userRouter.put("/department", checkRole(['admin']), async (req, res) => {
+userRouter.put("/department", checkRole(['admin', 'iams-admin']), async (req, res) => {
   try {
     await UserController.updateDepartment(req, res);
   } catch (e) {

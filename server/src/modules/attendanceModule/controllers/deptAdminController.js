@@ -128,9 +128,15 @@ const getCampusDate = () => new Intl.DateTimeFormat('en-CA', {
 }).format(new Date());
 
 const getContext = async (req, res) => {
+    const departments = req.attendanceFullAccess
+        ? []
+        : (req.attendanceDepartments || []).filter(Boolean);
     res.json({
         department: req.attendanceDepartment,
         batchDepartment: req.attendanceDepartment?.replace(/\s+/g, '_') || null,
+        departments,
+        batchDepartments: departments.map((department) =>
+            department.replace(/\s+/g, '_')),
         fullAccess: Boolean(req.attendanceFullAccess),
     });
 };

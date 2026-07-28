@@ -274,7 +274,11 @@ function extractSSEEvents(buffer) {
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
-export default function GroundTruthRTSP({ fixedDepartment = '' }) {
+export default function GroundTruthRTSP({
+    fixedDepartment = '',
+    departmentRestricted = false,
+}) {
+    const restrictedDepartmentAccess = departmentRestricted || Boolean(fixedDepartment);
     const [degree,     setDegree]     = useState('BTECH');
     const [degrees, setDegrees] = useState([]);
     const [department, setDepartment] = useState(fixedDepartment);
@@ -866,7 +870,7 @@ export default function GroundTruthRTSP({ fixedDepartment = '' }) {
                     )}
                 </div>
 
-                {!selectedRoom && !fixedDepartment && (
+                {!selectedRoom && !restrictedDepartmentAccess && (
                 <div style={{ marginBottom: 20 }}>
                     <label style={styles.label}>Camera</label>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
@@ -892,7 +896,7 @@ export default function GroundTruthRTSP({ fixedDepartment = '' }) {
                 </div>
                 )}
 
-                {!fixedDepartment && (
+                {!restrictedDepartmentAccess && (
                 <div style={{ marginBottom: 20 }}>
                     <label style={styles.label}>
                         Target Images per Person
@@ -920,7 +924,7 @@ export default function GroundTruthRTSP({ fixedDepartment = '' }) {
                 </div>
                 )}
 
-                {!fixedDepartment && (
+                {!restrictedDepartmentAccess && (
                 <div style={{ marginBottom: 20 }}>
                     <label style={styles.label}>Detection Quality</label>
                     <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
@@ -940,7 +944,7 @@ export default function GroundTruthRTSP({ fixedDepartment = '' }) {
                 </div>
                 )}
 
-                {!fixedDepartment && (
+                {!restrictedDepartmentAccess && (
                 <div style={{ marginBottom: 20 }}>
                     <label style={styles.label}>Frame Skip</label>
                     <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
@@ -960,7 +964,7 @@ export default function GroundTruthRTSP({ fixedDepartment = '' }) {
                 </div>
                 )}
 
-                {!fixedDepartment && (
+                {!restrictedDepartmentAccess && (
                 <div style={{
                     padding: '10px 16px', background: theme.bg, borderRadius: '6px',
                     fontSize: '13px', fontFamily: theme.fontMono,

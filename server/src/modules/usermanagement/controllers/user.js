@@ -15,7 +15,33 @@ const getApiURL = require("../../certificateModule/helper/getApiURL")
 const fs = require('fs')
 const path = require("path")
 
+const departmentKey = (value) =>
+  String(value || "").trim().replace(/[\s_-]+/g, "").toUpperCase();
 
+const uniqueDepartments = (values) => {
+  const seen = new Set();
+  return (Array.isArray(values) ? values : [])
+    .map((value) => String(value || "").trim())
+    .filter((value) => {
+      const key = departmentKey(value);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+};
+
+const includePrimaryDepartment = (values, primaryDepartment) =>
+  uniqueDepartments([primaryDepartment, ...uniqueDepartments(values)]);
+
+async function resolveTimetableDepartments(values) {
+  const resolved = [];
+  for (const value of uniqueDepartments(values)) {
+    const department = await getTimetableDepartment(value);
+    if (!department) return { invalid: value, departments: [] };
+    resolved.push(department);
+  }
+  return { invalid: null, departments: uniqueDepartments(resolved) };
+}
 
 class UserController {
   async getUserDetails(req, res) {
@@ -122,6 +148,11 @@ class UserController {
             error: `${department} already has an iLEED Department Admin`,
           });
         }
+        user.dept = department;
+        user.attendanceDepartments = includePrimaryDepartment(
+          user.attendanceDepartments,
+          department,
+        );
       }
 
       if (!user.role.includes(role)) {
@@ -149,10 +180,19 @@ class UserController {
 
   async updateDepartment(req, res) {
     try {
-      const { userId, dept } = req.body;
+      const { userId, dept, attendanceDepartments } = req.body;
+      const hasAttendanceDepartments = Object.prototype.hasOwnProperty.call(
+        req.body,
+        "attendanceDepartments",
+      );
       if (!userId || typeof dept !== "string") {
         return res.status(400).json({
           error: "User ID and department are required",
+        });
+      }
+      if (hasAttendanceDepartments && !Array.isArray(attendanceDepartments)) {
+        return res.status(400).json({
+          error: "GT / Roll departments must be an array",
         });
       }
 
@@ -162,6 +202,22 @@ class UserController {
       }
 
       let department = dept.trim();
+      const actorRoles = Array.isArray(req.user?.roles) ? req.user.roles : [];
+      const attendanceAdminOnly = actorRoles.includes("iams-admin")
+        && !actorRoles.includes("admin");
+      if (attendanceAdminOnly) {
+        if (!user.role.includes("iams-dept-admin")) {
+          return res.status(403).json({
+            error: "iLEED admins can update only iLEED Department Admin access",
+          });
+        }
+        if (departmentKey(department) !== departmentKey(user.dept)) {
+          return res.status(403).json({
+            error: "Only a platform admin can change the primary department",
+          });
+        }
+      }
+
       if (!department && user.role.includes("iams-dept-admin")) {
         return res.status(400).json({
           error: "Department is required for an iLEED Department Admin",
@@ -190,12 +246,27 @@ class UserController {
         }
       }
 
+      const requestedDepartments = hasAttendanceDepartments
+        ? attendanceDepartments
+        : user.attendanceDepartments;
+      const departmentList = includePrimaryDepartment(
+        requestedDepartments,
+        department,
+      );
+      const resolvedDepartments = await resolveTimetableDepartments(departmentList);
+      if (resolvedDepartments.invalid) {
+        return res.status(400).json({
+          error: `${resolvedDepartments.invalid} is not a valid timetable department`,
+        });
+      }
+
       user.dept = department;
+      user.attendanceDepartments = resolvedDepartments.departments;
       await user.save();
       const userResponse = user.toObject();
       delete userResponse.password;
       res.status(200).json({
-        message: "Department updated successfully",
+        message: "Department access updated successfully",
         user: userResponse,
       });
     } catch (error) {
@@ -249,6 +320,7 @@ class UserController {
           password: hash,
           role: ["iams-dept-admin"],
           dept: department,
+          attendanceDepartments: [department],
           isEmailVerified: false,
           isFirstLogin: true,
         });
@@ -257,6 +329,10 @@ class UserController {
         notifyUserCreated(user);
       } else {
         user.dept = department;
+        user.attendanceDepartments = includePrimaryDepartment(
+          user.attendanceDepartments,
+          department,
+        );
         if (!user.role.includes("iams-dept-admin")) {
           user.role.push("iams-dept-admin");
           await user.save();
