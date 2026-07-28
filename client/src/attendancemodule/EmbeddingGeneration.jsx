@@ -112,20 +112,40 @@ function FilterBlock({
         if (setSubjectId)   setSubjectId('');
         if (!dept || !sem) return;
         setSubjectsLoading(true);
-        fetch(`${apiUrl}/timetablemodule/subject`)
-            .then(r => r.json())
-            .then(data => {
-                const list = Array.isArray(data) ? data : [];
-                const filtered = list.filter(s => {
-                    const semMatch  = String(s.sem).trim() === String(sem).trim();
-                    const deptNorm  = dept.replace(/_/g, ' ').trim().toLowerCase();
-                    const sDeptNorm = (s.dept || '').trim().toLowerCase();
-                    const deptMatch = sDeptNorm.includes(deptNorm) || deptNorm.includes(sDeptNorm);
-                    return semMatch && deptMatch;
+        // The Subject.dept field is frequently blank/inconsistent, so filtering
+        // /timetablemodule/subject by dept client-side (the old approach) could
+        // return nothing even when subjects exist for this dept+sem.
+        // Fix (no timetableModule changes): call the existing
+        // /subjects-by-dept-sem endpoint to get the authoritative list of
+        // subject NAMES for this dept+sem (it resolves them via the locked
+        // timetable, same reliable source the semester dropdown already uses),
+        // then join that name list against the full /subject collection here
+        // in the browser to recover each subject's _id/subCode.
+        Promise.all([
+            fetch(`${apiUrl}/timetablemodule/lock/subjects-by-dept-sem?dept=${encodeURIComponent(dept)}&sem=${encodeURIComponent(sem)}`).then(r => r.json()).catch(() => ({})),
+            fetch(`${apiUrl}/timetablemodule/subject`).then(r => r.json()).catch(() => ([])),
+        ])
+            .then(([nameData, allSubjects]) => {
+                const names = Array.isArray(nameData.subjects) ? nameData.subjects : [];
+                const nameSet = new Set(names.map(n => String(n).trim().toLowerCase()));
+                const list = Array.isArray(allSubjects) ? allSubjects : [];
+
+                const bySemAndName = list.filter(s => {
+                    const semMatch = String(s.sem).trim() === String(sem).trim();
+                    const nm = (s.subName || s.subjectFullName || '').trim().toLowerCase();
+                    return semMatch && nameSet.has(nm);
                 });
-                setSubjects(filtered);
+
+                if (bySemAndName.length) {
+                    setSubjects(bySemAndName);
+                    return;
+                }
+                // Fallback: no matching Subject doc found (e.g. it was never
+                // created in the Subject collection) — still show the plain
+                // names so the dropdown isn't empty.
+                setSubjects(names.map(n => ({ _id: n, subName: n, subCode: '' })));
             })
-            .catch(() => {}).finally(() => setSubjectsLoading(false));
+            .catch(() => setSubjects([])).finally(() => setSubjectsLoading(false));
     }, [dept, sem]);
 
     // Auto-select prefillSubject once subjects are loaded
