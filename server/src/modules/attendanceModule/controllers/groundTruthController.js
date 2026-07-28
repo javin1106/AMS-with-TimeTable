@@ -427,49 +427,84 @@ res.json({ message: `Removed ${filename}` });
             try { info = JSON.parse(await fsPromises.readFile(infoPath, 'utf8')); } catch (_) {}
         }
 
+        let target_imgs_per_person = 15;
+        let embed_n = 5;
+        try {
+            const mlConfigRes = await axios.get(`${ML_SERVICE_URL}/gt-config`, { timeout: 3000 });
+            if (mlConfigRes.data) {
+                if (mlConfigRes.data.target_imgs_per_person) target_imgs_per_person = mlConfigRes.data.target_imgs_per_person;
+                if (mlConfigRes.data.embed_n) embed_n = mlConfigRes.data.embed_n;
+            }
+        } catch (_) {}
+
+        info.scores = info.scores || {};
+        for (const f of filenames) {
+            if (info.scores[f] === undefined) info.scores[f] = 0.5;
+        }
+
         const validFiles = filenames.filter(f => allFiles.includes(f));
-        const approvedSet  = new Set([...(info.approved_files  || []), ...validFiles]);
+        validFiles.sort((a, b) => (info.scores[b] || 0) - (info.scores[a] || 0));
+
         const embeddingSet = new Set(info.embedding_files || []);
         const backupSet    = new Set(info.backup_files    || []);
+        
+        const hadEmbedding = embeddingSet.size > 0;
+        let embeddingChanged = false;
 
-        const MAX_EMBEDDING_FILES = 5;
         for (const f of validFiles) {
-            backupSet.delete(f);
-            // Cap embedding_files at 5 — overflow goes to backup instead.
-            if (embeddingSet.has(f) || embeddingSet.size < MAX_EMBEDDING_FILES) {
+            if (embeddingSet.has(f) || backupSet.has(f)) continue;
+            
+            if (!hadEmbedding && embeddingSet.size < embed_n) {
                 embeddingSet.add(f);
+                embeddingChanged = true;
             } else {
                 backupSet.add(f);
             }
         }
 
-        info.approved_files  = [...approvedSet].filter(f => allFiles.includes(f));
+        let backupArray = [...backupSet];
+        backupArray.sort((a, b) => (info.scores[b] || 0) - (info.scores[a] || 0));
+        
+        const maxBackup = Math.max(0, target_imgs_per_person - embeddingSet.size);
+        const keptBackup = backupArray.slice(0, maxBackup);
+        const deletedBackup = backupArray.slice(maxBackup);
+
+        for (const f of deletedBackup) {
+            backupSet.delete(f);
+            delete info.scores[f];
+            try { await fsPromises.unlink(path.join(studentDir, f)); } catch (_) {}
+        }
+
         info.embedding_files = [...embeddingSet].filter(f => allFiles.includes(f));
-        info.backup_files    = [...backupSet].filter(f => allFiles.includes(f));
+        info.backup_files    = [...backupSet].filter(f => allFiles.includes(f) && !info.embedding_files.includes(f));
+
+        const approvedSet = new Set([...(info.approved_files || []), ...info.embedding_files, ...info.backup_files]);
+        for (const f of deletedBackup) {
+            approvedSet.delete(f);
+        }
+        info.approved_files = [...approvedSet].filter(f => allFiles.includes(f));
 
         await fsPromises.writeFile(infoPath, JSON.stringify(info, null, 2));
 
-        // ✅ Respond immediately — don't wait for ML
         res.json({
             ok: true,
             approvedCount:  info.approved_files.length,
             embeddingCount: info.embedding_files.length,
             backupCount:    info.backup_files.length,
-            embeddingStatus: 'queued',
+            embeddingStatus: embeddingChanged ? 'queued' : 'skipped',
         });
 
-        // 🔥 Rebuild embedding in background — fire and forget
-        // REPLACE WITH THIS:
-setImmediate(async () => {
-    try {
-        await syncUpdateStudentEmbedding(studentDir, rollNo, info.embedding_files);
-        console.log(`[approvePhotos] Base embedding updated for ${rollNo}`);
-        await rebuildSubjectPklsForStudent(rollNo, batch);
-    } catch (err) {
-        console.warn(`[approvePhotos] Background rebuild failed for ${rollNo}:`, err.message);
-    }
-});
-
+        if (embeddingChanged) {
+            setImmediate(async () => {
+                try {
+                    await syncUpdateStudentEmbedding(studentDir, rollNo, info.embedding_files, info.backup_files);
+                    console.log(`[approvePhotos] Base embedding updated for ${rollNo}`);
+                    await rebuildSubjectPklsForStudent(rollNo, batch);
+                } catch (err) {
+                    console.warn(`[approvePhotos] Background rebuild failed for ${rollNo}:`, err.message);
+                }
+            });
+        }
     } catch (err) { res.status(500).json({ error: err.message }); }
 }
 
