@@ -47,7 +47,7 @@ function scheduleCleanup(jobId) {
     if (typeof timer.unref === 'function') timer.unref();
 }
 
-async function runJob(job, syncFn) {
+async function runJob(job, syncFn, onComplete) {
     job.status = 'running';
     job.startedAt = new Date().toISOString();
 
@@ -73,6 +73,18 @@ async function runJob(job, syncFn) {
             job.failedRollNos.push(...failedRollNos);
         }
 
+        if (onComplete) {
+            try {
+                await onComplete({
+                    batch: job.batch,
+                    department: job.department,
+                    rollNos: [...job.rollNos],
+                    failedRollNos: [...job.failedRollNos],
+                });
+            } catch (error) {
+                console.error(`[ERP] Failed to save embedding summary for ${job.batch}:`, error.message);
+            }
+        }
         job.status = 'done';
     } catch (error) {
         job.status = 'error';
@@ -112,7 +124,7 @@ function startEmbeddingJob({ batch, department, rollNos }, options = {}) {
     const previous = batchChains.get(batch) || Promise.resolve();
     const current = previous
         .catch(() => {})
-        .then(() => runJob(job, syncFn));
+        .then(() => runJob(job, syncFn, options.onComplete));
 
     batchChains.set(batch, current);
     current.finally(() => {
