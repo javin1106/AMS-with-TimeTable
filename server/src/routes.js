@@ -61,4 +61,12 @@ v1router.use("/ml/rejected-samples", ...attendanceRoleAccess, rejectedSamplesRou
 const guideModule = require("./modules/guideModule/routes/index");
 v1router.use("/guide", guideModule);
 
+// Learning module (Google-Classroom-style classes, coursework, grading, and
+// the AI Studio that turns attendance-module class recordings into notes,
+// tutorials and quizzes). Fully self-contained under modules/learningModule —
+// its own models, middleware and uploads directory; it only reads the shared
+// user collection and the existing mailer/ML service.
+const learningModule = require("./modules/learningModule/routes/index");
+v1router.use("/learningmodule", learningModule);
+
 module.exports = v1router;

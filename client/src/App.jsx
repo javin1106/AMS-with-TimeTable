@@ -257,6 +257,10 @@ import {
 } from './deptadmin/DeptAdminTools';
 import DeptMenuConfig from './attendancemodule/DeptMenuConfig';
 
+// Learning module — self-contained under src/learningModule; every screen
+// hangs off the single /learning/* route below.
+import LearningRoutes from './learningModule/LearningRoutes.jsx';
+
 //confifence monitor
 import ConfidenceMonitor from './attendancemodule/confidenceMonitor';
 import { MLDataFolder } from './attendancemodule/MLDataFolder.jsx';
@@ -755,6 +759,9 @@ function App() {
             </div>
           } />
         </Route>
+
+        {/* ─── Learning Module ────────────────────────────────────── */}
+        <Route path="/learning/*" element={<LearningRoutes />} />
 
         {/* Camera Registry — top-level but still inside AMSLayout */}
         <Route path="/cameras" element={<AMSLayout />}>
