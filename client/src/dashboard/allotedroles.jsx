@@ -14,6 +14,7 @@ import {
 import {
   FiActivity,
   FiAward,
+  FiBookOpen,
   FiCalendar,
   FiFileText,
   FiHeart,
@@ -118,6 +119,30 @@ const ROLE_META = {
     icon: FiUserCheck,
     accent: 'cyan',
   },
+  STUDENT: {
+    name: 'Student',
+    link: '/learning',
+    description: 'Your classes, coursework and tutorials',
+    icon: FiBookOpen,
+    accent: 'teal',
+  },
+  // Synthetic entries: not platform roles, but the standing a user holds
+  // inside the Learning module. Appended only when they actually have classes,
+  // so they never displace a real role or the single-role auto-redirect.
+  'learning-teacher': {
+    name: 'Learning — Teacher',
+    link: '/learning',
+    description: 'Classes you teach',
+    icon: FiBookOpen,
+    accent: 'teal',
+  },
+  'learning-student': {
+    name: 'Learning — Student',
+    link: '/learning',
+    description: 'Classes you are enrolled in',
+    icon: FiBookOpen,
+    accent: 'teal',
+  },
 };
 
 const roleMeta = (role) =>
@@ -136,8 +161,10 @@ const singleRoleTarget = (role, user) => {
   return roleMeta(role).link;
 };
 
-const RoleItem = ({ role, index, onOpen }) => {
-  const { name, description, accent } = roleMeta(role);
+const RoleItem = ({ role, index, onOpen, descriptionOverride }) => {
+  const meta = roleMeta(role);
+  const { name, accent } = meta;
+  const description = descriptionOverride || meta.description;
   const cardBg = useColorModeValue(`${accent}.50`, `${accent}.900`);
   const cardBorder = useColorModeValue(`${accent}.100`, `${accent}.700`);
   const hoverBg = useColorModeValue(`${accent}.100`, `${accent}.800`);
@@ -211,6 +238,7 @@ const RoleItem = ({ role, index, onOpen }) => {
 const AllocatedRolesPage = () => {
   const navigate = useNavigate();
   const [allocatedRoles, setAllocatedRoles] = useState([]);
+  const [learningCards, setLearningCards] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [user, setUser] = useState(null);
 
@@ -232,10 +260,48 @@ const AllocatedRolesPage = () => {
         if (!response.ok) throw new Error('Failed to fetch allocated roles');
         const userdetails = await response.json();
         const excludedRoles = ['Reviewer', 'Author'];
-        setAllocatedRoles(
-          (userdetails.user.role || []).filter((role) => !excludedRoles.includes(role)),
+        const platformRoles = (userdetails.user.role || []).filter(
+          (role) => !excludedRoles.includes(role),
         );
+        setAllocatedRoles(platformRoles);
         setUser(userdetails.user);
+
+        // Learning-module standing is per-class, not a platform role, so it has
+        // to be asked for separately. Kept out of `allocatedRoles` so the
+        // single-role auto-redirect below behaves exactly as before.
+        try {
+          const lmResponse = await fetch(`${apiUrl}/api/v1/learningmodule/overview`, {
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+          });
+          if (lmResponse.ok) {
+            const overview = await lmResponse.json();
+            const cards = [];
+            if (overview.teachingCount > 0) {
+              cards.push({
+                role: 'learning-teacher',
+                description: `${overview.teachingCount} class${overview.teachingCount === 1 ? '' : 'es'} you teach${
+                  overview.awaitingReview ? ` · ${overview.awaitingReview} to review` : ''
+                }`,
+              });
+            }
+            // A student who already has the STUDENT platform role has a card
+            // for it, so only add this when their enrolment would otherwise be
+            // invisible (e.g. a faculty member sitting in a colleague's class).
+            if (overview.enrolledCount > 0 && !platformRoles.includes('STUDENT')) {
+              cards.push({
+                role: 'learning-student',
+                description: `${overview.enrolledCount} class${overview.enrolledCount === 1 ? '' : 'es'} you are enrolled in${
+                  overview.pendingWork ? ` · ${overview.pendingWork} pending` : ''
+                }`,
+              });
+            }
+            setLearningCards(cards);
+          }
+        } catch {
+          // The learning module being unreachable must not blank the roles page.
+        }
       } catch (error) {
         console.error('Error fetching allocated roles:', error.message);
       } finally {
@@ -262,7 +328,7 @@ const AllocatedRolesPage = () => {
 
   const email = Array.isArray(user?.email) ? user.email[0] : user?.email;
   const displayName = user?.name || email || 'there';
-  const roleCount = allocatedRoles.length;
+  const roleCount = allocatedRoles.length + learningCards.length;
 
   return (
     <Box bg={pageBg} minH="100vh" py={{ base: 8, md: 16 }}>
@@ -303,6 +369,15 @@ const AllocatedRolesPage = () => {
                 role={role}
                 index={index}
                 onOpen={() => navigate(singleRoleTarget(role, user))}
+              />
+            ))}
+            {learningCards.map((card, index) => (
+              <RoleItem
+                key={card.role}
+                role={card.role}
+                index={allocatedRoles.length + index}
+                descriptionOverride={card.description}
+                onOpen={() => navigate(roleMeta(card.role).link)}
               />
             ))}
           </SimpleGrid>

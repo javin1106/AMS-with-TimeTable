@@ -5,6 +5,7 @@ import {
   Badge,
   Box,
   Button,
+  Checkbox,
   Divider,
   Flex,
   FormControl,
@@ -38,8 +39,13 @@ import { formatDate, initials, relativeTime } from '../format';
 function InviteModal({ isOpen, onClose, classId, onDone }) {
   const [emails, setEmails] = useState('');
   const [role, setRole] = useState('student');
+  const [createAccounts, setCreateAccounts] = useState(true);
+  const [grantRoleToExisting, setGrantRoleToExisting] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState(null);
   const toast = useToast();
+
+  const platformRole = role === 'co-teacher' ? 'FACULTY' : 'STUDENT';
 
   const submit = async () => {
     const list = emails
@@ -49,19 +55,39 @@ function InviteModal({ isOpen, onClose, classId, onDone }) {
     if (!list.length) return;
 
     setBusy(true);
+    setReport(null);
     try {
-      const result = await lmApi.inviteMembers(classId, list, role);
-      const added = result.results.filter((r) => r.status === 'added').length;
-      const invited = result.results.filter((r) => r.status === 'invited').length;
-      const existing = result.results.filter((r) => r.status === 'already_member').length;
-      toast({
-        status: 'success',
-        title: 'Invites processed',
-        description: `${added} added, ${invited} invited by email, ${existing} already in the class.`,
+      const result = await lmApi.inviteMembers(classId, list, role, {
+        createAccounts,
+        grantRoleToExisting,
       });
-      setEmails('');
+      const count = (status) => result.results.filter((r) => r.status === status).length;
+      const failures = result.results.filter((r) => r.status === 'error');
+
+      toast({
+        status: failures.length ? 'warning' : 'success',
+        title: 'Invites processed',
+        description: [
+          count('account_created') && `${count('account_created')} account(s) created`,
+          count('added') && `${count('added')} enrolled`,
+          count('invited') && `${count('invited')} invited by email`,
+          count('already_member') && `${count('already_member')} already in the class`,
+          failures.length && `${failures.length} failed`,
+        ]
+          .filter(Boolean)
+          .join(', '),
+        duration: 8000,
+      });
+
+      setReport(result.results);
+      if (!failures.length) {
+        setEmails('');
+        onDone();
+        onClose();
+        return;
+      }
+      // Keep the dialog open when something failed so the teacher can see which.
       onDone();
-      onClose();
     } catch (error) {
       toast({ status: 'error', title: 'Could not invite', description: error.message });
     } finally {
@@ -91,11 +117,75 @@ function InviteModal({ isOpen, onClose, classId, onDone }) {
               onChange={(event) => setEmails(event.target.value)}
               placeholder={'one@nitj.ac.in\ntwo@nitj.ac.in, three@nitj.ac.in'}
             />
-            <FormHelperText>
-              Separate with commas, spaces or new lines. People without an XCEED account are enrolled
-              automatically the first time they sign in.
-            </FormHelperText>
+            <FormHelperText>Separate with commas, spaces or new lines.</FormHelperText>
           </FormControl>
+
+          <Box mt={5} p={4} borderWidth="1px" borderColor="gray.200" borderRadius="md" bg="gray.50">
+            <Checkbox
+              isChecked={createAccounts}
+              onChange={(event) => setCreateAccounts(event.target.checked)}
+            >
+              <Text fontSize="sm" fontWeight="600">
+                Create XCEED accounts for addresses that don&apos;t have one
+              </Text>
+            </Checkbox>
+            <Text fontSize="xs" color="gray.600" mt={2} ml={6}>
+              {createAccounts ? (
+                <>
+                  Each new person gets an account with the <Badge colorScheme="cyan">{platformRole}</Badge>{' '}
+                  role and is enrolled straight away. They receive an email inviting them to set their own
+                  password — no password is ever emailed, and the account cannot be signed into until they
+                  do.
+                </>
+              ) : (
+                <>
+                  Addresses without an account are stored as pending invites and enrolled automatically the
+                  first time that person signs in to XCEED.
+                </>
+              )}
+            </Text>
+
+            <Checkbox
+              mt={3}
+              size="sm"
+              isChecked={grantRoleToExisting}
+              onChange={(event) => setGrantRoleToExisting(event.target.checked)}
+            >
+              Also give the {platformRole} role to people who already have an account without it
+            </Checkbox>
+            <Text fontSize="xs" color="gray.500" mt={1} ml={6}>
+              Off by default — changing an existing user&apos;s platform roles is usually an
+              administrator&apos;s decision.
+            </Text>
+          </Box>
+
+          {report && (
+            <Box mt={4}>
+              <Text fontSize="sm" fontWeight="600" mb={1}>
+                Result
+              </Text>
+              {report.map((entry) => (
+                <Flex key={entry.email} fontSize="xs" justify="space-between" py={1} gap={2}>
+                  <Text noOfLines={1}>{entry.email}</Text>
+                  <Badge
+                    colorScheme={
+                      entry.status === 'error'
+                        ? 'red'
+                        : entry.status === 'already_member'
+                          ? 'gray'
+                          : 'green'
+                    }
+                  >
+                    {entry.status === 'account_created'
+                      ? `account created (${entry.platformRole})`
+                      : entry.status === 'error'
+                        ? entry.message || 'failed'
+                        : entry.status.replace(/_/g, ' ')}
+                  </Badge>
+                </Flex>
+              ))}
+            </Box>
+          )}
         </ModalBody>
         <ModalFooter gap={2}>
           <Button variant="ghost" onClick={onClose}>

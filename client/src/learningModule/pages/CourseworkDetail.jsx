@@ -20,7 +20,7 @@ import {
 import lmApi from '../api/lmApi';
 import { AttachmentList, AttachmentPicker } from '../components/Attachments';
 import CommentThread from '../components/CommentThread';
-import Markdown from '../components/Markdown';
+import RichText from '../components/RichText';
 import { DueBadge, ErrorState, Loading, SectionCard, StateBadge } from '../components/common';
 import { WORK_TYPE_META, formatDateTime } from '../format';
 
@@ -249,7 +249,7 @@ export default function CourseworkDetail() {
             {item.instructions && (
               <Box mt={5}>
                 <Divider mb={4} />
-                <Markdown>{item.instructions}</Markdown>
+                <RichText>{item.instructions}</RichText>
               </Box>
             )}
 

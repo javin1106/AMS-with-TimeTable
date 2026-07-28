@@ -21,6 +21,7 @@ import {
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import { ErrorState, Loading, SectionCard, StatTile } from '../components/common';
+import RichText from '../components/RichText';
 
 const formatClock = (seconds) => {
   const mins = Math.floor(Math.max(0, seconds) / 60);
@@ -56,9 +57,12 @@ function ResultView({ result, quizTitle, onDone }) {
                 mb={3}
               >
                 <Flex justify="space-between" gap={3}>
-                  <Text fontSize="sm" fontWeight="600">
-                    Q{index + 1}. {entry.question}
-                  </Text>
+                  <Box flex="1" minW={0}>
+                    <Text fontSize="sm" fontWeight="600" mb={1}>
+                      Q{index + 1}.
+                    </Text>
+                    <RichText>{entry.question}</RichText>
+                  </Box>
                   <Badge colorScheme={correct ? 'green' : 'red'}>
                     {correct ? 'Correct' : 'Incorrect'} · {entry.yourAnswer?.awarded ?? 0}
                   </Badge>
@@ -70,18 +74,21 @@ function ResultView({ result, quizTitle, onDone }) {
                       const isCorrect = (entry.correctAnswers || []).map(String).includes(String(optionIndex));
                       const chose = (entry.yourAnswer?.selected || []).map(String).includes(String(optionIndex));
                       return (
-                        <Text
+                        <Flex
                           key={optionIndex}
-                          fontSize="sm"
+                          gap={2}
                           px={2}
                           py={1}
                           borderRadius="sm"
                           bg={isCorrect ? 'green.50' : chose ? 'red.50' : 'transparent'}
-                          color={isCorrect ? 'green.800' : chose ? 'red.800' : 'gray.700'}
                         >
-                          {isCorrect ? '✓ ' : chose ? '✗ ' : '   '}
-                          {option}
-                        </Text>
+                          <Text fontSize="sm" flexShrink={0}>
+                            {isCorrect ? '✓' : chose ? '✗' : '\u00a0'}
+                          </Text>
+                          <RichText color={isCorrect ? 'green.800' : chose ? 'red.800' : 'gray.700'}>
+                            {option}
+                          </RichText>
+                        </Flex>
                       );
                     })}
                   </Stack>
@@ -96,7 +103,7 @@ function ResultView({ result, quizTitle, onDone }) {
 
                 {entry.explanation && (
                   <Box mt={2} bg="blue.50" borderRadius="md" px={3} py={2}>
-                    <Text fontSize="sm">{entry.explanation}</Text>
+                    <RichText>{entry.explanation}</RichText>
                   </Box>
                 )}
                 {entry.sourceExcerpt && (
@@ -320,9 +327,12 @@ export default function QuizPlayer() {
       {quiz.questions.map((question, index) => (
         <SectionCard key={question._id} mb={3}>
           <Flex justify="space-between" gap={3} mb={3}>
-            <Text fontWeight="600" fontSize="sm">
-              Q{index + 1}. {question.question}
-            </Text>
+            <Box flex="1" minW={0}>
+              <Text fontWeight="600" fontSize="sm" mb={1}>
+                Q{index + 1}.
+              </Text>
+              <RichText>{question.question}</RichText>
+            </Box>
             <Badge colorScheme="gray" flexShrink={0}>
               {question.marks} mark{question.marks === 1 ? '' : 's'}
             </Badge>
@@ -353,7 +363,7 @@ export default function QuizPlayer() {
                     })
                   }
                 >
-                  {option}
+                  <RichText>{option}</RichText>
                 </Checkbox>
               ))}
             </Stack>
@@ -364,8 +374,8 @@ export default function QuizPlayer() {
             >
               <Stack>
                 {question.options.map((option, optionIndex) => (
-                  <Radio key={optionIndex} value={String(optionIndex)}>
-                    {option}
+                  <Radio key={optionIndex} value={String(optionIndex)} alignItems="flex-start">
+                    <RichText>{option}</RichText>
                   </Radio>
                 ))}
               </Stack>
