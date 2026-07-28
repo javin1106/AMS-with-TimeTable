@@ -15,6 +15,28 @@ const batchBelongsToDepartment = (batch, department) => {
     return new RegExp(`^[^_]+_${safeDepartment}_`, 'i').test(String(batch || ''));
 };
 
+const uniqueDepartments = (values) => {
+    const seen = new Set();
+    return (Array.isArray(values) ? values : [])
+        .map((value) => String(value || '').trim())
+        .filter((value) => {
+            const key = normalizeDepartment(value);
+            if (!key || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+};
+
+const departmentIsAllowed = (department, allowedDepartments) =>
+    uniqueDepartments(allowedDepartments).some(
+        (allowed) => normalizeDepartment(department) === normalizeDepartment(allowed),
+    );
+
+const batchBelongsToAnyDepartment = (batch, departments) =>
+    uniqueDepartments(departments).some(
+        (department) => batchBelongsToDepartment(batch, department),
+    );
+
 const timingSafeEqual = (provided, expected) => {
     const providedBuffer = Buffer.from(String(provided || ''));
     const expectedBuffer = Buffer.from(String(expected || ''));
@@ -49,6 +71,7 @@ const resolveAttendanceAccess = async (req, res, next) => {
     if (roles.includes('iams-admin') || roles.includes('admin')) {
         req.attendanceFullAccess = true;
         req.attendanceDepartment = null;
+        req.attendanceDepartments = [];
         return next();
     }
 
@@ -61,14 +84,25 @@ const resolveAttendanceAccess = async (req, res, next) => {
 
     req.attendanceFullAccess = false;
     req.attendanceDepartment = user.department;
+    req.attendanceDepartments = uniqueDepartments([
+        user.department,
+        ...(Array.isArray(user.departments) ? user.departments : []),
+    ]);
     next();
 };
 
-const enforceAttendanceDepartment = async (req, res, next) => {
+const createDepartmentEnforcer = ({ allowAssignedDepartments = false } = {}) =>
+async (req, res, next) => {
     try {
         if (req.attendanceFullAccess) return next();
 
-        const department = req.attendanceDepartment;
+        const allowedDepartments = allowAssignedDepartments
+            ? req.attendanceDepartments
+            : [req.attendanceDepartment];
+        if (uniqueDepartments(allowedDepartments).length === 0) {
+            return res.status(403).json({ message: 'Department access denied.' });
+        }
+
         const requestedDepartments = [
             req.body?.department,
             req.body?.dept,
@@ -79,7 +113,7 @@ const enforceAttendanceDepartment = async (req, res, next) => {
         ].filter(Boolean);
 
         const invalidDepartment = requestedDepartments.some(
-            (value) => normalizeDepartment(value) !== normalizeDepartment(department),
+            (value) => !departmentIsAllowed(value, allowedDepartments),
         );
         if (invalidDepartment) {
             return res.status(403).json({ message: 'Department access denied.' });
@@ -115,7 +149,7 @@ const enforceAttendanceDepartment = async (req, res, next) => {
         }
 
         const invalidBatch = batches.some(
-            (batch) => !batchBelongsToDepartment(batch, department),
+            (batch) => !batchBelongsToAnyDepartment(batch, allowedDepartments),
         );
         if (invalidBatch) {
             return res.status(403).json({ message: 'Batch access denied.' });
@@ -135,6 +169,11 @@ const enforceAttendanceDepartment = async (req, res, next) => {
         res.status(500).json({ message: 'Failed to verify department access.' });
     }
 };
+
+const enforceAttendanceDepartment = createDepartmentEnforcer();
+const enforceAssignedAttendanceDepartments = createDepartmentEnforcer({
+    allowAssignedDepartments: true,
+});
 
 // Mirrors the deptMenus toggle in DeptMenuConfig.jsx server-side, so a dept
 // with a menu switched off can't reach the underlying API directly (the
@@ -166,8 +205,12 @@ const attendanceRoleAccess = [
 module.exports = {
     attendanceRoleAccess,
     enforceAttendanceDepartment,
+    enforceAssignedAttendanceDepartments,
     requireAttendanceWriteAccess,
     requireDeptMenu,
     batchBelongsToDepartment,
+    batchBelongsToAnyDepartment,
+    departmentIsAllowed,
     normalizeDepartment,
+    uniqueDepartments,
 };

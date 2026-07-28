@@ -1,6 +1,9 @@
 const {
   normalizeDepartment,
   batchBelongsToDepartment,
+  batchBelongsToAnyDepartment,
+  departmentIsAllowed,
+  uniqueDepartments,
 } = require("../../src/modules/attendanceModule/middleware/attendanceAccess");
 
 describe("normalizeDepartment", () => {
@@ -37,5 +40,28 @@ describe("batchBelongsToDepartment", () => {
   it("handles missing batch/department gracefully", () => {
     expect(batchBelongsToDepartment("", "CSE")).toBe(false);
     expect(batchBelongsToDepartment("BTECH_CSE_2027", "")).toBe(false);
+  });
+});
+
+describe("assigned Ground Truth / Roll Assignment departments", () => {
+  const assigned = ["ECE", "VLSI"];
+
+  it("accepts explicitly assigned departments and rejects every other department", () => {
+    expect(departmentIsAllowed("ece", assigned)).toBe(true);
+    expect(departmentIsAllowed("V L S I", assigned)).toBe(true);
+    expect(departmentIsAllowed("CSE", assigned)).toBe(false);
+  });
+
+  it("accepts batches belonging to any assigned department", () => {
+    expect(batchBelongsToAnyDepartment("BTECH_ECE_2027", assigned)).toBe(true);
+    expect(batchBelongsToAnyDepartment("BTECH_VLSI_2027", assigned)).toBe(true);
+    expect(batchBelongsToAnyDepartment("BTECH_CSE_2027", assigned)).toBe(false);
+  });
+
+  it("deduplicates equivalent department spellings", () => {
+    expect(uniqueDepartments(["VLSI", "v l s i", "V_L_S_I", "ECE"])).toEqual([
+      "VLSI",
+      "ECE",
+    ]);
   });
 });

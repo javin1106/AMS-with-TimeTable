@@ -18,6 +18,11 @@ import {
   Input,
   InputGroup,
   InputLeftElement,
+  Menu,
+  MenuButton,
+  MenuItemOption,
+  MenuList,
+  MenuOptionGroup,
   Select,
   Spinner,
   Table,
@@ -62,6 +67,31 @@ const userEmails = (user) =>
 
 const userEmail = (user) => userEmails(user).join(', ');
 
+const departmentKey = (value) =>
+  String(value || '').trim().replace(/[\s_-]+/g, '').toUpperCase();
+
+const uniqueDepartments = (values) => {
+  const seen = new Set();
+  return (Array.isArray(values) ? values : [])
+    .map((value) => String(value || '').trim())
+    .filter((value) => {
+      const key = departmentKey(value);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+};
+
+const assignedDepartments = (user) =>
+  uniqueDepartments([user.dept, ...(user.attendanceDepartments || [])]);
+
+const sameDepartments = (left, right) => {
+  const leftKeys = uniqueDepartments(left).map(departmentKey).sort();
+  const rightKeys = uniqueDepartments(right).map(departmentKey).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index]);
+};
+
 const UserManagementPage = () => {
   const navigate = useNavigate();
   const toast = useToast();
@@ -73,6 +103,7 @@ const UserManagementPage = () => {
   const [assigning, setAssigning] = useState(null);
   const [departments, setDepartments] = useState([]);
   const [departmentDrafts, setDepartmentDrafts] = useState({});
+  const [attendanceDepartmentDrafts, setAttendanceDepartmentDrafts] = useState({});
   const [departmentsLoading, setDepartmentsLoading] = useState(true);
   const [savingDepartment, setSavingDepartment] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null); // { userId, role, email }
@@ -99,6 +130,11 @@ const UserManagementPage = () => {
         setUsers(data.user || []);
         setDepartmentDrafts(
           Object.fromEntries((data.user || []).map((u) => [u._id, u.dept || ''])),
+        );
+        setAttendanceDepartmentDrafts(
+          Object.fromEntries(
+            (data.user || []).map((u) => [u._id, assignedDepartments(u)]),
+          ),
         );
       } catch (err) {
         toast({ title: 'Could not load users', description: err.message, status: 'error', duration: 6000, isClosable: true });
@@ -150,7 +186,12 @@ const UserManagementPage = () => {
       return users.filter((u) => (u.role || []).some((r) => r.toLowerCase() === q));
     }
     return users.filter((u) => {
-      const haystack = [userEmail(u), u.dept || '', ...(u.role || [])]
+      const haystack = [
+        userEmail(u),
+        u.dept || '',
+        ...assignedDepartments(u),
+        ...(u.role || []),
+      ]
         .join(' ')
         .toLowerCase();
       return haystack.includes(q);
@@ -215,21 +256,52 @@ const UserManagementPage = () => {
     }
   };
 
+  const setPrimaryDepartmentDraft = (userId, department) => {
+    setDepartmentDrafts((current) => ({ ...current, [userId]: department }));
+    setAttendanceDepartmentDrafts((current) => ({
+      ...current,
+      [userId]: uniqueDepartments([department, ...(current[userId] || [])]),
+    }));
+  };
+
+  const setAssignedDepartmentDraft = (user, values) => {
+    const primaryDepartment = departmentDrafts[user._id] ?? user.dept ?? '';
+    setAttendanceDepartmentDrafts((current) => ({
+      ...current,
+      [user._id]: uniqueDepartments([
+        primaryDepartment,
+        ...(Array.isArray(values) ? values : [values]),
+      ]),
+    }));
+  };
+
   const handleDepartmentUpdate = async (user) => {
     const dept = departmentDrafts[user._id] || '';
+    const attendanceDepartments = uniqueDepartments([
+      dept,
+      ...(attendanceDepartmentDrafts[user._id] || assignedDepartments(user)),
+    ]);
     setSavingDepartment(user._id);
     try {
       const res = await fetch(`${apiUrl}/user/getuser/department`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ userId: user._id, dept }),
+        body: JSON.stringify({
+          userId: user._id,
+          dept,
+          attendanceDepartments,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || data.message || 'Failed to update department');
       replaceUser(data.user);
       setDepartmentDrafts((d) => ({ ...d, [user._id]: data.user.dept || '' }));
-      toast({ title: 'Department updated', status: 'success', duration: 3000, isClosable: true });
+      setAttendanceDepartmentDrafts((current) => ({
+        ...current,
+        [user._id]: assignedDepartments(data.user),
+      }));
+      toast({ title: 'Department access updated', status: 'success', duration: 3000, isClosable: true });
     } catch (err) {
       toast({ title: 'Could not update department', description: err.message, status: 'error', duration: 6000, isClosable: true });
     } finally {
@@ -334,7 +406,7 @@ const UserManagementPage = () => {
                 <Thead bg={headBg}>
                   <Tr>
                     <Th>Email</Th>
-                    <Th minW="240px">Department</Th>
+                    <Th minW="300px">Department Access</Th>
                     <Th>Roles</Th>
                     <Th minW="260px">Add Role</Th>
                   </Tr>
@@ -363,14 +435,14 @@ const UserManagementPage = () => {
                         </Flex>
                       </Td>
                       <Td>
-                        <Flex align="center" gap={2}>
+                        <Flex direction="column" align="stretch" gap={2}>
+                          <Text fontSize="xs" color={subColor} fontWeight="600">
+                            Primary dashboard department
+                          </Text>
                           <Select
                             size="sm"
-                            minW="150px"
                             value={departmentDrafts[user._id] ?? user.dept ?? ''}
-                            onChange={(e) =>
-                              setDepartmentDrafts((d) => ({ ...d, [user._id]: e.target.value }))
-                            }
+                            onChange={(e) => setPrimaryDepartmentDraft(user._id, e.target.value)}
                             isDisabled={departmentsLoading}
                           >
                             <option value="">No department</option>
@@ -384,6 +456,42 @@ const UserManagementPage = () => {
                               </option>
                             ))}
                           </Select>
+                          <Text fontSize="xs" color={subColor} fontWeight="600" mt={1}>
+                            Ground Truth + Roll Assignment
+                          </Text>
+                          <Menu closeOnSelect={false}>
+                            <MenuButton
+                              as={Button}
+                              size="sm"
+                              variant="outline"
+                              textAlign="left"
+                              fontWeight="normal"
+                              isDisabled={departmentsLoading}
+                            >
+                              {(attendanceDepartmentDrafts[user._id]
+                                || assignedDepartments(user)).length
+                                ? `${(attendanceDepartmentDrafts[user._id]
+                                  || assignedDepartments(user)).length} department(s) selected`
+                                : 'No departments selected'}
+                            </MenuButton>
+                            <MenuList maxH="280px" overflowY="auto">
+                              <MenuOptionGroup
+                                type="checkbox"
+                                value={attendanceDepartmentDrafts[user._id]
+                                  || assignedDepartments(user)}
+                                onChange={(values) => setAssignedDepartmentDraft(user, values)}
+                              >
+                                {uniqueDepartments([
+                                  ...departments,
+                                  ...assignedDepartments(user),
+                                ]).map((department) => (
+                                  <MenuItemOption key={department} value={department}>
+                                    {department}
+                                  </MenuItemOption>
+                                ))}
+                              </MenuOptionGroup>
+                            </MenuList>
+                          </Menu>
                           <Button
                             size="sm"
                             variant="outline"
@@ -391,8 +499,15 @@ const UserManagementPage = () => {
                             isLoading={savingDepartment === user._id}
                             isDisabled={
                               departmentsLoading ||
-                              (departmentDrafts[user._id] ?? user.dept ?? '') ===
-                                (user.dept || '')
+                              (
+                                (departmentDrafts[user._id] ?? user.dept ?? '') ===
+                                  (user.dept || '')
+                                && sameDepartments(
+                                  attendanceDepartmentDrafts[user._id]
+                                    || assignedDepartments(user),
+                                  assignedDepartments(user),
+                                )
+                              )
                             }
                             onClick={() => handleDepartmentUpdate(user)}
                           >

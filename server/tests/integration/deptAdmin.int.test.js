@@ -7,6 +7,7 @@ const { connect, clearDatabase, disconnect } = require("../helpers/db");
 const { authCookie } = require("../helpers/auth");
 const AttendanceReport = require("../../src/models/attendanceReport");
 const User = require("../../src/models/usermanagement/user");
+const TimeTable = require("../../src/models/timetable");
 
 const BASE = "/api/v1/attendancemodule/dept-admin";
 
@@ -39,6 +40,61 @@ describe("GET /dept-admin/context", () => {
     expect(res.status).toBe(200);
     expect(res.body.fullAccess).toBe(false);
     expect(res.body.department).toBe("CSE");
+    expect(res.body.departments).toEqual(["CSE"]);
+    expect(res.body.batchDepartments).toEqual(["CSE"]);
+  });
+
+  it("exposes additional departments separately from the primary dashboard department", async () => {
+    const user = await User.create({
+      role: ["iams-dept-admin"],
+      password: "x",
+      email: ["multi@x.com"],
+      dept: "ECE",
+      attendanceDepartments: ["ECE", "VLSI"],
+    });
+    const res = await request(app)
+      .get(`${BASE}/context`)
+      .set("Cookie", authCookie(["iams-dept-admin"], user._id.toString()));
+
+    expect(res.status).toBe(200);
+    expect(res.body.department).toBe("ECE");
+    expect(res.body.departments).toEqual(["ECE", "VLSI"]);
+    expect(res.body.batchDepartments).toEqual(["ECE", "VLSI"]);
+  });
+});
+
+describe("Ground Truth / Roll Assignment department access", () => {
+  it("returns only timetable departments assigned by the admin", async () => {
+    await TimeTable.create([
+      { name: "ece", dept: "ECE", session: "2026-27" },
+      { name: "vlsi", dept: "VLSI", session: "2026-27" },
+      { name: "cse", dept: "CSE", session: "2026-27" },
+    ]);
+    const user = await User.create({
+      role: ["iams-dept-admin"],
+      password: "x",
+      email: ["multi@x.com"],
+      dept: "ECE",
+      attendanceDepartments: ["ECE", "VLSI"],
+    });
+    const cookie = authCookie(["iams-dept-admin"], user._id.toString());
+
+    const departments = await request(app)
+      .get("/api/v1/attendancemodule/ground-truth/departments")
+      .set("Cookie", cookie);
+    expect(departments.status).toBe(200);
+    expect(departments.body.departments.map((entry) => entry.dept).sort())
+      .toEqual(["ECE", "VLSI"]);
+
+    const allowedBatch = await request(app)
+      .get("/api/v1/attendancemodule/ground-truth/batches/BTECH_VLSI_2098/students")
+      .set("Cookie", cookie);
+    expect(allowedBatch.status).toBe(404);
+
+    const deniedBatch = await request(app)
+      .get("/api/v1/attendancemodule/ground-truth/batches/BTECH_CSE_2098/students")
+      .set("Cookie", cookie);
+    expect(deniedBatch.status).toBe(403);
   });
 });
 
@@ -83,7 +139,13 @@ describe("GET /dept-admin/stats/today", () => {
       summary: { totalStudents: 10, present: 5, absent: 5, review: 0, attendancePct: 50 },
     });
 
-    const user = await User.create({ role: ["iams-dept-admin"], password: "x", email: ["d@x.com"], dept: "CSE" });
+    const user = await User.create({
+      role: ["iams-dept-admin"],
+      password: "x",
+      email: ["d@x.com"],
+      dept: "CSE",
+      attendanceDepartments: ["CSE", "ECE"],
+    });
     const res = await request(app)
       .get(`${BASE}/stats/today`)
       .set("Cookie", authCookie(["iams-dept-admin"], user._id.toString()));

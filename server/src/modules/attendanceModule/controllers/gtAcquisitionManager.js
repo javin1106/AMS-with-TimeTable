@@ -29,7 +29,7 @@ const mongoose   = require('mongoose');
 
 const ClusterMatch = require('../../../models/attendanceModule/clusterMatch');
 const { buildExistingFoldersPayload } = require('./embeddingSyncHelper');
-const { batchBelongsToDepartment }    = require('../middleware/attendanceAccess');
+const { batchBelongsToAnyDepartment } = require('../middleware/attendanceAccess');
 
 // The ML service may run on a separate machine — resolve from ML_SERVICE_URL,
 // same as every other integration point.
@@ -455,10 +455,10 @@ async function stopAcquisition(acquisitionId) {
     return { ok: true };
 }
 
-function listJobs({ department, fullAccess } = {}) {
+function listJobs({ departments, fullAccess } = {}) {
     const out = [];
     for (const job of jobs.values()) {
-        if (!fullAccess && department && !batchBelongsToDepartment(job.batch, department)) continue;
+        if (!fullAccess && !batchBelongsToAnyDepartment(job.batch, departments)) continue;
         out.push(summarize(job));
     }
     return out.sort((a, b) => b.startedAt - a.startedAt);

@@ -8,6 +8,7 @@ const schedulerRoutes = require('./schedulerRoutes');
 const {
     attendanceRoleAccess,
     enforceAttendanceDepartment,
+    enforceAssignedAttendanceDepartments,
     requireDeptMenu,
 } = require("../middleware/attendanceAccess");
 const deptAdminController = require("../controllers/deptAdminController");
@@ -48,19 +49,19 @@ router.get(
 router.use(
     '/ground-truth',
     ...attendanceRoleAccess,
-    enforceAttendanceDepartment,
+    enforceAssignedAttendanceDepartments,
     require("./groundTruthRoutes"),
 );
 router.use(
     '/roll-assign',
     ...attendanceRoleAccess,
-    enforceAttendanceDepartment,
+    enforceAssignedAttendanceDepartments,
     require("./rollAssignRoutes"),
 );
 router.use(
     '/flags',
     ...attendanceRoleAccess,
-    enforceAttendanceDepartment,
+    enforceAssignedAttendanceDepartments,
     require("./flagRoutes"),
 );
 

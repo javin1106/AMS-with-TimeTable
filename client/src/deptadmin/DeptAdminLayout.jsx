@@ -39,6 +39,8 @@ export default function DeptAdminLayout() {
     const [context, setContext] = useState({
         department: '',
         batchDepartment: '',
+        departments: [],
+        batchDepartments: [],
         fullAccess: false,
         loading: true,
         error: '',
@@ -67,6 +69,8 @@ export default function DeptAdminLayout() {
                 setContext({
                     department: data.department,
                     batchDepartment: data.batchDepartment,
+                    departments: data.departments || [],
+                    batchDepartments: data.batchDepartments || [],
                     fullAccess: Boolean(data.fullAccess),
                     loading: false,
                     error: '',
@@ -74,7 +78,15 @@ export default function DeptAdminLayout() {
             })
             .catch((error) => {
                 if (error.name !== 'AbortError') {
-                    setContext({ department: '', batchDepartment: '', fullAccess: false, loading: false, error: error.message });
+                    setContext({
+                        department: '',
+                        batchDepartment: '',
+                        departments: [],
+                        batchDepartments: [],
+                        fullAccess: false,
+                        loading: false,
+                        error: error.message,
+                    });
                 }
             });
         return () => controller.abort();
@@ -173,7 +185,11 @@ export default function DeptAdminLayout() {
 
                     {!collapsed && (context.department || context.fullAccess) && (
                         <div style={{ padding: '10px 12px', borderTop: `1px solid ${theme.border}`, color: theme.textMuted, fontSize: 10, lineHeight: 1.4 }}>
-                            {context.fullAccess ? 'Institute access' : context.department}
+                            {context.fullAccess
+                                ? 'Institute access'
+                                : context.departments.length > 1
+                                    ? `${context.department} + ${context.departments.length - 1} GT / Roll`
+                                    : context.department}
                         </div>
                     )}
                     <div style={{ padding: '10px 8px', borderTop: `1px solid ${theme.border}` }}>
