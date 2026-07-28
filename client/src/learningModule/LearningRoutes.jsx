@@ -16,6 +16,10 @@ import ClassSettings from './pages/ClassSettings';
 import QuizPlayer from './pages/QuizPlayer';
 import QuizEditor from './pages/QuizEditor';
 import QuizResults from './pages/QuizResults';
+import Tutorials from './pages/Tutorials';
+import TutorialEditor from './pages/TutorialEditor';
+import TutorialPlayer from './pages/TutorialPlayer';
+import TutorialResults from './pages/TutorialResults';
 import Todo from './pages/Todo';
 import Calendar from './pages/Calendar';
 import Notifications from './pages/Notifications';
@@ -46,6 +50,10 @@ export default function LearningRoutes() {
           <Route path="quiz/:quizId" element={<QuizPlayer />} />
           <Route path="quiz/:quizId/edit" element={<QuizEditor />} />
           <Route path="quiz/:quizId/results" element={<QuizResults />} />
+          <Route path="tutorials" element={<Tutorials />} />
+          <Route path="tutorial/:tutorialId" element={<TutorialPlayer />} />
+          <Route path="tutorial/:tutorialId/edit" element={<TutorialEditor />} />
+          <Route path="tutorial/:tutorialId/results" element={<TutorialResults />} />
         </Route>
 
         <Route path="*" element={<Navigate to="/learning" replace />} />

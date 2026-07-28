@@ -3,6 +3,8 @@ const LmMembership = require("../models/lmMembership");
 const LmSubmission = require("../models/lmSubmission");
 const User = require("../../../models/usermanagement/user");
 const { notifyUser, sendInviteMail } = require("../services/notifyService");
+const { provisionAccounts, roleForClassRole } = require("../services/accountProvisioning");
+const { resolveFrontendBase } = require("../../usermanagement/controllers/welcomeMailer");
 
 const refreshStudentCount = async (classId) => {
   const studentCount = await LmMembership.countDocuments({
@@ -102,9 +104,15 @@ exports.listMembers = async (req, res) => {
 };
 
 /**
- * Teacher-side add by email. Matches an existing platform account when there
- * is one; otherwise stores an "invited" row that the person claims on their
- * first sign-in (see claimInvites).
+ * Teacher-side add by email.
+ *
+ * Three outcomes per address, depending on `createAccounts`:
+ *  - the address already has a platform account  → enrolled immediately
+ *  - no account, createAccounts on               → an account is provisioned
+ *      with the matching platform role (STUDENT / FACULTY) and the person is
+ *      enrolled straight away; they set their own password from the email
+ *  - no account, createAccounts off              → an "invited" row is stored
+ *      and claimed on their first sign-in (see claimInvites)
  */
 exports.inviteMembers = async (req, res) => {
   const role = req.body.role === "co-teacher" ? "co-teacher" : "student";
@@ -115,6 +123,9 @@ exports.inviteMembers = async (req, res) => {
   if (!emails.length) return res.status(400).json({ message: "At least one email is required." });
   if (emails.length > 500) return res.status(400).json({ message: "Invite at most 500 people at a time." });
 
+  const createAccounts = req.body.createAccounts !== false;
+  const grantRoleToExisting = Boolean(req.body.grantRoleToExisting);
+
   const users = await User.find({ email: { $in: emails } }).select("name email").lean();
   const userByEmail = new Map();
   users.forEach((u) => {
@@ -123,9 +134,32 @@ exports.inviteMembers = async (req, res) => {
     });
   });
 
+  // Provision in one batch before the enrolment loop, so a newly created
+  // account is enrolled as "active" rather than left as a pending invite.
+  let provisioned = new Map();
+  if (createAccounts) {
+    provisioned = await provisionAccounts({
+      emails,
+      classRole: role,
+      klass: req.lmClass,
+      invitedByName: req.lmUser.name,
+      frontendBase: resolveFrontendBase(req),
+      grantRoleToExisting,
+    });
+    provisioned.forEach((result, email) => {
+      if (result.user) userByEmail.set(email, result.user);
+    });
+  }
+
   const results = [];
   for (const email of emails) {
     const user = userByEmail.get(email);
+    const provisionResult = provisioned.get(email);
+
+    if (provisionResult?.error && !user) {
+      results.push({ email, status: "error", message: provisionResult.error });
+      continue;
+    }
     const query = user
       ? { classId: req.lmClass._id, userId: user._id }
       : { classId: req.lmClass._id, email, userId: null };
@@ -171,12 +205,20 @@ exports.inviteMembers = async (req, res) => {
       });
     }
 
-    if (req.lmClass.settings.emailNotifications) {
+    // A freshly provisioned account already received the welcome email, which
+    // names the class and carries the set-password link — a second "you were
+    // invited" mail on top of it is just noise.
+    if (req.lmClass.settings.emailNotifications && !provisionResult?.created) {
       // eslint-disable-next-line no-await-in-loop
       await sendInviteMail(email, req.lmClass, req.lmUser.name);
     }
 
-    results.push({ email, status: user ? "added" : "invited" });
+    results.push({
+      email,
+      status: provisionResult?.created ? "account_created" : user ? "added" : "invited",
+      platformRole: provisionResult?.created || provisionResult?.roleAdded ? roleForClassRole(role) : null,
+      roleAdded: Boolean(provisionResult?.roleAdded && !provisionResult?.created),
+    });
   }
 
   await refreshStudentCount(req.lmClass._id);

@@ -650,7 +650,9 @@ function SessionWorkspace({ classId, sessionId, topics, onChanged, onClose }) {
                     size="sm"
                     colorScheme="green"
                     isLoading={working === 'publishTutorial'}
-                    onClick={() => run('publishTutorial', () => lmApi.publishTutorial(classId, sessionId), 'Tutorial published')}
+                    onClick={() =>
+                      run('publishTutorial', () => lmApi.publishSessionTutorial(classId, sessionId), 'Tutorial published')
+                    }
                   >
                     {session.tutorial.publishedCourseworkId ? 'Re-publish' : 'Publish to class'}
                   </Button>
@@ -735,6 +737,41 @@ function SessionWorkspace({ classId, sessionId, topics, onChanged, onClose }) {
                   {session.tutorial.markdown && (
                     <>
                       <Divider my={4} />
+                      <Textarea
+                        rows={8}
+                        fontSize="sm"
+                        fontFamily="mono"
+                        value={session.tutorial.markdown}
+                        onChange={(event) =>
+                          setSession((prev) => ({
+                            ...prev,
+                            tutorial: { ...prev.tutorial, markdown: event.target.value },
+                          }))
+                        }
+                        mb={2}
+                      />
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        mb={5}
+                        isLoading={working === 'saveTutorial'}
+                        onClick={() =>
+                          run(
+                            'saveTutorial',
+                            () =>
+                              lmApi.updateSession(classId, sessionId, {
+                                tutorialMarkdown: session.tutorial.markdown,
+                              }),
+                            'Tutorial saved',
+                          )
+                        }
+                      >
+                        Save edits
+                      </Button>
+                      <Divider mb={4} />
+                      <Text fontSize="xs" color="gray.500" mb={2}>
+                        Preview
+                      </Text>
                       <Markdown>{session.tutorial.markdown}</Markdown>
                     </>
                   )}

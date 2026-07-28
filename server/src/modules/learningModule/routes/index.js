@@ -16,6 +16,7 @@ const commentController = require("../controllers/commentController");
 const courseworkController = require("../controllers/courseworkController");
 const submissionController = require("../controllers/submissionController");
 const quizController = require("../controllers/quizController");
+const tutorialController = require("../controllers/tutorialController");
 const audioStudioController = require("../controllers/audioStudioController");
 const notificationController = require("../controllers/notificationController");
 const dashboardController = require("../controllers/dashboardController");
@@ -128,6 +129,22 @@ classRouter.get("/quizzes/:quizId/results", requireTeacher, asyncRoute(quizContr
 classRouter.post("/quizzes/:quizId/attempts", asyncRoute(quizController.startAttempt));
 classRouter.post("/attempts/:attemptId/submit", asyncRoute(quizController.submitAttempt));
 classRouter.get("/attempts/:attemptId", asyncRoute(quizController.getAttempt));
+
+// parameterised tutorials — every student gets their own numbers
+classRouter.get("/tutorials", asyncRoute(tutorialController.listTutorials));
+classRouter.post("/tutorials", requireTeacher, asyncRoute(tutorialController.createTutorial));
+classRouter.get("/tutorials/formula-reference", asyncRoute(tutorialController.getFormulaReference));
+classRouter.post("/tutorials/validate-formula", requireTeacher, asyncRoute(tutorialController.validateFormula));
+classRouter.get("/tutorials/:tutorialId", asyncRoute(tutorialController.getTutorial));
+classRouter.patch("/tutorials/:tutorialId", requireTeacher, asyncRoute(tutorialController.updateTutorial));
+classRouter.delete("/tutorials/:tutorialId", requireTeacher, asyncRoute(tutorialController.deleteTutorial));
+classRouter.post("/tutorials/:tutorialId/preview", requireTeacher, asyncRoute(tutorialController.previewTutorial));
+classRouter.post("/tutorials/:tutorialId/publish", requireTeacher, asyncRoute(tutorialController.publishTutorial));
+classRouter.get("/tutorials/:tutorialId/results", requireTeacher, asyncRoute(tutorialController.getTutorialResults));
+classRouter.get("/tutorials/:tutorialId/attempt", asyncRoute(tutorialController.getMyAttempt));
+classRouter.post("/tutorial-attempts/:attemptId/save", asyncRoute(tutorialController.saveAttempt));
+classRouter.post("/tutorial-attempts/:attemptId/submit", asyncRoute(tutorialController.submitAttempt));
+classRouter.post("/tutorial-attempts/:attemptId/adjust", requireTeacher, asyncRoute(tutorialController.adjustAttempt));
 
 // AI studio — audio → transcript → notes / tutorial / quiz
 classRouter.get("/studio/status", requireTeacher, asyncRoute(audioStudioController.getStudioStatus));

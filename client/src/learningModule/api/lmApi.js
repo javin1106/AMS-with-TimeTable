@@ -96,8 +96,16 @@ const lmApi = {
 
   /* people */
   listMembers: (classId) => request(`/classes/${classId}/members`),
-  inviteMembers: (classId, emails, role) =>
-    request(`/classes/${classId}/members/invite`, { method: 'POST', body: { emails, role } }),
+  inviteMembers: (classId, emails, role, options = {}) =>
+    request(`/classes/${classId}/members/invite`, {
+      method: 'POST',
+      body: {
+        emails,
+        role,
+        createAccounts: options.createAccounts !== false,
+        grantRoleToExisting: Boolean(options.grantRoleToExisting),
+      },
+    }),
   decideJoinRequest: (classId, membershipId, approve) =>
     request(`/classes/${classId}/members/${membershipId}/decide`, { method: 'POST', body: { approve } }),
   updateMember: (classId, membershipId, body) =>
@@ -170,6 +178,44 @@ const lmApi = {
     request(`/classes/${classId}/attempts/${attemptId}/submit`, { method: 'POST', body: { answers } }),
   getAttempt: (classId, attemptId) => request(`/classes/${classId}/attempts/${attemptId}`),
 
+  /* parameterised tutorials */
+  listTutorials: (classId) => request(`/classes/${classId}/tutorials`),
+  createTutorial: (classId, body) => request(`/classes/${classId}/tutorials`, { method: 'POST', body }),
+  getTutorial: (classId, tutorialId) => request(`/classes/${classId}/tutorials/${tutorialId}`),
+  updateTutorial: (classId, tutorialId, body) =>
+    request(`/classes/${classId}/tutorials/${tutorialId}`, { method: 'PATCH', body }),
+  deleteTutorial: (classId, tutorialId) =>
+    request(`/classes/${classId}/tutorials/${tutorialId}`, { method: 'DELETE' }),
+  previewTutorial: (classId, tutorialId, count) =>
+    request(`/classes/${classId}/tutorials/${tutorialId}/preview`, { method: 'POST', body: { count } }),
+  publishTutorial: (classId, tutorialId, body) =>
+    request(`/classes/${classId}/tutorials/${tutorialId}/publish`, { method: 'POST', body: body || {} }),
+  tutorialResults: (classId, tutorialId) =>
+    request(`/classes/${classId}/tutorials/${tutorialId}/results`),
+  validateFormula: (classId, formula, variables) =>
+    request(`/classes/${classId}/tutorials/validate-formula`, {
+      method: 'POST',
+      body: { formula, variables },
+    }),
+  formulaReference: (classId) => request(`/classes/${classId}/tutorials/formula-reference`),
+  myTutorialAttempt: (classId, tutorialId) =>
+    request(`/classes/${classId}/tutorials/${tutorialId}/attempt`),
+  saveTutorialAttempt: (classId, attemptId, responses) =>
+    request(`/classes/${classId}/tutorial-attempts/${attemptId}/save`, {
+      method: 'POST',
+      body: { responses },
+    }),
+  submitTutorialAttempt: (classId, attemptId, responses) =>
+    request(`/classes/${classId}/tutorial-attempts/${attemptId}/submit`, {
+      method: 'POST',
+      body: { responses },
+    }),
+  adjustTutorialAttempt: (classId, attemptId, adjustment, feedback) =>
+    request(`/classes/${classId}/tutorial-attempts/${attemptId}/adjust`, {
+      method: 'POST',
+      body: { adjustment, feedback },
+    }),
+
   /* AI studio */
   studioStatus: (classId) => request(`/classes/${classId}/studio/status`),
   studioRecordings: (classId) => request(`/classes/${classId}/studio/recordings`),
@@ -193,7 +239,10 @@ const lmApi = {
     request(`/classes/${classId}/studio/sessions/${sessionId}/ask`, { method: 'POST', body: { question } }),
   publishNotes: (classId, sessionId, body) =>
     request(`/classes/${classId}/studio/sessions/${sessionId}/publish/notes`, { method: 'POST', body: body || {} }),
-  publishTutorial: (classId, sessionId, body) =>
+  // Distinct from publishTutorial() above: this publishes an AI-generated
+  // tutorial from a lecture session as class material, not a parameterised
+  // tutorial. The two used to share a name and silently collided.
+  publishSessionTutorial: (classId, sessionId, body) =>
     request(`/classes/${classId}/studio/sessions/${sessionId}/publish/tutorial`, { method: 'POST', body: body || {} }),
   publishQuizDraft: (classId, sessionId, body) =>
     request(`/classes/${classId}/studio/sessions/${sessionId}/publish/quiz`, { method: 'POST', body: body || {} }),

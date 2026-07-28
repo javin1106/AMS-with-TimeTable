@@ -18,6 +18,7 @@ import { ErrorState, Loading } from '../components/common';
 const TABS = [
   { path: '', label: 'Stream', end: true },
   { path: 'classwork', label: 'Classwork' },
+  { path: 'tutorials', label: 'Tutorials' },
   { path: 'people', label: 'People' },
   { path: 'grades', label: 'Grades' },
   { path: 'studio', label: 'AI Studio', teacherOnly: false },
