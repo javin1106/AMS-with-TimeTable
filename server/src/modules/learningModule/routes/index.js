@@ -1,0 +1,151 @@
+const express = require("express");
+
+const {
+  authenticate,
+  requireClassCreator,
+  loadClass,
+  requireTeacher,
+  requireOwner,
+  asyncRoute,
+} = require("../middleware/lmAuth");
+
+const classController = require("../controllers/classController");
+const memberController = require("../controllers/memberController");
+const streamController = require("../controllers/streamController");
+const commentController = require("../controllers/commentController");
+const courseworkController = require("../controllers/courseworkController");
+const submissionController = require("../controllers/submissionController");
+const quizController = require("../controllers/quizController");
+const audioStudioController = require("../controllers/audioStudioController");
+const notificationController = require("../controllers/notificationController");
+const dashboardController = require("../controllers/dashboardController");
+const uploadController = require("../controllers/uploadController");
+
+const router = express.Router();
+
+// Every endpoint in the module requires a signed-in platform user; per-class
+// authorisation is layered on top by loadClass/requireTeacher.
+router.use(authenticate);
+
+/* ─────────────────────── account-level (no classId) ───────────────────── */
+
+router.get("/me", (req, res) => res.json(req.lmUser));
+router.get("/overview", asyncRoute(dashboardController.getOverview));
+router.get("/todo", asyncRoute(dashboardController.getTodo));
+router.get("/calendar", asyncRoute(dashboardController.getCalendar));
+
+router.get("/notifications", asyncRoute(notificationController.list));
+router.post("/notifications/read", asyncRoute(notificationController.markRead));
+router.delete("/notifications/read", asyncRoute(notificationController.clearAll));
+router.delete("/notifications/:notificationId", asyncRoute(notificationController.remove));
+
+router.get("/classes", asyncRoute(classController.listMyClasses));
+router.post("/classes", requireClassCreator, asyncRoute(classController.createClass));
+router.get("/classes/all", asyncRoute(classController.listAllClasses));
+
+router.post("/join", asyncRoute(memberController.joinByCode));
+router.post("/claim-invites", asyncRoute(memberController.claimInvites));
+router.get("/preview/:code", asyncRoute(memberController.previewByCode));
+
+router.post(
+  "/uploads",
+  uploadController.uploadMiddleware,
+  uploadController.uploadErrorHandler,
+  asyncRoute(uploadController.handleUpload),
+);
+router.get("/files/:filename", asyncRoute(uploadController.serveFile));
+
+/* ─────────────────────────── class-scoped ─────────────────────────────── */
+
+const classRouter = express.Router({ mergeParams: true });
+router.use("/classes/:classId", asyncRoute(loadClass), classRouter);
+
+// class itself
+classRouter.get("/", asyncRoute(classController.getClass));
+classRouter.patch("/", requireTeacher, asyncRoute(classController.updateClass));
+classRouter.post("/archive", requireTeacher, asyncRoute(classController.archiveClass));
+classRouter.post("/code/regenerate", requireTeacher, asyncRoute(classController.regenerateCode));
+classRouter.delete("/", requireOwner, asyncRoute(classController.deleteClass));
+
+// topics
+classRouter.get("/topics", asyncRoute(classController.listTopics));
+classRouter.post("/topics", requireTeacher, asyncRoute(classController.createTopic));
+classRouter.patch("/topics/:topicId", requireTeacher, asyncRoute(classController.updateTopic));
+classRouter.delete("/topics/:topicId", requireTeacher, asyncRoute(classController.deleteTopic));
+
+// people
+classRouter.get("/members", asyncRoute(memberController.listMembers));
+classRouter.post("/members/invite", requireTeacher, asyncRoute(memberController.inviteMembers));
+classRouter.post("/members/:membershipId/decide", requireTeacher, asyncRoute(memberController.decideJoinRequest));
+classRouter.patch("/members/:membershipId", requireTeacher, asyncRoute(memberController.updateMember));
+classRouter.delete("/members/:membershipId", requireTeacher, asyncRoute(memberController.removeMember));
+classRouter.get("/members/:membershipId/progress", requireTeacher, asyncRoute(memberController.getMemberProgress));
+classRouter.post("/members/:membershipId/transfer-ownership", requireOwner, asyncRoute(memberController.transferOwnership));
+classRouter.post("/leave", asyncRoute(memberController.leaveClass));
+
+// stream
+classRouter.get("/stream", asyncRoute(streamController.getStream));
+classRouter.post("/announcements", asyncRoute(streamController.createAnnouncement));
+classRouter.patch("/announcements/:announcementId", asyncRoute(streamController.updateAnnouncement));
+classRouter.delete("/announcements/:announcementId", asyncRoute(streamController.deleteAnnouncement));
+classRouter.post("/announcements/:announcementId/react", asyncRoute(streamController.reactToAnnouncement));
+
+// comments (polymorphic)
+classRouter.get("/comments/:targetType/:targetId", asyncRoute(commentController.listComments));
+classRouter.post("/comments/:targetType/:targetId", asyncRoute(commentController.createComment));
+classRouter.patch("/comments/:commentId", asyncRoute(commentController.updateComment));
+classRouter.delete("/comments/:commentId", asyncRoute(commentController.deleteComment));
+
+// classwork
+classRouter.get("/coursework", asyncRoute(courseworkController.listCoursework));
+classRouter.post("/coursework", requireTeacher, asyncRoute(courseworkController.createCoursework));
+classRouter.get("/coursework/:courseworkId", asyncRoute(courseworkController.getCoursework));
+classRouter.patch("/coursework/:courseworkId", requireTeacher, asyncRoute(courseworkController.updateCoursework));
+classRouter.delete("/coursework/:courseworkId", requireTeacher, asyncRoute(courseworkController.deleteCoursework));
+classRouter.get("/coursework/:courseworkId/submissions", requireTeacher, asyncRoute(courseworkController.getSubmissionGrid));
+
+// student submissions
+classRouter.post("/coursework/:courseworkId/draft", asyncRoute(submissionController.saveDraft));
+classRouter.post("/coursework/:courseworkId/turn-in", asyncRoute(submissionController.turnIn));
+classRouter.post("/coursework/:courseworkId/unsubmit", asyncRoute(submissionController.unsubmit));
+
+// grading
+classRouter.patch("/submissions/:submissionId/grade", requireTeacher, asyncRoute(submissionController.gradeSubmission));
+classRouter.post("/submissions/return", requireTeacher, asyncRoute(submissionController.returnSubmissions));
+classRouter.post("/submissions/:submissionId/reclaim", requireTeacher, asyncRoute(submissionController.reclaimSubmission));
+classRouter.get("/gradebook", asyncRoute(submissionController.getGradebook));
+classRouter.get("/gradebook.csv", requireTeacher, asyncRoute(submissionController.exportGradebookCsv));
+classRouter.post("/gradebook/bulk", requireTeacher, asyncRoute(submissionController.bulkGrade));
+
+// quizzes
+classRouter.get("/quizzes", asyncRoute(quizController.listQuizzes));
+classRouter.post("/quizzes", requireTeacher, asyncRoute(quizController.createQuiz));
+classRouter.get("/quizzes/:quizId", asyncRoute(quizController.getQuiz));
+classRouter.patch("/quizzes/:quizId", requireTeacher, asyncRoute(quizController.updateQuiz));
+classRouter.delete("/quizzes/:quizId", requireTeacher, asyncRoute(quizController.deleteQuiz));
+classRouter.post("/quizzes/:quizId/publish", requireTeacher, asyncRoute(quizController.publishQuiz));
+classRouter.get("/quizzes/:quizId/results", requireTeacher, asyncRoute(quizController.getQuizResults));
+classRouter.post("/quizzes/:quizId/attempts", asyncRoute(quizController.startAttempt));
+classRouter.post("/attempts/:attemptId/submit", asyncRoute(quizController.submitAttempt));
+classRouter.get("/attempts/:attemptId", asyncRoute(quizController.getAttempt));
+
+// AI studio — audio → transcript → notes / tutorial / quiz
+classRouter.get("/studio/status", requireTeacher, asyncRoute(audioStudioController.getStudioStatus));
+classRouter.get("/studio/recordings", requireTeacher, asyncRoute(audioStudioController.listAvailableRecordings));
+classRouter.get("/studio/recordings/:filename/audio", requireTeacher, asyncRoute(audioStudioController.streamRecordingAudio));
+classRouter.get("/studio/sessions", asyncRoute(audioStudioController.listSessions));
+classRouter.post("/studio/sessions", requireTeacher, asyncRoute(audioStudioController.createSession));
+classRouter.get("/studio/sessions/:sessionId", asyncRoute(audioStudioController.getSession));
+classRouter.patch("/studio/sessions/:sessionId", requireTeacher, asyncRoute(audioStudioController.updateSession));
+classRouter.delete("/studio/sessions/:sessionId", requireTeacher, asyncRoute(audioStudioController.deleteSession));
+classRouter.post("/studio/sessions/:sessionId/transcribe", requireTeacher, asyncRoute(audioStudioController.transcribe));
+classRouter.post("/studio/sessions/:sessionId/generate", requireTeacher, asyncRoute(audioStudioController.generate));
+classRouter.post("/studio/sessions/:sessionId/ask", asyncRoute(audioStudioController.ask));
+classRouter.post("/studio/sessions/:sessionId/publish/notes", requireTeacher, asyncRoute(audioStudioController.publishNotes));
+classRouter.post("/studio/sessions/:sessionId/publish/tutorial", requireTeacher, asyncRoute(audioStudioController.publishTutorial));
+classRouter.post("/studio/sessions/:sessionId/publish/quiz", requireTeacher, asyncRoute(audioStudioController.createQuizFromDraft));
+
+// insights
+classRouter.get("/analytics", requireTeacher, asyncRoute(dashboardController.getClassAnalytics));
+
+module.exports = router;
