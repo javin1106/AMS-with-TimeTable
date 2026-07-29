@@ -1863,7 +1863,28 @@ function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRo
     const [candOpen, setCandOpen] = useState(false);
     
     const [deletingPhoto, setDeletingPhoto] = useState(null);
-    const images = item.embeddingFiles || [];
+    const images = item.imageFiles?.length > 0 ? item.imageFiles : item.previewFiles || [];
+
+    const [gtImages, setGtImages] = useState(null);
+    useEffect(() => {
+        if (!displayRoll) {
+            setGtImages(null);
+            return;
+        }
+        let active = true;
+        const RA_BASE = photoUrl('','','').split('/photo/')[0];
+        fetch(`${RA_BASE}/student-ground-truth/${encodeURIComponent(batchName)}/${encodeURIComponent(displayRoll)}`)
+            .then(res => res.ok ? res.json() : null)
+            .then(data => {
+                if (active && data?.embeddingFiles?.length) {
+                    setGtImages(data.embeddingFiles.slice(0, 6));
+                } else if (active) {
+                    setGtImages(null);
+                }
+            })
+            .catch(() => { if (active) setGtImages(null); });
+        return () => { active = false; };
+    }, [batchName, displayRoll, photoUrl]);
 
     const handleDeletePhoto = async (filename) => {
         if (images.length <= 1) {
@@ -1912,7 +1933,7 @@ function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRo
                 </div>
                 <div style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', display: 'grid', gridTemplateColumns: '1fr 250px', gap: 16 }}>
                     <div>
-                        <div style={{ fontSize: '11px', fontWeight: 600, color: theme.textMuted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Embedded Images</div>
+                        <div style={{ fontSize: '11px', fontWeight: 600, color: theme.textMuted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Extracted Face Images</div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5 }}>
                             {images.map((f, i) => {
                                 const isDeleting = deletingPhoto === f;
@@ -1947,6 +1968,16 @@ function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRo
                                 <div style={{ textAlign: 'center', color: theme.textMuted, fontSize: '12px', padding: '10px 0', borderRadius: 8, background: theme.bg, border: `1px dashed ${theme.border}` }}>No ERP match</div>
                             )}
                         </div>
+                        {gtImages && gtImages.length > 0 && (
+                            <div style={{ marginTop: 2 }}>
+                                <div style={{ fontSize: '11px', fontWeight: 600, color: theme.textMuted, marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Existing Embeddings (GT)</div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 4 }}>
+                                    {gtImages.map((img, i) => (
+                                        <img key={i} src={img.url} alt="" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 4, border: `1px solid ${theme.border}` }} onError={e => { e.target.style.display = 'none'; }} />
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                         {allCandidates.length > 0 && (
                             <div style={{ borderRadius: 8, border: `1px solid ${theme.border}`, overflow: 'hidden' }}>
                                 <button onClick={() => setCandOpen(o => !o)} style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 10px', background: theme.bg, border: 'none', cursor: 'pointer', fontSize: '10px', fontWeight: 600, color: theme.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
