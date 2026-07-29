@@ -10,6 +10,7 @@ const erpSync       = require('./erpEmbeddingSyncHelper');
 const {
     batchBelongsToAnyDepartment,
 } = require('../middleware/attendanceAccess');
+const { reconcileAfterPhotoDelete } = require('./groundTruthPhotoOps');
 
 const ML_SERVICE_URL   = process.env.ML_SERVICE_URL || 'http://localhost:8500';
 const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'ground_truth');
@@ -308,6 +309,14 @@ class RollAssignController {
             await ClusterMatch.findByIdAndUpdate(id, {
                 $pull: { imageFiles: safeFilename, embeddingFiles: safeFilename, previewFiles: safeFilename },
                 $inc:  { imageCount: -1 },
+            });
+            // …and from _info.json, plus the embedding/PKL rebuild the DB update
+            // alone never triggered — see groundTruthPhotoOps.
+            await reconcileAfterPhotoDelete({
+                batch:      record.batch,
+                rollNo:     record.rollNo || folder,
+                studentDir: path.join(GROUND_TRUTH_DIR, record.batch, folder),
+                filename:   safeFilename,
             });
             res.json({ ok: true, deleted: safeFilename });
         } catch (err) {
@@ -630,6 +639,11 @@ class RollAssignController {
             const batchPath = path.join(GROUND_TRUTH_DIR, batch);
             const matchMap  = {};
             const repairs   = [];
+            // Every folder name already spoken for by a DB record — under any of
+            // the three names a record can go by. An approved record keeps
+            // folderName "person_012" while its folder on disk is the rollNo, so
+            // matching on folderName alone would re-adopt it as a duplicate.
+            const tracked   = new Set();
 
             for (const r of records) {
                 let currentFolder = r.currentFolder || r.folderName;
@@ -679,12 +693,75 @@ class RollAssignController {
                     imageCount:    r.imageCount    || 0,
                     error:         r.error         || null,
                 };
+
+                for (const name of [r.folderName, currentFolder, r.rollNo]) {
+                    if (name) tracked.add(name);
+                }
+            }
+
+            // ── Adopt roll-number folders that have no DB record ─────────────
+            // The Approved list is built from these records alone, so a folder
+            // sitting in ground_truth/<batch>/ with nothing pointing at it is
+            // invisible in the UI — and no other path can recover it:
+            // listClusters/listAllClusters only ever backfill person_NNN.
+            // Folders land in this state when a batch's ml-data is restored
+            // without its clustermatches, or when an approve-merge half-failed.
+            // A folder named after a roll number is by definition already
+            // assigned, so adopt it as approved.
+            if (fs.existsSync(batchPath)) {
+                const entries = await fsPromises.readdir(batchPath, { withFileTypes: true });
+                for (const entry of entries) {
+                    if (!entry.isDirectory() || entry.name.startsWith('_')) continue;
+                    if (/^person_\d+$/i.test(entry.name)) continue;   // listClusters owns these
+                    if (tracked.has(entry.name)) continue;
+
+                    const { imageFiles, embeddingFiles } = await readFolderFiles(
+                        path.join(batchPath, entry.name),
+                    );
+                    // An empty folder is leftover state, not an approved student.
+                    if (!imageFiles.length) continue;
+
+                    const doc = await ClusterMatch.findOneAndUpdate(
+                        { batch, folderName: entry.name },
+                        { $setOnInsert: {
+                            batch,
+                            folderName:     entry.name,
+                            currentFolder:  entry.name,
+                            rollNo:         entry.name,
+                            status:         'approved',
+                            approved:       true,
+                            imageFiles,
+                            embeddingFiles,
+                            previewFiles:   imageFiles.slice(0, 6),
+                            imageCount:     imageFiles.length,
+                        }},
+                        { upsert: true, new: true, setDefaultsOnInsert: true },
+                    ).lean();
+
+                    matchMap[doc.folderName] = {
+                        _id:            doc._id,
+                        folderName:     doc.folderName,
+                        currentFolder:  doc.currentFolder || doc.folderName,
+                        rollNo:         doc.rollNo,
+                        status:         doc.status,
+                        approved:       doc.approved,
+                        erpPhoto:       doc.erpPhoto      || null,
+                        confidence:     doc.confidence    || null,
+                        candidates:     doc.candidates    || [],
+                        imageFiles:     doc.imageFiles    || [],
+                        embeddingFiles: doc.embeddingFiles || [],
+                        previewFiles:   doc.previewFiles  || [],
+                        imageCount:     doc.imageCount    || 0,
+                        error:          doc.error         || null,
+                    };
+                    tracked.add(entry.name);
+                }
             }
 
             // Fire-and-forget DB repairs
             if (repairs.length) Promise.all(repairs).catch(() => {});
 
-            res.json({ batch, matchMap, total: records.length });
+            res.json({ batch, matchMap, total: Object.keys(matchMap).length });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
@@ -796,23 +873,43 @@ class RollAssignController {
             }
             // ── Update DB record by ObjectId ──────────────────────────
             if (mergedIntoExisting) {
-                await ClusterMatch.findByIdAndDelete(id);
                 const allFinalFiles = fs.existsSync(folderPath) ? (await fsPromises.readdir(folderPath)).filter(f => /\.(jpg|jpeg|png|webp)$/i.test(f)).sort() : [];
-                await ClusterMatch.findOneAndUpdate(
-                    { batch, currentFolder: finalRollNo },
-                    {
-                        $set: {
-                            rollNo:        finalRollNo,
-                            status:        'approved',
-                            approved:      true,
-                            imageFiles:    allFinalFiles,
-                            imageCount:    allFinalFiles.length,
-                            previewFiles:  allFinalFiles.slice(0, 6),
-                            updated_at:    new Date(),
-                        }
-                    },
-                    { upsert: true }
-                );
+                const merged = {
+                    rollNo:        finalRollNo,
+                    status:        'approved',
+                    approved:      true,
+                    imageFiles:    allFinalFiles,
+                    imageCount:    allFinalFiles.length,
+                    previewFiles:  allFinalFiles.slice(0, 6),
+                    updated_at:    new Date(),
+                };
+
+                // Which record already owns the destination folder? It may be
+                // keyed by currentFolder (approved earlier under a person_NNN
+                // folderName) or by folderName (adopted straight from disk).
+                const target = await ClusterMatch.findOne({
+                    batch,
+                    _id:  { $ne: id },
+                    $or:  [{ currentFolder: finalRollNo }, { folderName: finalRollNo }],
+                }).lean();
+
+                if (target) {
+                    // Fold into it, then drop the source — in that order, so a
+                    // failed write leaves the cluster recoverable rather than
+                    // orphaning a roll-number folder with no record at all.
+                    await ClusterMatch.findByIdAndUpdate(target._id, { $set: merged });
+                    await ClusterMatch.findByIdAndDelete(id);
+                } else {
+                    // Nothing else owns the destination: repoint this record at it,
+                    // exactly as the plain-rename branch below does. Upserting on
+                    // { batch, currentFolder } instead would insert a doc with no
+                    // folderName — it is required and half of the unique index, and
+                    // findOneAndUpdate skips validators — which then collides with
+                    // the next merge in the same batch.
+                    await ClusterMatch.findByIdAndUpdate(id, {
+                        $set: { ...merged, currentFolder: finalRollNo },
+                    });
+                }
             } else {
                 await ClusterMatch.findByIdAndUpdate(id, {
                     $set: {
