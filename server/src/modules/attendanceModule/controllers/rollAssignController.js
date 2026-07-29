@@ -646,6 +646,34 @@ class RollAssignController {
             const tracked   = new Set();
 
             for (const r of records) {
+                // ── Automated Cleanup: delete invalid ghost records from DB ──
+                if (r.folderName === null) {
+                    repairs.push(ClusterMatch.findByIdAndDelete(r._id));
+                    
+                    // Force the *valid* record for this student to sync its image count from disk, 
+                    // since the ghost record might have held the updated count.
+                    if (r.rollNo) {
+                        const rollFolder = path.join(batchPath, r.rollNo);
+                        repairs.push(
+                            readFolderFiles(rollFolder).then(destData => 
+                                ClusterMatch.findOneAndUpdate(
+                                    { batch, rollNo: r.rollNo, folderName: { $ne: null } },
+                                    {
+                                        $set: {
+                                            imageFiles:     destData.imageFiles,
+                                            embeddingFiles: destData.embeddingFiles,
+                                            previewFiles:   destData.imageFiles.slice(0, 6),
+                                            imageCount:     destData.imageFiles.length,
+                                            updated_at:     new Date(),
+                                        }
+                                    }
+                                )
+                            ).catch(() => {})
+                        );
+                    }
+                    continue;
+                }
+
                 let currentFolder = r.currentFolder || r.folderName;
 
                 // ── Self-healing: folder was already renamed but DB wasn't updated ──
@@ -874,6 +902,7 @@ class RollAssignController {
             // ── Update DB record by ObjectId ──────────────────────────
             if (mergedIntoExisting) {
                 const allFinalFiles = fs.existsSync(folderPath) ? (await fsPromises.readdir(folderPath)).filter(f => /\.(jpg|jpeg|png|webp)$/i.test(f)).sort() : [];
+                
                 const merged = {
                     rollNo:        finalRollNo,
                     status:        'approved',
