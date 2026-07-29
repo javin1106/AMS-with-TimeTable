@@ -799,9 +799,10 @@ class RollAssignController {
                 await ClusterMatch.findByIdAndDelete(id);
                 const allFinalFiles = fs.existsSync(folderPath) ? (await fsPromises.readdir(folderPath)).filter(f => /\.(jpg|jpeg|png|webp)$/i.test(f)).sort() : [];
                 await ClusterMatch.findOneAndUpdate(
-                    { batch, currentFolder: finalRollNo },
+                    { batch, rollNo: finalRollNo, approved: true },
                     {
                         $set: {
+                            currentFolder: finalRollNo,
                             rollNo:        finalRollNo,
                             status:        'approved',
                             approved:      true,
@@ -809,9 +810,12 @@ class RollAssignController {
                             imageCount:    allFinalFiles.length,
                             previewFiles:  allFinalFiles.slice(0, 6),
                             updated_at:    new Date(),
+                        },
+                        $setOnInsert: {
+                            folderName:    finalRollNo
                         }
                     },
-                    { upsert: true }
+                    { upsert: true, new: true, setDefaultsOnInsert: true }
                 );
             } else {
                 await ClusterMatch.findByIdAndUpdate(id, {
