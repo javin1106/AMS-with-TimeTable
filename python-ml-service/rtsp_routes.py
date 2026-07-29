@@ -228,6 +228,12 @@ class RTSPAttendanceRequest(BaseModel):
     durationSec:      int   = 60
     checkIntervalMin: int   = 5
     frameSkip:        int   = 10
+    # Seconds on each camera before switching, for THIS attendance run only.
+    # Sent by Node from AcquisitionControl.attendanceThresholds.camera_switch_sec
+    # (ML Fine Tuning → Live Attendance Thresholds). Deliberately separate from
+    # gt_config["gt_camera_switch_sec"], which paces GT acquisition sub-runs —
+    # see the note in state.py. Ignored unless rtspUrl2 is set.
+    cameraSwitchSec:  int   = 30
     clusterThreshold: float = 0.45
     minSamples:       int   = 2
     autoThreshold:    float = 0.40
@@ -1154,7 +1160,10 @@ def _attendance_pipeline(req: RTSPAttendanceRequest, job: dict):
     )
     # Back-compat alias — the capture loop below reads this name.
     run_adaface_shadow = need_adaface
-    CAMERA_SWITCH_SEC = state.gt_config.get("camera_switch_sec", 30)
+    # Per-run, from Node — not the GT acquisition interval (see the field note
+    # on RTSPAttendanceRequest). Clamped so a bad payload can't spin the switch
+    # loop or park us on one camera for the whole run.
+    CAMERA_SWITCH_SEC = min(600, max(5, int(req.cameraSwitchSec or 30)))
     cameras = [req.rtspUrl]
     if req.rtspUrl2:
         cameras.append(req.rtspUrl2)
@@ -2380,7 +2389,7 @@ class GTConfigUpdate(BaseModel):
     new_person_timeout:     Optional[int]   = None
     top_n:                  Optional[int]   = None
     embed_n:                Optional[int]   = None
-    camera_switch_sec:      Optional[int]   = None
+    gt_camera_switch_sec:   Optional[int]   = None
     max_imgs_per_run:       Optional[int]   = None
 
 
@@ -2408,7 +2417,11 @@ def update_gt_config_ep(req: GTConfigUpdate):
         "new_person_timeout":     (15, 300),
         "top_n":                  (5, 30),
         "embed_n":                (3, 15),
-        "camera_switch_sec":      (5, 300),
+        # A GT sub-run reconnects the stream and runs a final clustering pass on
+        # every switch, so anything under ~30s spends most of its time on that
+        # overhead. Upper bound stays below the 60-min job ceiling in
+        # gtAcquisitionManager.js so a cycling job always reaches camera 2.
+        "gt_camera_switch_sec":   (30, 1800),
         "max_imgs_per_run":       (0, 50),
     }
     for key, (lo, hi) in float_ranges.items():
@@ -2422,12 +2435,19 @@ def update_gt_config_ep(req: GTConfigUpdate):
     if "det_size" in updates and updates["det_size"] not in (320, 640):
         return JSONResponse(status_code=400,
             content={"error": "det_size must be 320 or 640"})
-    # embed_n must not exceed top_n
-    new_top_n   = updates.get("top_n",   state.gt_config["top_n"])
+    # embed_n must not exceed target_imgs_per_person. That — not the legacy
+    # top_n key — is the real per-folder retention cap: _save_clusters() is
+    # called with top_n=req.targetImgsPerPerson (see extract_rtsp_stream), so
+    # target_imgs_per_person bounds how many images can actually be selected
+    # for the mean embedding. Validating against top_n let embed_n exceed the
+    # true cap (e.g. target=5, top_n=30, embed_n=10) and silently under-fill.
+    new_target  = updates.get("target_imgs_per_person",
+                              state.gt_config["target_imgs_per_person"])
     new_embed_n = updates.get("embed_n", state.gt_config["embed_n"])
-    if new_embed_n > new_top_n:
+    if new_embed_n > new_target:
         return JSONResponse(status_code=400,
-            content={"error": f"embed_n ({new_embed_n}) cannot exceed top_n ({new_top_n})"})
+            content={"error": f"embed_n ({new_embed_n}) cannot exceed "
+                              f"target_imgs_per_person ({new_target})"})
 
     cfg = gt_config_store.update_gt_config(updates)
     logger.info(f"[GTConfig] Updated: {updates} → {cfg}")

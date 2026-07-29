@@ -540,6 +540,7 @@ async function runOneCheck({
       // when enrolledEmbeddings is empty (see rtsp_routes.py)
       autoThreshold: runConfig.auto_present_threshold,
       reviewThreshold: runConfig.review_threshold,
+      cameraSwitchSec: runConfig.camera_switch_sec,
       // All enrolled dicts ship on EVERY run — which model uses them is
       // decided Python-side by state.pipeline_config (Model Pipeline card),
       // and Node can't know which primary is selected there. ~100-200KB per
@@ -644,6 +645,7 @@ async function runSlotAttendance({
     auto_present_threshold: t.auto_present_threshold ?? 0.6,
     review_threshold: t.review_threshold ?? 0.4,
     alertConfidence: t.alert_confidence ?? 0.6,
+    camera_switch_sec: t.camera_switch_sec ?? 30,
     // Max-of-K shadow comparison (diagnostic only) fires once per period —
     // on the check nearest the middle of the numRuns checks — not every run.
     middleRunIndex: Math.ceil(numRuns / 2),

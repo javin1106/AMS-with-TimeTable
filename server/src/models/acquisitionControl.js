@@ -101,6 +101,12 @@ const AcquisitionControlSchema = new mongoose.Schema(
       min_detections: { type: Number, default: 3 }, // min face detections to count
       auto_enroll_threshold: { type: Number, default: 0.75 }, // auto-add to ground truth
       alert_confidence: { type: Number, default: 0.6 }, // low-confidence alert cutoff
+      // Seconds on each camera before switching, for dual-camera attendance
+      // runs. Shipped to the ML service per run as RTSPAttendanceRequest
+      // .cameraSwitchSec. Independent of GT acquisition's own interval
+      // (gt_config.gt_camera_switch_sec on the ML service), which is measured
+      // in minutes because each GT switch costs a reconnect + clustering pass.
+      camera_switch_sec: { type: Number, default: 30 },
     },
 
     updatedAt: { type: Date, default: Date.now },

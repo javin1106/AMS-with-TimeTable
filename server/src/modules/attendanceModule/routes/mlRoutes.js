@@ -24,6 +24,7 @@ const { checkRole } = require('../../checkRole.middleware');
 const adminOnly = checkRole(['iams-admin']);
 const LockSem = require('../../../models/locksem');
 const TimeTable = require('../../../models/timetable');
+const AcquisitionControl = require('../../../models/acquisitionControl');
 const { saveAttendanceDailyData, listDailyDataFiles, readDailyDataFile } = require('../controllers/attendanceDailyDataSaver');
 const { saveFrameSnapshot } = require('../controllers/frameSnapshotWriter');
 const {
@@ -973,8 +974,14 @@ router.post('/run-attendance-rtsp', async (req, res) => {
 
     console.log(`[AttendanceRTSP] Running with batch=${resolvedBatch} rtsp=${rtspUrl} duration=${durationSec}s`);
 
+    // Dual-camera dwell time is an admin setting, not a per-request one — take
+    // it from AcquisitionControl rather than trusting whatever the browser sent
+    // (it only reads the value to draw its countdown).
+    const acqCfg = await AcquisitionControl.findOne({ profileName: 'default' }).lean();
+
     const payload = {
         ...req.body,
+        cameraSwitchSec: acqCfg?.attendanceThresholds?.camera_switch_sec ?? 30,
         batch:     resolvedBatch,
         subject:   resolvedSubject,
         faculty:   resolvedFaculty,

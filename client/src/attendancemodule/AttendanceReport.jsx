@@ -38,7 +38,11 @@ function timeStrToMin(hhmm, fallback) {
   if (Number.isNaN(h) || Number.isNaN(m)) return fallback;
   return h * 60 + m;
 }
-const CAMERA_SWITCH_SEC = 30; // must match CAMERA_SWITCH_SEC in rtsp_routes.py
+// Fallback only — the live value is the admin-set
+// attendanceThresholds.camera_switch_sec, fetched below and passed to the ML
+// service by Node on every run. Matches the schema default in
+// server/src/models/acquisitionControl.js.
+const DEFAULT_CAMERA_SWITCH_SEC = 30;
 // ── LT103 dual-camera preset (same as groundtruthgen_rtsp) ───────────────────
 //const LT103L_URL = 'rtsp://admin:Admin%401234%23@10.10.177.249:554/video/live?channel=1&subtype=0&rtsp_transport=tcp';
 //const LT103R_URL = 'rtsp://admin:Admin%401234%23@10.10.177.250:554/video/live?channel=1&subtype=0&rtsp_transport=tcp';
@@ -95,6 +99,10 @@ export default function AttendanceReport() {
   const [activeCam, setActiveCam] = useState(null); // 1 | 2 | null
   const [camSwitchAt, setCamSwitchAt] = useState(null); // timestamp when last switched
   const [camCountdown, setCamCountdown] = useState(0); // seconds shown in banner
+  // Admin-configured dwell time (ML Fine Tuning → Live Attendance Thresholds).
+  // Display only: Node sends the same value to the ML service, so this just
+  // keeps the banner honest instead of assuming the old hardcoded 30s.
+  const [camSwitchSec, setCamSwitchSec] = useState(DEFAULT_CAMERA_SWITCH_SEC);
   const camCountdownRef = useRef(null);
   const activeCamRef = useRef(null);
   const rtspUrl2Ref = useRef('');
@@ -130,6 +138,19 @@ export default function AttendanceReport() {
       .catch(() => { });
     const id = setInterval(() => setNowMin(nowMinIST()), 30000);
     return () => clearInterval(id);
+  }, []);
+
+  // ── Camera-switch dwell time (for the countdown banner) ───────────────────
+  useEffect(() => {
+    fetch(`${apiUrl}/attendancemodule/acquisitioncontrol/attendance-thresholds`, {
+      credentials: 'include',
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        const sec = Number(d?.camera_switch_sec);
+        if (Number.isFinite(sec) && sec > 0) setCamSwitchSec(sec);
+      })
+      .catch(() => { });
   }, []);
 
   const windowOpen =
@@ -328,8 +349,8 @@ export default function AttendanceReport() {
   }, [detailReport?._id, detailReport?.status]);
 
   // ── Camera-switch countdown ticker ────────────────────────────────────────
-  // Python switches cameras every CAMERA_SWITCH_SEC (30s), not every `duration`.
-  // We count down from CAMERA_SWITCH_SEC using camSwitchAt as the reference point.
+  // Python switches cameras every camSwitchSec, not every `duration`. We count
+  // down from camSwitchSec using camSwitchAt as the reference point.
   useEffect(() => {
     // Only run countdown when processing AND a camera is active AND cam2 is configured
     const hasCam2 = rtspUrl2.trim().length > 0;
@@ -351,7 +372,7 @@ export default function AttendanceReport() {
     const switchedAt = camSwitchAt || Date.now();
     camCountdownRef.current = setInterval(() => {
       const elapsed = Math.floor((Date.now() - switchedAt) / 1000);
-      const remaining = Math.max(0, CAMERA_SWITCH_SEC - elapsed);
+      const remaining = Math.max(0, camSwitchSec - elapsed);
       setCamCountdown(remaining);
     }, 500); // 500ms tick is more responsive than 1000ms
     return () => {
@@ -360,7 +381,7 @@ export default function AttendanceReport() {
         camCountdownRef.current = null;
       }
     };
-  }, [processing, activeCam, camSwitchAt, rtspUrl2]);
+  }, [processing, activeCam, camSwitchAt, rtspUrl2, camSwitchSec]);
 
   // ── Run attendance — SSE stream ───────────────────────────────
   const runAttendance = async () => {
@@ -408,7 +429,7 @@ export default function AttendanceReport() {
     setActiveCam(rtspUrl2.trim() ? 1 : null); // show cam 1 immediately if dual-cam
     activeCamRef.current = rtspUrl2.trim() ? 1 : null;
     setCamSwitchAt(Date.now()); // start countdown immediately
-    setCamCountdown(CAMERA_SWITCH_SEC);
+    setCamCountdown(camSwitchSec);
     rtspUrl2Ref.current = rtspUrl2.trim();
 
     try {
@@ -588,7 +609,7 @@ export default function AttendanceReport() {
       setActiveCam(rtspUrl2.trim() ? 1 : null);
       activeCamRef.current = rtspUrl2.trim() ? 1 : null;
       setCamSwitchAt(Date.now());
-      setCamCountdown(CAMERA_SWITCH_SEC);
+      setCamCountdown(camSwitchSec);
       rtspUrl2Ref.current = rtspUrl2.trim();
       setSessionChecks(0);
       const stopNote = data.autoStopAt

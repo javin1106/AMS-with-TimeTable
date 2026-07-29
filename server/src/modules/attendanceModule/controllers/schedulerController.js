@@ -353,6 +353,7 @@ async function runRoom({ room, roomOverride, slot, date, config }) {
         semester: ctx.sem,
         locksemId: ctx.locksemId,
         embeddingsPklData: pkl.pklData,
+        cameraSwitchSec: config.attendanceThresholds?.camera_switch_sec ?? 30,
         ...enrolledDicts,
       };
       if (i === middleRunIndex) {
