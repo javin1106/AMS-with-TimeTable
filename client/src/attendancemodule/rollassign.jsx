@@ -721,6 +721,7 @@ export default function RollAssign({ fixedDepartment = '' }) {
                                     ...prev,
                                     item: {
                                         ...prev.item,
+                                        embeddingFiles: (prev.item.embeddingFiles || []).filter(f => f !== filename),
                                         imageFiles: (prev.item.imageFiles || []).filter(f => f !== filename),
                                         previewFiles: (prev.item.previewFiles || []).filter(f => f !== filename),
                                         imageCount: Math.max(0, (prev.item.imageCount || 1) - 1)
@@ -1862,7 +1863,7 @@ function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRo
     const [candOpen, setCandOpen] = useState(false);
     
     const [deletingPhoto, setDeletingPhoto] = useState(null);
-    const images = item.imageFiles?.length > 0 ? item.imageFiles : item.previewFiles || [];
+    const images = item.embeddingFiles || [];
 
     const handleDeletePhoto = async (filename) => {
         if (images.length <= 1) {
@@ -1911,7 +1912,7 @@ function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRo
                 </div>
                 <div style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', display: 'grid', gridTemplateColumns: '1fr 250px', gap: 16 }}>
                     <div>
-                        <div style={{ fontSize: '11px', fontWeight: 600, color: theme.textMuted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Extracted Face Images</div>
+                        <div style={{ fontSize: '11px', fontWeight: 600, color: theme.textMuted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Embedded Images</div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5 }}>
                             {images.map((f, i) => {
                                 const isDeleting = deletingPhoto === f;
