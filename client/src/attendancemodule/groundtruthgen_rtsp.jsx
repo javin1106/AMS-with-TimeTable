@@ -12,6 +12,7 @@ import getEnvironment from '../getenvironment';
 import { API_BASE, DEGREES, theme, styles, cssReset } from './config';
 import { useDepartments } from './useDepartments';
 import { useBatchYears } from './useBatchYears';
+import { GT_OPTIONS } from './gtOptions';
 
 const _apiUrl    = getEnvironment();
 const CAMERA_API = `${_apiUrl}/attendancemodule/cameras`;
@@ -57,27 +58,50 @@ const fetch = (input, init = {}) => window.fetch(input, {
 
 const MODE_LABEL = { single: 'Single camera', combined: 'Combined (2 cameras)', room: 'Room (all cameras)' };
 
-const TARGET_OPTIONS = [
-    { value: 5,  hint: 'Minimal storage — embedding uses all 5' },
-    { value: 8,  hint: '5 embed + 3 backup' },
-    { value: 10, hint: '5 embed + 5 backup (recommended)' },
-    { value: 15, hint: '5 embed + 10 backup for diversity' },
-];
+// Per-run tuning buttons. The value sets come from the shared GT_OPTIONS so
+// this page always offers everything ML Fine Tuning can save — the lists used
+// to be narrower, so a prefilled value like frame_skip 15 or target 20 landed
+// with no button highlighted even though it was sent correctly. Hints stay
+// here because they describe this page's live-preview behaviour.
 
-const FRAME_SKIP_OPTIONS = [
-    { value: 5,   hint: 'Dense sampling — best for short sessions' },
-    { value: 10,  hint: 'Balanced — recommended for live streams' },
-    { value: 20,  hint: 'Fast, lighter on CPU' },
+const TARGET_HINTS = {
+    5:  'Minimal storage — embedding uses all 5',
+    8:  '5 embed + 3 backup',
+    10: '5 embed + 5 backup (recommended)',
+    15: '5 embed + 10 backup for diversity',
+    20: '5 embed + 15 backup',
+    30: 'Maximum pose diversity — heaviest storage',
+};
+const TARGET_OPTIONS = GT_OPTIONS.target_imgs_per_person.map(value => ({
+    value, hint: TARGET_HINTS[value],
+}));
+
+const FRAME_SKIP_HINTS = {
+    1:   'Every frame — heaviest CPU, only for very short sessions',
+    3:   'Near-continuous sampling',
+    5:   'Dense sampling — best for short sessions',
+    10:  'Balanced — recommended for live streams',
+    15:  'Lighter than balanced',
+    20:  'Fast, lighter on CPU',
+    30:  'Fastest of the centrally tunable range',
     // Preview frames are written once per *processed* frame, so the live preview
     // refreshes at camera FPS ÷ frameSkip — at 300 that is roughly once every
     // 10s, which reads as a frozen preview unless we say so up front.
-    { value: 300, hint: 'Minimal CPU usage — live preview refreshes only ~every 10s' },
-];
+    300: 'Minimal CPU usage — live preview refreshes only ~every 10s',
+};
+// 300 is deliberately a per-run-only escape hatch: the ML service validates
+// frame_skip to 1–60, so it can never be saved as the ML Fine Tuning default.
+const FRAME_SKIP_OPTIONS = [...GT_OPTIONS.frame_skip, 300].map(value => ({
+    value, hint: FRAME_SKIP_HINTS[value],
+}));
 
-const DET_SIZE_OPTIONS = [
-    { value: 320, label: 'Fast (320)',     hint: '~4× faster, good for clear footage' },
-    { value: 640, label: 'Accurate (640)', hint: 'Better for small/distant faces' },
-];
+const DET_SIZE_META = {
+    320: { label: 'Fast (320)',     hint: '~4× faster, good for clear footage' },
+    640: { label: 'Accurate (640)', hint: 'Better for small/distant faces' },
+};
+const DET_SIZE_OPTIONS = GT_OPTIONS.det_size.map(value => ({
+    value, ...DET_SIZE_META[value],
+}));
 
 // One label format for every camera, so the name shown while acquiring reads the
 // same whether the job was started in single, combined or room mode — the server
@@ -904,7 +928,7 @@ export default function GroundTruthRTSP({
                             — target count shown per person; acquisition keeps collecting new people until you Stop or 60 min
                         </span>
                     </label>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
                         {TARGET_OPTIONS.map(opt => (
                             <button key={opt.value} onClick={() => setTargetImgs(opt.value)} title={opt.hint} style={{
                                 padding: '7px 18px', borderRadius: 6, cursor: 'pointer',
@@ -927,7 +951,7 @@ export default function GroundTruthRTSP({
                 {!restrictedDepartmentAccess && (
                 <div style={{ marginBottom: 20 }}>
                     <label style={styles.label}>Detection Quality</label>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
                         {DET_SIZE_OPTIONS.map(opt => (
                             <button key={opt.value} onClick={() => setDetSize(opt.value)} title={opt.hint} style={{
                                 padding: '7px 18px', borderRadius: 6, cursor: 'pointer',
@@ -947,7 +971,7 @@ export default function GroundTruthRTSP({
                 {!restrictedDepartmentAccess && (
                 <div style={{ marginBottom: 20 }}>
                     <label style={styles.label}>Frame Skip</label>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
                         {FRAME_SKIP_OPTIONS.map(opt => (
                             <button key={opt.value} onClick={() => setFrameSkip(opt.value)} title={opt.hint} style={{
                                 padding: '7px 18px', borderRadius: 6, cursor: 'pointer',

@@ -6,6 +6,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { theme, styles, cssReset } from './config';
 import BackButton from './BackButton';
+import { GT_OPTIONS, clampEmbedN } from './gtOptions';
 import getEnvironment from '../getenvironment';
 
 const apiUrl = getEnvironment();
@@ -35,36 +36,21 @@ const PIPELINE_MODELS = [
 const HEURISTIC_OPTIONS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40];
 const ONNX_OPTIONS      = [0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90];
 
-// GT Acquisition — fixed option sets per parameter
-const GT_OPTIONS = {
-    frame_skip:             [1, 3, 5, 10, 15, 20, 30],
-    target_imgs_per_person: [5, 8, 10, 15, 20, 30],
-    cluster_threshold:      [0.35, 0.40, 0.45, 0.50, 0.55, 0.60],
-    min_samples:            [2, 3, 5, 7, 10],
-    det_size:               [320, 640],
-    merge_threshold:        [0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90],
-    nms_iou_thresh:         [0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50],
-    det_score_floor:        [0.30, 0.40, 0.50, 0.60, 0.70],
-    new_person_timeout:     [15, 30, 45, 60, 90, 120, 180],
-    top_n:                  [5, 8, 10, 15, 20, 30],
-    embed_n:                [3, 4, 5, 7, 10],
-    camera_switch_sec:      [5, 10, 15, 20, 30, 45, 60, 90, 120],
-    max_imgs_per_run:       [0, 1, 2, 3, 4, 5, 8, 10],
-};
+// GT Acquisition — fixed option sets per parameter live in ./gtOptions so the
+// GT Acquisition page offers exactly the same values it may be prefilled with.
 
 const GT_LABELS = {
     frame_skip:             { label: 'Frame skip',             unit: 'frames',  hint: 'Process 1 in every N frames. Lower = more coverage, higher = faster.' },
-    target_imgs_per_person: { label: 'Target images / person', unit: 'images',  hint: 'Stop collecting for a person once this many are saved.' },
-    cluster_threshold:      { label: 'Cluster threshold',      unit: '',        hint: 'DBSCAN cosine similarity eps. Higher = looser clusters (may merge different people).' },
+    target_imgs_per_person: { label: 'Target images / person', unit: 'images',  hint: 'Stop collecting for a person once this many are saved. Also the cap on images kept per folder, so it bounds "Embedding images" below.' },
+    cluster_threshold:      { label: 'Cluster threshold',      unit: '',        hint: 'Minimum cosine similarity for two detections to land in the same cluster. Higher = stricter (one person may split across folders); lower = looser (may merge different people into one folder).' },
     min_samples:            { label: 'Min cluster samples',    unit: 'detections', hint: 'DBSCAN min_samples. Higher = fewer but more certain clusters.' },
     det_size:               { label: 'Detection grid size',    unit: 'px',      hint: 'InsightFace input size. 640 is more accurate but slower.' },
     merge_threshold:        { label: 'Merge threshold',        unit: '',        hint: 'Post-DBSCAN cluster-merge cosine similarity. Lower merges more aggressively.' },
     nms_iou_thresh:         { label: 'NMS IoU threshold',      unit: '',        hint: 'Non-maximum suppression overlap. Lower keeps fewer overlapping detections.' },
     det_score_floor:        { label: 'Det score floor',        unit: '',        hint: 'Minimum InsightFace detection confidence to include a face in embeddings.' },
     new_person_timeout:     { label: 'New-person timeout',     unit: 'sec',     hint: 'Auto-stop if all people reach target and no new person appears for N seconds.' },
-    top_n:                  { label: 'Max images / person',    unit: 'images',  hint: 'Maximum images kept per person folder (lowest-quality ones are deleted).' },
-    embed_n:                { label: 'Embedding images',       unit: 'images',  hint: 'Of the top-N kept, how many are used to compute the mean embedding.' },
-    camera_switch_sec:      { label: 'Camera switch interval', unit: 'sec',     hint: 'When two cameras are configured for a session, how long to capture from each before switching to the other.' },
+    embed_n:                { label: 'Embedding images',       unit: 'images',  hint: 'Of the images kept per person, how many are used to compute the mean embedding. Cannot exceed "Target images / person".' },
+    gt_camera_switch_sec:   { label: 'Camera switch interval', unit: 'sec',     hint: 'Combined/Room acquisition only: how long to capture from each camera before cycling to the next. Each switch ends a sub-run, so keep it in minutes. Live attendance runs have their own interval below.' },
     max_imgs_per_run:       { label: 'Max images per person per run', unit: 'images', hint: 'Stop collecting for a person in a single camera run once this many are saved. 0 = unlimited.' },
 };
 
@@ -75,6 +61,7 @@ const ATTEND_OPTIONS = {
     min_detections:         [1, 2, 3, 4, 5, 7, 10],
     auto_enroll_threshold:  [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95],
     alert_confidence:       [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70],
+    camera_switch_sec:      [5, 10, 15, 20, 30, 45, 60, 90, 120, 180],
 };
 
 const ATTEND_LABELS = {
@@ -84,11 +71,13 @@ const ATTEND_LABELS = {
     min_detections:         { label: 'Min detections',           unit: 'frames', hint: 'Student must appear in at least this many frames to be considered detected.' },
     auto_enroll_threshold:  { label: 'Auto-enroll threshold',    unit: '',       hint: 'Confidence required to auto-add a new face to the ground-truth dataset.' },
     alert_confidence:       { label: 'Low-confidence alert',     unit: '',       hint: 'Students with average confidence below this trigger a low-confidence notification.' },
+    camera_switch_sec:      { label: 'Camera switch interval',   unit: 'sec',    hint: 'Dual-camera rooms only: how long each attendance run captures from one camera before switching. Separate from the GT Acquisition interval above, which is measured in minutes.' },
 };
 
 const ATTEND_DEFAULTS = {
     threshold: 0.45, auto_present_threshold: 0.60, review_threshold: 0.40,
     min_detections: 3, auto_enroll_threshold: 0.75, alert_confidence: 0.60,
+    camera_switch_sec: 30,
 };
 
 // FAISS Recognition — live tracked-attendance matching pipeline
@@ -789,7 +778,17 @@ export default function MLFineTuning() {
                                         <select
                                             value={gtConfig[key]}
                                             disabled={gtSaving}
-                                            onChange={e => updateGtConfig({ [key]: Number(e.target.value) })}
+                                            onChange={e => {
+                                                const val = Number(e.target.value);
+                                                // Lowering the target lowers the per-folder retention
+                                                // cap, so pull embed_n down with it — the ML service
+                                                // rejects embed_n > target_imgs_per_person.
+                                                if (key === 'target_imgs_per_person' && gtConfig.embed_n > val) {
+                                                    updateGtConfig({ [key]: val, embed_n: clampEmbedN(gtConfig.embed_n, val) });
+                                                } else {
+                                                    updateGtConfig({ [key]: val });
+                                                }
+                                            }}
                                             style={styles.select}
                                         >
                                             {opts.map(v => (
@@ -837,27 +836,20 @@ export default function MLFineTuning() {
                             Behaviour & Storage
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16 }}>
-                            {['new_person_timeout', 'top_n', 'embed_n', 'camera_switch_sec'].map(key => {
+                            {['new_person_timeout', 'embed_n', 'gt_camera_switch_sec'].map(key => {
                                 const meta = GT_LABELS[key];
                                 const opts = GT_OPTIONS[key];
-                                const defaults = { new_person_timeout: 60, top_n: 10, embed_n: 5, camera_switch_sec: 30 };
+                                const defaults = { new_person_timeout: 60, embed_n: 5, gt_camera_switch_sec: 300 };
                                 return (
                                     <div key={key}>
                                         <label style={styles.label}>{meta.label}{meta.unit ? ` (${meta.unit})` : ''}</label>
                                         <select
                                             value={gtConfig[key]}
                                             disabled={gtSaving}
-                                            onChange={e => {
-                                                const val = Number(e.target.value);
-                                                if (key === 'top_n' && gtConfig.embed_n > val) {
-                                                    updateGtConfig({ top_n: val, embed_n: Math.min(gtConfig.embed_n, val) });
-                                                } else {
-                                                    updateGtConfig({ [key]: val });
-                                                }
-                                            }}
+                                            onChange={e => updateGtConfig({ [key]: Number(e.target.value) })}
                                             style={styles.select}
                                         >
-                                            {opts.filter(v => key === 'embed_n' ? v <= gtConfig.top_n : true).map(v => (
+                                            {opts.filter(v => key === 'embed_n' ? v <= gtConfig.target_imgs_per_person : true).map(v => (
                                                 <option key={v} value={v}>{v}{v === defaults[key] ? ' (default)' : ''}</option>
                                             ))}
                                         </select>
@@ -867,9 +859,9 @@ export default function MLFineTuning() {
                             })}
                         </div>
 
-                        {gtConfig.embed_n > gtConfig.top_n && (
+                        {gtConfig.embed_n > gtConfig.target_imgs_per_person && (
                             <div style={{ marginTop: 12, fontSize: 12, color: theme.danger }}>
-                                ⚠ Embedding images ({gtConfig.embed_n}) cannot exceed max images/person ({gtConfig.top_n}).
+                                ⚠ Embedding images ({gtConfig.embed_n}) cannot exceed target images/person ({gtConfig.target_imgs_per_person}).
                             </div>
                         )}
                     </>
@@ -942,6 +934,35 @@ export default function MLFineTuning() {
                                             {opts.map(v => (
                                                 <option key={v} value={v}>
                                                     {v.toFixed(2)}{v === ATTEND_DEFAULTS[key] ? ' (default)' : ''}
+                                                </option>
+                                            ))}
+                                        </select>
+                                        <div style={{ fontSize: 11, color: theme.textMuted, marginTop: 4 }}>{meta.hint}</div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+
+                        {/* Row 3 — capture */}
+                        <div style={{ fontSize: 11, fontWeight: 700, color: theme.textMuted, textTransform: 'uppercase', letterSpacing: '0.06em', margin: '20px 0 10px' }}>
+                            Capture
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16 }}>
+                            {['camera_switch_sec'].map(key => {
+                                const meta = ATTEND_LABELS[key];
+                                const opts = ATTEND_OPTIONS[key];
+                                return (
+                                    <div key={key}>
+                                        <label style={styles.label}>{meta.label}{meta.unit ? ` (${meta.unit})` : ''}</label>
+                                        <select
+                                            value={attendThresh[key] ?? ATTEND_DEFAULTS[key]}
+                                            disabled={attendSaving}
+                                            onChange={e => updateAttendThresh({ [key]: parseInt(e.target.value, 10) })}
+                                            style={styles.select}
+                                        >
+                                            {opts.map(v => (
+                                                <option key={v} value={v}>
+                                                    {v}{v === ATTEND_DEFAULTS[key] ? ' (default)' : ''}
                                                 </option>
                                             ))}
                                         </select>

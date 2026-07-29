@@ -310,7 +310,8 @@ function TabGroundTruth() {
             <Step n={5} title="Start Capture — While Students Are Present">
                 Click <strong>Start Room Capture</strong>. The system begins streaming from the first camera.
                 A live preview shows the current feed with detection zones highlighted.
-                A countdown timer shows when the next automatic camera switch will occur (every 5 minutes).
+                A countdown timer shows when the next automatic camera switch will occur (every 5 minutes
+                by default — set under ML Fine Tuning → GT Acquisition → Behaviour &amp; Storage).
             </Step>
 
             <Step n={6} title="Monitor Progress — Per-Person Cards">
