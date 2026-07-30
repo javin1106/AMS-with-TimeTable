@@ -19,6 +19,7 @@ const TABS = [
   { path: '', label: 'Stream', end: true },
   { path: 'classwork', label: 'Classwork' },
   { path: 'tutorials', label: 'Tutorials' },
+  { path: 'shorts', label: 'Shorts' },
   { path: 'people', label: 'People' },
   { path: 'grades', label: 'Grades' },
   { path: 'studio', label: 'AI Studio', teacherOnly: false },

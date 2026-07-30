@@ -266,6 +266,46 @@ const lmApi = {
   publishQuizDraft: (classId, sessionId, body) =>
     request(`/classes/${classId}/studio/sessions/${sessionId}/publish/quiz`, { method: 'POST', body: body || {} }),
 
+  /* shorts — instant in-class polls */
+  listShorts: (classId) => request(`/classes/${classId}/shorts`),
+  createShort: (classId, body) => request(`/classes/${classId}/shorts`, { method: 'POST', body }),
+  getShort: (classId, shortId) => request(`/classes/${classId}/shorts/${shortId}`),
+  updateShort: (classId, shortId, body) =>
+    request(`/classes/${classId}/shorts/${shortId}`, { method: 'PATCH', body }),
+  deleteShort: (classId, shortId) =>
+    request(`/classes/${classId}/shorts/${shortId}`, { method: 'DELETE' }),
+  presentShort: (classId, shortId) =>
+    request(`/classes/${classId}/shorts/${shortId}/present`, { method: 'POST', body: {} }),
+  listShortSessions: (classId, shortId) => request(`/classes/${classId}/shorts/${shortId}/sessions`),
+  shortPresenterState: (classId, sessionId) =>
+    request(`/classes/${classId}/short-sessions/${sessionId}/state`),
+  controlShortSession: (classId, sessionId, action, extra) =>
+    request(`/classes/${classId}/short-sessions/${sessionId}/control`, {
+      method: 'POST',
+      body: { action, ...(extra || {}) },
+    }),
+  endShortSession: (classId, sessionId) =>
+    request(`/classes/${classId}/short-sessions/${sessionId}/end`, { method: 'POST', body: {} }),
+  shortSessionReport: (classId, sessionId) =>
+    request(`/classes/${classId}/short-sessions/${sessionId}/report`),
+  shortSessionCsvUrl: (classId, sessionId) =>
+    `${BASE()}/classes/${classId}/short-sessions/${sessionId}/report.csv`,
+
+  // The participant side is not class-scoped: a phone has the join code and
+  // nothing else until the server resolves it.
+  joinShort: (code) => request(`/shorts/join/${encodeURIComponent(code)}`, { method: 'POST', body: {} }),
+  shortLiveState: (sessionId) => request(`/shorts/live/${sessionId}`),
+  answerShort: (sessionId, body) =>
+    request(`/shorts/live/${sessionId}/answer`, { method: 'POST', body }),
+
+  // SSE endpoints are read by useShortStream, which uses fetch + ReadableStream
+  // rather than EventSource. EventSource cannot set an Authorization header, and
+  // the alternative — putting the JWT in the query string — would write it into
+  // every access log between here and the server.
+  shortPresenterStreamUrl: (classId, sessionId) =>
+    `${BASE()}/classes/${classId}/short-sessions/${sessionId}/stream`,
+  shortParticipantStreamUrl: (sessionId) => `${BASE()}/shorts/live/${sessionId}/stream`,
+
   /* analytics + uploads */
   analytics: (classId) => request(`/classes/${classId}/analytics`),
   uploadFiles: (files) => {

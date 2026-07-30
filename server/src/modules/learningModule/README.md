@@ -29,13 +29,27 @@ The client half is at `client/src/learningModule/`, mounted from `App.jsx` at
 server/src/modules/learningModule/
 ├── models/           lmClass, lmMembership, lmAnnouncement, lmCoursework,
 │                     lmSubmission, lmComment, lmQuiz, lmQuizAttempt,
-│                     lmAudioSession, lmNotification
+│                     lmTutorial, lmTutorialAttempt, lmAudioSession,
+│                     lmNotification, lmShort, lmShortSession, lmShortResponse
 ├── middleware/       lmAuth.js — authenticate, loadClass, requireTeacher…
-├── services/         aiService.js, recordingService.js, notifyService.js
+├── services/         aiService, recordingService, notifyService, formulaEngine,
+│                     variantGenerator, examEngine, shortsAggregator
 ├── controllers/      class, member, stream, comment, coursework, submission,
-│                     quiz, audioStudio, notification, dashboard, upload
+│                     quiz, tutorial, shorts, audioStudio, notification,
+│                     dashboard, upload
 ├── routes/index.js   the whole API surface
 └── uploads/          attachment storage (git-ignored)
+```
+
+```
+client/src/learningModule/
+├── api/lmApi.js      one request() helper; every endpoint
+├── components/       common, Markdown, RichText, RichTextEditor, Attachments,
+│                     CommentThread, LearningLayout, NotificationBell,
+│                     QuizReview, ShortResults
+├── hooks/            useProctoring, useShortStream
+├── pages/            dashboard, class tabs, quiz, tutorial and shorts screens
+└── LearningRoutes.jsx  everything under /learning/*
 ```
 
 ## Roles
@@ -77,6 +91,10 @@ with class averages and CSV export.
 answer; time limit, attempt cap, shuffling, negative marking, pass mark,
 availability window; auto-grading that writes straight into the gradebook;
 per-question difficulty analysis for the teacher.
+
+**Shorts** — live in-class polling: a deck of instant questions, a six-digit
+join code on the projector, and the room's answers on screen within seconds.
+See below.
 
 **Parameterised tutorials** — see below.
 
@@ -266,6 +284,156 @@ teachers. Only a class teacher can change the collaborator list.
       ▼                              score + per-question review (if released)
 ```
 
+## Shorts — live in-class polling
+
+A **Short** is a deck of instant questions a teacher runs from the front of the
+room while students answer on their phones. It is deliberately *not* a quiz: no
+availability window, no attempt cap, no gradebook row unless asked for. The
+point is the room seeing its own answers within seconds.
+
+### Why it is separate from quizzes
+
+A quiz is an assessment — window, attempts, proctoring, marks. A temperature
+check in the middle of a lecture has none of that, and folding the two together
+would mean every warm-up poll asking the teacher to pick a due date and a pass
+mark. Shorts share the module's auth, membership and rich-text authoring, and
+nothing else.
+
+### Slide types
+
+| Type | Answer | Aggregated as | Can be marked |
+|---|---|---|---|
+| `mcq` | one option | bar chart | yes |
+| `msq` | any options | bar chart (bars can exceed 100% — the denominator is people, not selections) | yes |
+| `truefalse` | one of two fixed options | bar chart | yes |
+| `wordcloud` | a word or three | frequency-sized cloud, stop words dropped | no |
+| `scale` | a value on min..max | histogram + mean and median | no |
+| `open` | a sentence or two | cards | no |
+| `ranking` | the options in order | Borda count | yes (exact sequence) |
+| `numeric` | a number | mean, median, spread over 10 buckets | yes, with ± tolerance |
+
+A slide with no answer key is a poll and is never marked. Word clouds, scales
+and open text are opinions, so they are never markable at all.
+
+### The state machine
+
+One `lm_short` (the reusable deck) has many `lm_short_session`s (one per run).
+Sessions exist because the same warm-up gets presented to two sections on the
+same morning; without a per-run record the second class's answers would pile on
+top of the first's, and the join code would stay live long after the lecture.
+
+The presenter drives a single endpoint (`POST …/control`) rather than several,
+because the controls *are* one state machine and splitting them invites the
+client into an inconsistent intermediate state:
+
+```
+waiting ──open──▶ open ──lock──▶ locked ──reveal──▶ revealed
+   ▲                                 │                  │
+   └──── next / previous / goto ◀─────┴──── reopen ◀─────┘
+```
+
+- `waiting` — the slide is up, answers are not accepted yet
+- `open` — accepting answers; a countdown runs if the slide has a time limit
+- `locked` — closed, tally shown, answer key withheld
+- `revealed` — closed, tally plus the correct answer and explanation
+
+`autoRevealOnClose` (default on) makes `lock` land straight on `revealed`.
+
+### Join codes
+
+Six digits, because the code is read off a projector at the back of a lecture
+hall and typed on a phone keypad. It lives on the *session*, not the deck, so it
+only works while something is actually being presented, and it is unique only
+among live sessions — a partial index on `{ joinCode: 1 }` filtered to
+`status: 'live'` — so codes recycle naturally instead of the space filling up.
+
+`POST /shorts/join/:code` and the participant endpoints sit **outside** the
+`/classes/:classId` router: somebody who just scanned the QR has a code and
+nothing else. Class membership is enforced inside the controller once the code
+resolves to a session.
+
+### What the room sees vs. what a phone sees
+
+The participant payload is deliberately narrower than the presenter's. No answer
+key unless `slideState === 'revealed'`, and no tally at all unless the deck sets
+`showResultsToStudents`. Both come from the same aggregator, so the projector
+and the phones can never disagree about the numbers.
+
+### Timing and cheat resistance
+
+- The deadline is stored on the session (`slideDeadline`) and checked
+  server-side. A phone with a slow clock, a paused tab or a patched countdown
+  cannot answer after time.
+- `responseMs` is measured from the server's `slideOpenedAt`, not sent by the
+  client, so "who buzzed in first" is not something a fast script can win.
+- Answering a slide the presenter has already left returns `409 STALE_SLIDE`
+  rather than silently landing on the wrong slide.
+- One response row per `(sessionId, slideId, participantId)`, enforced by a
+  unique index. Re-answering updates in place when `allowChangeAnswer` is on and
+  is refused with `ALREADY_ANSWERED` when it is not.
+
+### Live updates
+
+Server-sent events, matching the pattern used elsewhere in the platform. The
+loop polls Mongo every 1.5s (`LM_SHORTS_STREAM_MS`) and **only writes when the
+serialised payload changed**, sending a `: keep-alive` comment frame otherwise —
+an idle slide costs one query per tick and no bytes. The stream closes itself at
+9 minutes, under the 10-minute socket timeout in `index.js`, and the client
+reconnects; that same path recovers a dropped projector connection.
+
+Client-side, `hooks/useShortStream` reads the stream with `fetch` +
+`ReadableStream` rather than `EventSource`, because `EventSource` cannot attach
+the `Authorization` header this module uses and the alternative — the JWT in a
+query string — would write it into every access log on the way. If the stream
+cannot be established at all (a buffering proxy, a captive network) it falls
+back to polling `GET …/state`. A projector that has silently stopped updating is
+the failure worth engineering against here.
+
+Participant membership is checked **once** when the stream opens rather than on
+every tick: the class roster is not going to change mid-slide, and re-querying it
+forty times a minute per student would be the most expensive part of the loop.
+
+### Grading
+
+Off by default. With `settings.graded` on, ending the session creates (or
+updates) an `lm_coursework` row titled `Short: <title>` and writes a returned
+`lm_submission` per participant. A warm-up poll should not silently become an
+assessment, which is why this is opt-in rather than inferred from the presence
+of an answer key.
+
+### Reports
+
+Per session, not merged across sessions — the same deck run in two sections is
+two different rooms, and averaging them would hide that one cohort understood it
+and the other did not. Each report gives per-slide participation and correctness,
+average response time, a leaderboard, the slides under 60% correct, the people
+who joined and never answered, and a CSV of every answer.
+
+Leaderboard ordering is score, then **how much was attempted**, then speed. The
+middle term is not decoration: someone who answered nothing has accumulated 0 ms
+and on a pure time tie-break would outrank a classmate who answered and was
+merely slower.
+
+### Screens
+
+```
+/learning/class/:classId/shorts                          deck list (staff see all, students see live)
+/learning/class/:classId/short/:id/edit                  slide editor, all eight types
+/learning/class/:classId/short/:id/present/:sessionId    projector — join code, QR, live charts
+/learning/class/:classId/short/:id/sessions              every run of this deck
+/learning/class/:classId/short/:id/report/:sessionId     one run, in full
+
+/learning/short/join            ┐ outside the class routes: a phone has a code,
+/learning/short/join/:code      │ not a classId
+/learning/short/live/:sessionId ┘ answering
+```
+
+The presenter view is keyboard-driven (`←` `→` to move, space to
+open/close/reveal) because the teacher is usually holding a presenter remote that
+sends arrow keys and nothing else.
+
+---
+
 ## Rich text authoring
 
 Every authoring surface uses a Quill-based editor (`components/RichTextEditor`):
@@ -415,6 +583,10 @@ GET    /classes/all              admin-wide listing
 POST   /join                     join by code
 POST   /claim-invites            claim email-only invites for this account
 GET    /preview/:code            pre-join class preview
+POST   /shorts/join/:code        join a live short by its six-digit code
+GET    /shorts/live/:sessionId   current slide + my answer (participant view)
+GET    /shorts/live/:sessionId/stream    SSE: the participant view, live
+POST   /shorts/live/:sessionId/answer    submit an answer to the open slide
 POST   /uploads                  multipart attachment upload (max 10 × 50 MB)
 GET    /files/:filename          serve an uploaded attachment
 ```
@@ -511,6 +683,20 @@ GET    /tutorials/:id/attempt                get-or-create the caller's variant
 POST   /tutorial-attempts/:id/save           save a draft
 POST   /tutorial-attempts/:id/submit         auto-mark against stored expected values
 POST   /tutorial-attempts/:id/adjust     T   manual override + feedback
+
+GET    /shorts                               decks; students get no slides or keys
+POST   /shorts                           T   create
+GET    /shorts/:id                           teachers get slides, students get the title
+PATCH  /shorts/:id                       T   validates the deck before saving
+DELETE /shorts/:id                       T   also drops every session and response
+POST   /shorts/:id/present               T   start (or resume) a live session
+GET    /shorts/:id/sessions              T   every run of this deck
+GET    /short-sessions/:id/state         T   presenter view — the stream's fallback
+POST   /short-sessions/:id/control       T   goto | next | previous | open | lock | reveal | reopen
+POST   /short-sessions/:id/end           T   stops the code; mirrors marks if graded
+GET    /short-sessions/:id/stream        T   SSE: the presenter view, live
+GET    /short-sessions/:id/report        T   per-slide analysis + leaderboard
+GET    /short-sessions/:id/report.csv    T   every answer, one row per participant
 
 GET    /studio/status                    T   which providers are configured
 GET    /studio/recordings                T   attendance-module recordings

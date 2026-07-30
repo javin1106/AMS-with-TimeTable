@@ -16,6 +16,7 @@ const commentController = require("../controllers/commentController");
 const courseworkController = require("../controllers/courseworkController");
 const submissionController = require("../controllers/submissionController");
 const quizController = require("../controllers/quizController");
+const shortsController = require("../controllers/shortsController");
 const tutorialController = require("../controllers/tutorialController");
 const audioStudioController = require("../controllers/audioStudioController");
 const notificationController = require("../controllers/notificationController");
@@ -47,6 +48,15 @@ router.get("/classes/all", asyncRoute(classController.listAllClasses));
 router.post("/join", asyncRoute(memberController.joinByCode));
 router.post("/claim-invites", asyncRoute(memberController.claimInvites));
 router.get("/preview/:code", asyncRoute(memberController.previewByCode));
+
+// Shorts — the live participant side. These sit outside classRouter on purpose:
+// somebody joining from a phone has a six-digit code and nothing else, so there
+// is no classId to put in the path. Class membership is checked inside the
+// controller once the code resolves to a session.
+router.post("/shorts/join/:code", asyncRoute(shortsController.joinByCode));
+router.get("/shorts/live/:sessionId", asyncRoute(shortsController.getParticipantState));
+router.get("/shorts/live/:sessionId/stream", asyncRoute(shortsController.streamParticipant));
+router.post("/shorts/live/:sessionId/answer", asyncRoute(shortsController.submitResponse));
 
 router.post(
   "/uploads",
@@ -144,6 +154,25 @@ classRouter.get("/attempts/:attemptId", asyncRoute(quizController.getAttempt));
 // quizzes — analytics
 classRouter.get("/quizzes/:quizId/results", requireTeacher, asyncRoute(quizController.getQuizResults));
 classRouter.get("/quizzes/:quizId/results.csv", requireTeacher, asyncRoute(quizController.exportResultsCsv));
+
+// shorts — instant in-class polls. Authoring and presenting are staff-only;
+// the answering side lives on the top-level router above.
+// The list and the single-deck read are open to students so the class page can
+// say "a short is live, here is the code"; the controller strips the slides and
+// the answer key for anyone who is not staff.
+classRouter.get("/shorts", asyncRoute(shortsController.listShorts));
+classRouter.get("/shorts/:shortId", asyncRoute(shortsController.getShort));
+classRouter.post("/shorts", requireTeacher, asyncRoute(shortsController.createShort));
+classRouter.patch("/shorts/:shortId", requireTeacher, asyncRoute(shortsController.updateShort));
+classRouter.delete("/shorts/:shortId", requireTeacher, asyncRoute(shortsController.deleteShort));
+classRouter.post("/shorts/:shortId/present", requireTeacher, asyncRoute(shortsController.startSession));
+classRouter.get("/shorts/:shortId/sessions", requireTeacher, asyncRoute(shortsController.listSessions));
+classRouter.get("/short-sessions/:sessionId/state", requireTeacher, asyncRoute(shortsController.getPresenterState));
+classRouter.post("/short-sessions/:sessionId/control", requireTeacher, asyncRoute(shortsController.controlSession));
+classRouter.post("/short-sessions/:sessionId/end", requireTeacher, asyncRoute(shortsController.endSession));
+classRouter.get("/short-sessions/:sessionId/stream", requireTeacher, asyncRoute(shortsController.streamPresenter));
+classRouter.get("/short-sessions/:sessionId/report", requireTeacher, asyncRoute(shortsController.getSessionReport));
+classRouter.get("/short-sessions/:sessionId/report.csv", requireTeacher, asyncRoute(shortsController.exportSessionCsv));
 
 // parameterised tutorials — every student gets their own numbers
 classRouter.get("/tutorials", asyncRoute(tutorialController.listTutorials));
