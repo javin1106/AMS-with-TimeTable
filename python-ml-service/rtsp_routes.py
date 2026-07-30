@@ -2151,10 +2151,10 @@ import subprocess
 import shutil
 
 # Override via RECORDINGS_DIR env var to control save path without code changes.
-# Falls back to server/recordings/ relative to this file.
+# Falls back to ml-data/recordings/ via paths.py.
 RECORDINGS_DIR = os.environ.get(
     "RECORDINGS_DIR",
-    os.path.join(BASE_DIR, "..", "server", "recordings"),
+    data_path("recordings"),
 )
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
