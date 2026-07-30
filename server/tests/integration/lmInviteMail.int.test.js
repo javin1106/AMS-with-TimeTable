@@ -117,7 +117,47 @@ describe("POST /classes/:classId/members/invite — invitation mail", () => {
     expect(html).toContain("Dear User,");
     // Absolute, or the mail client cannot follow it.
     expect(html).toMatch(new RegExp(`href="https?://[^"]+/learning/class/${klass._id}"`));
+  });
+
+  // The class code is a fallback for people who cannot be auto-enrolled. Anyone
+  // already sitting on the roster has nothing to join, so showing them a code
+  // only invites "do I need to enter this?".
+  it("omits the class code for someone enrolled as active straight away", async () => {
+    const { user, cookie } = await seedTeacher();
+    const klass = await seedClass(user);
+    await User.create({
+      name: "Asha",
+      role: ["STUDENT"],
+      password: "hashed",
+      email: ["asha@example.com"],
+    });
+
+    const res = await invite(klass, cookie, { emails: ["asha@example.com"], role: "student" });
+
+    expect(res.body.results[0].status).toBe("added");
+    const html = sendMail.mock.calls[0][2];
+    expect(html).not.toContain(klass.code);
+    expect(html).not.toMatch(/join it manually|class code/i);
+    // …but the deep link to the class is still there.
+    expect(html).toContain("Open the class");
+  });
+
+  it("keeps the class code when the invite is waiting on an unregistered address", async () => {
+    const { user, cookie } = await seedTeacher();
+    const klass = await seedClass(user);
+
+    const res = await invite(klass, cookie, {
+      emails: ["nobody@example.com"],
+      role: "student",
+      createAccounts: false,
+    });
+
+    expect(res.body.results[0].status).toBe("invited");
+    const html = sendMail.mock.calls[0][2];
+    // claimInvites matches on email, so this only helps if they register under
+    // a different address — which is exactly what the copy now says.
     expect(html).toContain(klass.code);
+    expect(html).toMatch(/different address/i);
   });
 
   it("escapes user-supplied class and inviter text", async () => {

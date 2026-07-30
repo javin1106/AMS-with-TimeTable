@@ -220,7 +220,9 @@ exports.inviteMembers = async (req, res) => {
     let mailed = null;
     if (!provisionResult?.created) {
       // eslint-disable-next-line no-await-in-loop
-      mailed = await sendInviteMail(email, req.lmClass, req.lmUser.name, frontendBase);
+      // `user` truthy means the row above was written as "active", so the mail
+      // drops the class code — there is nothing left for them to join.
+      mailed = await sendInviteMail(email, req.lmClass, req.lmUser.name, frontendBase, Boolean(user));
     }
 
     results.push({

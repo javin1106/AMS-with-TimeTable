@@ -234,9 +234,20 @@ async function notifyUser({ userId, klass, type, title, body = "", link = "", ac
  * @param {object} klass
  * @param {string} inviterName
  * @param {string} [base]  frontend origin, for the "Open the class" link
+ * @param {boolean} [enrolled]
+ *        True when the recipient already has a platform account and was
+ *        enrolled as an active member in this same request. Such a person has
+ *        nothing to join manually, so the class code is omitted — it only
+ *        raises "do I need to enter this?".
+ *
+ *        False means the invite is waiting on an address with no account yet.
+ *        `claimInvites` matches on email, so it enrols them automatically *if*
+ *        they register with this same address; the code is the fallback for
+ *        when they sign up under a different one, and is the only case where
+ *        it earns its place.
  * @returns {Promise<boolean>}
  */
-async function sendInviteMail(to, klass, inviterName, base) {
+async function sendInviteMail(to, klass, inviterName, base, enrolled = false) {
   if (!sendMail || !to) return false;
 
   const heading = `You have been added to ${klass.name}`;
@@ -248,6 +259,8 @@ async function sendInviteMail(to, klass, inviterName, base) {
     <p style="margin:0;">Sign in and open the <strong>Learning</strong> module to see the class, its
       classwork and its schedule.</p>`;
 
+  const showCode = !enrolled && Boolean(klass.code);
+
   try {
     await sendMail(
       to,
@@ -258,10 +271,11 @@ async function sendInviteMail(to, klass, inviterName, base) {
         banner: "Welcome to XCEED Learning!",
         ctaLabel: "Open the class",
         ctaHref: absoluteLink(`/learning/class/${klass._id}`, base),
-        chipLabel: klass.code ? "Or join it manually with this class code:" : "",
-        chip: klass.code || "",
-        footnote:
-          "If you do not have an XCEED account for this address yet, the class will be waiting for you the first time you sign in with it.",
+        chipLabel: showCode ? "Signing up with a different address? Join with this class code:" : "",
+        chip: showCode ? klass.code : "",
+        footnote: enrolled
+          ? ""
+          : "If you do not have an XCEED account for this address yet, the class will be waiting for you the first time you sign in with it.",
       }),
     );
     return true;
