@@ -13,7 +13,8 @@ import Grades from './pages/Grades';
 import AiStudio from './pages/AiStudio';
 import Insights from './pages/Insights';
 import ClassSettings from './pages/ClassSettings';
-import QuizPlayer from './pages/QuizPlayer';
+import QuizBrief from './pages/QuizBrief';
+import QuizAttempt from './pages/QuizAttempt';
 import QuizEditor from './pages/QuizEditor';
 import QuizResults from './pages/QuizResults';
 import Tutorials from './pages/Tutorials';
@@ -47,7 +48,8 @@ export default function LearningRoutes() {
           <Route path="studio" element={<AiStudio />} />
           <Route path="insights" element={<Insights />} />
           <Route path="settings" element={<ClassSettings />} />
-          <Route path="quiz/:quizId" element={<QuizPlayer />} />
+          <Route path="quiz/:quizId" element={<QuizBrief />} />
+          <Route path="quiz/:quizId/attempt/:attemptId" element={<QuizAttempt />} />
           <Route path="quiz/:quizId/edit" element={<QuizEditor />} />
           <Route path="quiz/:quizId/results" element={<QuizResults />} />
           <Route path="tutorials" element={<Tutorials />} />

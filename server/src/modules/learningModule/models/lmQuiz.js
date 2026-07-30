@@ -1,57 +1,174 @@
-const mongoose = require("mongoose");
+const mongoose = require('mongoose');
+
+/**
+ * Quiz / online test.
+ *
+ * The option set here mirrors the aim2Crack exam engine (sections, per-question
+ * timing, sequential delivery, proctoring, separate margin and result times) so
+ * a placement-style test can be run from this module, while keeping the simpler
+ * "answer everything on one page" mode as the default.
+ */
+
+const sectionSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, trim: true },
+    order: { type: Number, default: 0 },
+    instructions: { type: String, default: '' },
+    // Optional section-level cap; 0 means "no separate section limit".
+    timeLimitSec: { type: Number, default: 0 },
+  },
+  { _id: true },
+);
 
 const questionSchema = new mongoose.Schema(
   {
     question: { type: String, required: true },
-    type: { type: String, enum: ["mcq", "msq", "truefalse", "short"], default: "mcq" },
+    type: {
+      type: String,
+      // single/multiple are the aim2Crack names for mcq/msq; both are accepted
+      // so an import from there does not need translating.
+      enum: ['mcq', 'msq', 'truefalse', 'short', 'numerical'],
+      default: 'mcq',
+    },
     options: [{ type: String }],
-    // Indices into `options` for mcq/msq/truefalse; free text for "short".
+    // Indices into `options` for choice types; expected text for "short";
+    // the expected number (as a string) for "numerical".
     correctAnswers: [{ type: String }],
-    explanation: { type: String, default: "" },
+
+    // numerical only: how far off an answer may be and still be correct.
+    tolerancePercent: { type: Number, default: 0 },
+    toleranceAbs: { type: Number, default: 0 },
+
+    explanation: { type: String, default: '' },
     marks: { type: Number, default: 1 },
-    negativeMarks: { type: Number, default: 0 },
-    difficulty: { type: String, enum: ["easy", "medium", "hard"], default: "medium" },
-    topic: { type: String, default: "" },
+    // Per-question negative marking. Falls back to the quiz-level default when
+    // left at null, so a teacher can set it once for the whole paper.
+    negativeMarks: { type: Number, default: null },
+
+    difficulty: { type: String, enum: ['easy', 'medium', 'hard'], default: 'medium' },
+    topic: { type: String, default: '' },
+
+    // Per-question countdown for one-at-a-time delivery. 0 = fall back to the
+    // quiz-level limit.
+    timeLimitSec: { type: Number, default: 0 },
+
+    sectionId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    sectionName: { type: String, default: '' },
+    order: { type: Number, default: 0 },
+
     // Where in the lecture transcript this question came from — lets a student
     // jump back to the source passage after seeing the answer.
-    sourceExcerpt: { type: String, default: "" },
+    sourceExcerpt: { type: String, default: '' },
   },
   { _id: true },
 );
 
 const lmQuizSchema = new mongoose.Schema({
-  classId: { type: mongoose.Schema.Types.ObjectId, ref: "lm_class", required: true, index: true },
+  classId: { type: mongoose.Schema.Types.ObjectId, ref: 'lm_class', required: true, index: true },
   title: { type: String, required: true, trim: true },
-  description: { type: String, default: "" },
+  description: { type: String, default: '' },
 
-  source: { type: String, enum: ["manual", "ai"], default: "manual" },
-  audioSessionId: { type: mongoose.Schema.Types.ObjectId, ref: "lm_audio_session", default: null },
+  source: { type: String, enum: ['manual', 'ai'], default: 'manual' },
+  audioSessionId: { type: mongoose.Schema.Types.ObjectId, ref: 'lm_audio_session', default: null },
 
+  // Shown on the pre-test instructions screen, one line per entry.
+  instructions: [{ type: String }],
+  sections: [sectionSchema],
   questions: [questionSchema],
   totalMarks: { type: Number, default: 0 },
 
+  // Co-authors who may edit this quiz without being class teachers.
+  collaborators: [
+    {
+      userId: { type: mongoose.Schema.Types.ObjectId, ref: 'user' },
+      email: { type: String, default: '' },
+      name: { type: String, default: '' },
+      _id: false,
+    },
+  ],
+
   settings: {
+    /* ---- delivery methodology ---- */
+    // all_at_once  → every question on one page, free navigation (default)
+    // one_at_a_time→ server hands out one question at a time, resumable
+    deliveryMode: {
+      type: String,
+      enum: ['all_at_once', 'one_at_a_time'],
+      default: 'all_at_once',
+    },
+    // Only meaningful for one_at_a_time. False reproduces a placement test
+    // where a delivered question cannot be revisited.
+    allowBacktracking: { type: Boolean, default: false },
+    // True: each question gets its own countdown and auto-submits on expiry.
+    // False: one countdown for the whole paper.
+    perQuestionTiming: { type: Boolean, default: false },
+
+    /* ---- timing ---- */
     timeLimitMinutes: { type: Number, default: 0 },
-    shuffleQuestions: { type: Boolean, default: false },
-    shuffleOptions: { type: Boolean, default: false },
-    attemptsAllowed: { type: Number, default: 1 },
-    showAnswersAfterSubmit: { type: Boolean, default: true },
+    // Latest a student may *start*, expressed as minutes after availableFrom.
+    // Mirrors aim2Crack's marginTime: the test stays open but late arrivals are
+    // turned away rather than given a full clock.
+    marginMinutes: { type: Number, default: 0 },
     availableFrom: { type: Date, default: null },
     availableTo: { type: Date, default: null },
+    // Results stay hidden until this moment even after submitting, so a whole
+    // cohort can be released together.
+    resultReleaseAt: { type: Date, default: null },
+
+    /* ---- marking ---- */
+    // Quiz-wide default used by any question whose negativeMarks is null.
+    negativeMarking: { type: Number, default: 0 },
     passPercent: { type: Number, default: 40 },
+    attemptsAllowed: { type: Number, default: 1 },
+
+    /* ---- randomisation ---- */
+    shuffleQuestions: { type: Boolean, default: false },
+    shuffleOptions: { type: Boolean, default: false },
+    // 0 = serve every question. Above 0, draw that many at random per student.
+    questionsPerAttempt: { type: Number, default: 0 },
+
+    /* ---- feedback ---- */
+    showAnswersAfterSubmit: { type: Boolean, default: true },
+    showScoreImmediately: { type: Boolean, default: true },
+    allowReviewBeforeSubmit: { type: Boolean, default: true },
+
+    /* ---- proctoring ---- */
+    preventMobile: { type: Boolean, default: false },
+    allowTabChange: { type: Boolean, default: true },
+    maxTabSwitches: { type: Number, default: 3 },
+    autoSubmitOnTabLimit: { type: Boolean, default: false },
+    disableCopyPaste: { type: Boolean, default: false },
+    disableRightClick: { type: Boolean, default: false },
+    requireFullscreen: { type: Boolean, default: false },
   },
 
   published: { type: Boolean, default: false, index: true },
-  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "user", required: true },
-  createdByName: { type: String, default: "" },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'user', required: true },
+  createdByName: { type: String, default: '' },
 
   created_at: { type: Date, default: Date.now },
   updated_at: { type: Date, default: Date.now },
 });
 
-lmQuizSchema.pre("save", function recomputeTotal(next) {
-  this.totalMarks = (this.questions || []).reduce((sum, q) => sum + (q.marks || 0), 0);
+lmQuizSchema.pre('save', function recomputeTotal(next) {
+  // With a per-attempt draw the paper is a subset, so the achievable total is
+  // the mean mark times the draw size rather than the sum of every question.
+  const questions = this.questions || [];
+  const sum = questions.reduce((total, q) => total + (q.marks || 0), 0);
+  const draw = this.settings?.questionsPerAttempt || 0;
+  this.totalMarks =
+    draw > 0 && draw < questions.length
+      ? Math.round((sum / questions.length) * draw * 100) / 100
+      : sum;
   next();
 });
 
-module.exports = mongoose.model("lm_quiz", lmQuizSchema);
+/** Effective negative marking for a question, applying the quiz default. */
+lmQuizSchema.methods.negativeFor = function negativeFor(question) {
+  if (question.negativeMarks !== null && question.negativeMarks !== undefined) {
+    return question.negativeMarks;
+  }
+  return this.settings?.negativeMarking || 0;
+};
+
+module.exports = mongoose.model('lm_quiz', lmQuizSchema);
