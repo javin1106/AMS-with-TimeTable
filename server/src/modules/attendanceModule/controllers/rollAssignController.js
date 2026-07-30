@@ -8,6 +8,7 @@ const axios      = require('axios');
 const ClusterMatch = require('../../../models/attendanceModule/clusterMatch');
 const erpSync       = require('./erpEmbeddingSyncHelper');
 const {
+    batchBelongsToDepartment,
     batchBelongsToAnyDepartment,
 } = require('../middleware/attendanceAccess');
 const { reconcileAfterPhotoDelete } = require('./groundTruthPhotoOps');
@@ -1338,32 +1339,142 @@ class RollAssignController {
     }
 
     async getSummary(req, res) {
-        const agg = await ClusterMatch.aggregate([
-            { $group: {
-                _id:        '$batch',
-                total:      { $sum: 1 },
-                approved:   { $sum: { $cond: [{ $eq: ['$approved', true] }, 1, 0] } },
-                pending:    { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'matched'] }, { $eq: ['$approved', false] }] }, 1, 0] } },
-                flagged:    { $sum: { $cond: [{ $eq: ['$status', 'flagged'] }, 1, 0] } },
-                unmatched:  { $sum: { $cond: [{ $eq: ['$status', 'unmatched'] }, 1, 0] } },
-                cross_dept: { $sum: { $cond: [{ $eq: ['$status', 'cross_dept'] }, 1, 0] } },
-            }},
-            { $project: { _id: 0, batch: '$_id', total: 1, approved: 1, pending: 1, flagged: 1, unmatched: 1, cross_dept: 1 } },
-            { $sort: { batch: 1 } },
-        ]);
-        // Dept-admins see only the departments assigned to their GT / Roll
-        // dropdown —
-        // this route carries no batch/dept param for enforceAttendanceDepartment
-        // to check, so the scoping has to happen in the controller itself.
-        // Filtering post-aggregation is fine: the group above is one row per
-        // batch, a small result set, not per-document.
-        const scoped = req.attendanceFullAccess
-            ? agg
-            : agg.filter((row) => batchBelongsToAnyDepartment(
-                row.batch,
-                req.attendanceDepartments,
-            ));
-        res.json({ batches: scoped });
+        try {
+            // 1. Fetch DB metrics from ClusterMatch
+            const agg = await ClusterMatch.aggregate([
+                { $group: {
+                    _id:        '$batch',
+                    total:      { $sum: 1 },
+                    approved:   { $sum: { $cond: [{ $eq: ['$approved', true] }, 1, 0] } },
+                    pending:    { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'matched'] }, { $eq: ['$approved', false] }] }, 1, 0] } },
+                    flagged:    { $sum: { $cond: [{ $eq: ['$status', 'flagged'] }, 1, 0] } },
+                    unmatched:  { $sum: { $cond: [{ $eq: ['$status', 'unmatched'] }, 1, 0] } },
+                    cross_dept: { $sum: { $cond: [{ $eq: ['$status', 'cross_dept'] }, 1, 0] } },
+                    dbApprovedRollNos: {
+                        $push: { $cond: [{ $eq: ['$approved', true] }, '$rollNo', '$$REMOVE'] },
+                    },
+                    dbPendingRollNos: {
+                        $push: {
+                            $cond: [
+                                { $and: [{ $eq: ['$status', 'matched'] }, { $eq: ['$approved', false] }] },
+                                '$rollNo',
+                                '$$REMOVE',
+                            ],
+                        },
+                    },
+                }},
+                { $project: {
+                    _id: 0, batch: '$_id', total: 1, approved: 1, pending: 1, flagged: 1,
+                    unmatched: 1, cross_dept: 1, dbApprovedRollNos: 1, dbPendingRollNos: 1,
+                }},
+                { $sort: { batch: 1 } },
+            ]);
+
+            // 2. Scan GROUND_TRUTH_DIR for approved student folders on disk
+            const diskApprovedByBatch = {};
+            try {
+                if (fs.existsSync(GROUND_TRUTH_DIR)) {
+                    const batchDirs = await fsPromises.readdir(GROUND_TRUTH_DIR, { withFileTypes: true });
+                    for (const bDir of batchDirs) {
+                        if (!bDir.isDirectory()) continue;
+                        const batchName = bDir.name;
+                        const lcName = batchName.toLowerCase();
+                        const studentDirs = await fsPromises.readdir(path.join(GROUND_TRUTH_DIR, batchName), { withFileTypes: true });
+                        
+                        const approvedSet = new Set();
+                        for (const sDir of studentDirs) {
+                            if (sDir.isDirectory() && !sDir.name.startsWith('.')) {
+                                approvedSet.add(String(sDir.name).trim());
+                            }
+                        }
+                        diskApprovedByBatch[batchName] = approvedSet;
+                        diskApprovedByBatch[lcName]    = approvedSet;
+                    }
+                }
+            } catch (err) {
+                console.error('[RollAssign] getSummary: error scanning GROUND_TRUTH_DIR:', err.message);
+            }
+
+            // 3. Scan ERP_PHOTOS_DIR for photo counts & roll number extraction
+            const erpPhotoTotals = {};
+            const erpRollNosByBatch = {};
+
+            try {
+                if (fs.existsSync(ERP_PHOTOS_DIR)) {
+                    const entries = await fsPromises.readdir(ERP_PHOTOS_DIR, { withFileTypes: true });
+                    for (const entry of entries) {
+                        if (!entry.isDirectory()) continue;
+                        const folderName = entry.name;
+                        const lcName     = folderName.toLowerCase();
+                        const files      = await fsPromises.readdir(path.join(ERP_PHOTOS_DIR, folderName));
+                        const imgFiles   = files.filter((f) => /\.(jpg|jpeg|png|webp)$/i.test(f));
+
+                        erpPhotoTotals[folderName] = imgFiles.length;
+                        erpPhotoTotals[lcName]     = imgFiles.length;
+
+                        const rollSet = new Set();
+                        for (const f of imgFiles) {
+                            const rollNo = f.split('.')[0].split('_')[0].trim();
+                            if (rollNo) rollSet.add(String(rollNo).trim());
+                        }
+                        erpRollNosByBatch[folderName] = rollSet;
+                        erpRollNosByBatch[lcName]     = rollSet;
+                    }
+                }
+            } catch (err) {
+                console.error('[RollAssign] getSummary: failed reading ERP photos:', err.message);
+            }
+
+            // 4. Merge DB + Disk Approved Roll Nos and calculate Pending = (ERP Rolls - Approved Rolls)
+            const enriched = agg.map((row) => {
+                const batchKey = row.batch;
+                const lcKey    = batchKey.toLowerCase();
+
+                const erpPhotoTotal = erpPhotoTotals[batchKey] || erpPhotoTotals[lcKey] || 0;
+                const erpRollNos    = erpRollNosByBatch[batchKey] || erpRollNosByBatch[lcKey] || new Set();
+
+                // Merge Approved Roll Numbers from DB and Disk
+                const dbApproved   = (row.dbApprovedRollNos || []).filter(Boolean).map(r => String(r).trim());
+                const diskApproved = diskApprovedByBatch[batchKey] || diskApprovedByBatch[lcKey] || new Set();
+
+                const combinedApprovedSet = new Set([...dbApproved, ...diskApproved]);
+                const approvedRollNos     = Array.from(combinedApprovedSet).sort();
+                const approved            = approvedRollNos.length;
+
+                let pendingRollNos = (row.dbPendingRollNos || []).filter(Boolean).map(r => String(r).trim());
+                let pending        = pendingRollNos.length;
+
+                // Pending Roll Nos = ERP Roll Nos that are NOT in combinedApprovedSet
+                if (erpRollNos.size > 0) {
+                    pendingRollNos = [...erpRollNos].filter((rn) => !combinedApprovedSet.has(rn)).sort();
+                    pending        = pendingRollNos.length;
+                }
+
+                return {
+                    ...row,
+                    approved,
+                    approvedRollNos,
+                    erpPhotoTotal,
+                    pending,
+                    pendingRollNos,
+                    unclustered: Math.max(0, erpPhotoTotal - row.total),
+                };
+            });
+
+            // 5. Scoping
+            let scoped = req.attendanceFullAccess
+                ? enriched
+                : enriched.filter((row) => batchBelongsToDepartment(row.batch, req.attendanceDepartment));
+
+            if (req.attendanceFullAccess && req.query.department) {
+                scoped = scoped.filter((row) => batchBelongsToDepartment(row.batch, req.query.department));
+            }
+
+            res.json({ batches: scoped });
+        } catch (err) {
+            console.error('[RollAssign] getSummary error:', err);
+            res.status(500).json({ error: err.message });
+        }
     }
 }
 
