@@ -75,6 +75,27 @@ describe("POST /auth/forgot-password", () => {
     expect(html).toContain(otp);
   });
 
+  // A teacher-provisioned account (learningModule) always stores the address
+  // lowercased, but the invitee types it however they like. Before this was
+  // fixed the lookup was exact-match and they got a dead "User not exists".
+  it("finds a lowercased account when the email is typed in a different case", async () => {
+    await User.create({
+      name: "provisioned",
+      email: [EMAIL.toLowerCase()],
+      password: await bcrypt.hash("unguessable", 10),
+      role: ["STUDENT"],
+    });
+
+    const res = await request(app)
+      .post("/auth/forgot-password")
+      .send({ email: EMAIL.toUpperCase() });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(await OTP.countDocuments()).toBe(1);
+    expect(mailSender).toHaveBeenCalledTimes(1);
+  });
+
   it("issues a fresh OTP on every request instead of reusing a stale one", async () => {
     await createUser();
     await request(app).post("/auth/forgot-password").send({ email: EMAIL });
