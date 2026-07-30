@@ -13,6 +13,7 @@ import {
   IconButton,
   Input,
   SimpleGrid,
+  Spinner,
   Text,
   Textarea,
   VStack,
@@ -40,10 +41,57 @@ import useShortStream from '../hooks/useShortStream';
  */
 
 const STATE_MESSAGE = {
-  waiting: 'Wait for the question to open.',
   locked: 'Answering is closed.',
   revealed: 'Answers are in.',
 };
+
+/**
+ * The hold screen, from joining until the presenter opens a slide.
+ *
+ * Deliberately the deck's title card rather than the question: a student who
+ * has just typed a six-digit code needs to know they landed in the right room,
+ * and the question is the teacher's to reveal when the room is ready for it.
+ */
+function TitleCard({ state, cardBg }) {
+  const first = state.slideIndex === 0;
+  return (
+    <Box bg={cardBg} borderWidth="1px" borderRadius="xl" p={8} textAlign="center">
+      <Text fontSize="4xl" lineHeight="1">
+        ⚡
+      </Text>
+      <Heading size="lg" mt={3}>
+        {state.title}
+      </Heading>
+      {state.description ? (
+        <Box fontSize="sm" opacity={0.75} mt={2}>
+          <RichText>{state.description}</RichText>
+        </Box>
+      ) : null}
+
+      <HStack justify="center" spacing={2} mt={4} wrap="wrap">
+        {state.slideCount > 0 && (
+          <Badge>
+            {state.slideCount} {state.slideCount === 1 ? 'question' : 'questions'}
+          </Badge>
+        )}
+        {state.presentedByName ? <Badge>{state.presentedByName}</Badge> : null}
+        {state.participantCount > 0 ? <Badge colorScheme="purple">{state.participantCount} joined</Badge> : null}
+      </HStack>
+
+      <HStack justify="center" spacing={3} mt={8}>
+        <Spinner size="sm" speed="0.9s" color="purple.400" />
+        <Text fontWeight="600">
+          {first ? 'Waiting for your faculty to launch the short…' : 'Waiting for the next question…'}
+        </Text>
+      </HStack>
+      <Text fontSize="xs" opacity={0.6} mt={2}>
+        {first
+          ? 'You are in. Keep this screen open — the first question appears here.'
+          : `Question ${state.slideIndex + 1} of ${state.slideCount} is coming up.`}
+      </Text>
+    </Box>
+  );
+}
 
 function ChoiceButtons({ slide, value, onChange, multi, disabled }) {
   const selected = (value || []).map(String);
@@ -264,6 +312,9 @@ export default function ShortPlay() {
   const ended = state.status === 'ended' || connection === 'ended';
   const open = state.canAnswer && !ended;
   const locked = !open || (sent && state.canChange === false);
+  // Nothing to answer yet: either the presenter has not opened the current slide
+  // (`pending`, and the server has withheld its text) or there is no slide at all.
+  const holding = !ended && (!slide || slide.pending || state.slideState === 'waiting');
 
   const hasDraft =
     draft.selected.length > 0 || String(draft.text || '').trim().length > 0 || draft.number !== null;
@@ -271,15 +322,19 @@ export default function ShortPlay() {
   return (
     <Box maxW="560px" mx="auto" pb={10}>
       <VStack align="stretch" spacing={4}>
-        <Flex align="center" gap={2} wrap="wrap">
-          <Heading size="sm" flex="1" noOfLines={1}>
-            {state.title}
-          </Heading>
-          <Badge>
-            {state.slideIndex + 1} / {state.slideCount}
-          </Badge>
-          <Countdown deadline={open ? state.slideDeadline : null} />
-        </Flex>
+        {/* The hold screen carries the title itself, so the compact header would
+            only repeat it. */}
+        {!holding && (
+          <Flex align="center" gap={2} wrap="wrap">
+            <Heading size="sm" flex="1" noOfLines={1}>
+              {state.title}
+            </Heading>
+            <Badge>
+              {state.slideIndex + 1} / {state.slideCount}
+            </Badge>
+            <Countdown deadline={open ? state.slideDeadline : null} />
+          </Flex>
+        )}
 
         {connection !== 'live' && !ended && (
           <Alert status="warning" borderRadius="md" py={2} fontSize="sm">
@@ -298,7 +353,9 @@ export default function ShortPlay() {
           </Alert>
         )}
 
-        {slide ? (
+        {holding ? (
+          <TitleCard state={state} cardBg={cardBg} />
+        ) : slide && !slide.pending ? (
           <Box bg={cardBg} borderWidth="1px" borderRadius="xl" p={5}>
             <Box fontSize="lg" fontWeight="700" mb={4}>
               <RichText>{slide.question}</RichText>
@@ -416,11 +473,9 @@ export default function ShortPlay() {
               </HStack>
             )}
           </Box>
-        ) : (
-          <Text opacity={0.6}>Waiting for the first question…</Text>
-        )}
+        ) : null}
 
-        {state.results && (
+        {state.results && !holding && (
           <Box bg={cardBg} borderWidth="1px" borderRadius="xl" p={5}>
             <Text fontSize="sm" fontWeight="700" mb={3} opacity={0.7}>
               What the room said

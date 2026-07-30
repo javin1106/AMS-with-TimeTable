@@ -100,9 +100,11 @@ See below.
 
 **AI Studio** — see below.
 
-**Everywhere else** — cross-class to-do list, month calendar of due dates,
-in-app notification feed with email fan-out, and a per-class insights page
-(submission rate, late rate, averages, at-risk students).
+**Everywhere else** — cross-class to-do list, a month calendar (coursework due
+dates, quizzes, presented Shorts, and the institute's non-working days read from
+the attendance module's session record), in-app notification feed with email
+fan-out, and a per-class insights page (submission rate, late rate, averages,
+at-risk students).
 
 ---
 
@@ -474,6 +476,34 @@ Notification and email bodies are flattened to plain text and HTML-escaped
 before being stored or mailed, so a rich-text excerpt cannot corrupt (or inject
 into) an email body.
 
+## Outbound mail
+
+Every mail this module sends uses the platform frame in `notifyService.emailShell`
+— the same 480px card, teal banner, `Dear User,` greeting and footer as the
+forgot-password OTP mail (`otpbody.ejs`) and the welcome mail
+(`usermanagement/welcomeMailer`). The banner carries the `XCEED — NIT Jalandhar`
+wordmark by default; the invitation overrides it with `Welcome to XCEED
+Learning!`, since for most recipients it is their first mail from the module.
+Links are absolutised against the request origin
+(falling back to `FRONTEND_URL`, then `https://xceed.nitj.ac.in`): a stored
+in-app path such as `/learning/class/:id` is not resolvable from a mail client.
+
+Two distinct kinds of mail, gated differently:
+
+| Mail | Trigger | Gate |
+| --- | --- | --- |
+| Post/notification digest | someone posts to the class | `settings.emailNotifications` |
+| Invitation | a teacher adds someone by email | none — always sent |
+
+The invitation is transactional, not a digest, so it is **not** gated on
+`settings.emailNotifications` ("email the class when something is posted"). It
+used to be, which meant a teacher who had turned post digests off — a common
+thing to do — silently sent no invitations at all. `sendInviteMail` also reports
+whether the mail actually left, and `POST /members/invite` returns that as
+`mailed` per address so the teacher sees a delivery failure instead of a clean
+success. An address whose account was just provisioned gets no invitation mail:
+the welcome mail already names the class and carries the set-password link.
+
 ## Account provisioning on invite
 
 Inviting an unknown email address can create the platform account for it. There
@@ -572,7 +602,7 @@ marked **T** require a teacher or co-teacher in that class.
 GET    /me                       current user as this module sees them
 GET    /overview                 counts for the dashboard tiles
 GET    /todo                     cross-class assigned / missing / done / to-review
-GET    /calendar?from&to         due dates across all classes
+GET    /calendar?from&to         { coursework, quizzes, shorts, nonWorkingDays }
 GET    /notifications            feed + unread count
 POST   /notifications/read       mark some or all read
 DELETE /notifications/read       clear read notifications
@@ -610,7 +640,9 @@ GET    /members                  roster (teachers see pending/invited too)
 POST   /members/invite       T   bulk invite by email; `createAccounts` (default
                                  true) provisions platform accounts for unknown
                                  addresses, `grantRoleToExisting` (default false)
-                                 adds the role to accounts that lack it
+                                 adds the role to accounts that lack it. Each
+                                 result carries `mailed` (true/false, or null
+                                 when the welcome mail covered that address)
 POST   /members/:id/decide   T   approve / decline a join request
 PATCH  /members/:id          T   role, mute, roll number
 DELETE /members/:id          T   remove

@@ -106,9 +106,15 @@ export default function useProctoring({ settings = {}, active, onViolation, onTe
     return () => document.removeEventListener('fullscreenchange', onChange);
   }, [active, settings.requireFullscreen, report]);
 
-  const enterFullscreen = useCallback(async () => {
+  /**
+   * Fullscreens `target` — the caller passes the quiz element itself, so the
+   * surrounding app chrome (module header, class header, tabs) is left behind
+   * rather than blown up to fill the screen with it.
+   */
+  const enterFullscreen = useCallback(async (target) => {
+    const element = target instanceof Element ? target : document.documentElement;
     try {
-      await document.documentElement.requestFullscreen();
+      await element.requestFullscreen();
       setIsFullscreen(true);
       return true;
     } catch {

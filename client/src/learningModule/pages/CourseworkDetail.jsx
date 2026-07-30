@@ -203,10 +203,16 @@ export default function CourseworkDetail() {
 
   const meta = WORK_TYPE_META[item.workType] || WORK_TYPE_META.assignment;
 
+  // Material has its own tab; everything else reached this page from the stream.
+  const isMaterial = item.workType === 'material';
+  const backTo = isMaterial
+    ? `/learning/class/${classId}/material`
+    : `/learning/class/${classId}`;
+
   return (
     <Box>
-      <Button size="sm" variant="ghost" mb={3} onClick={() => navigate(`/learning/class/${classId}/classwork`)}>
-        ← Back to classwork
+      <Button size="sm" variant="ghost" mb={3} onClick={() => navigate(backTo)}>
+        ← Back to {isMaterial ? 'material' : 'stream'}
       </Button>
 
       <Flex gap={6} align="flex-start" direction={{ base: 'column', lg: 'row' }}>

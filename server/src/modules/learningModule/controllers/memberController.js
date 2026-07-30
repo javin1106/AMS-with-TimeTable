@@ -134,6 +134,10 @@ exports.inviteMembers = async (req, res) => {
     });
   });
 
+  // Shared by the provisioning welcome mail and the invite mail, so both link
+  // back to the origin the teacher is actually using.
+  const frontendBase = resolveFrontendBase(req);
+
   // Provision in one batch before the enrolment loop, so a newly created
   // account is enrolled as "active" rather than left as a pending invite.
   let provisioned = new Map();
@@ -143,7 +147,7 @@ exports.inviteMembers = async (req, res) => {
       classRole: role,
       klass: req.lmClass,
       invitedByName: req.lmUser.name,
-      frontendBase: resolveFrontendBase(req),
+      frontendBase,
       grantRoleToExisting,
     });
     provisioned.forEach((result, email) => {
@@ -208,9 +212,15 @@ exports.inviteMembers = async (req, res) => {
     // A freshly provisioned account already received the welcome email, which
     // names the class and carries the set-password link — a second "you were
     // invited" mail on top of it is just noise.
-    if (req.lmClass.settings.emailNotifications && !provisionResult?.created) {
+    //
+    // Deliberately *not* gated on settings.emailNotifications: that setting is
+    // "email the class when something is posted", and a teacher who turns off
+    // post digests has not asked for their invitations to go out silently.
+    // Sending the invite is an explicit, one-off action they just took.
+    let mailed = null;
+    if (!provisionResult?.created) {
       // eslint-disable-next-line no-await-in-loop
-      await sendInviteMail(email, req.lmClass, req.lmUser.name);
+      mailed = await sendInviteMail(email, req.lmClass, req.lmUser.name, frontendBase);
     }
 
     results.push({
@@ -218,6 +228,8 @@ exports.inviteMembers = async (req, res) => {
       status: provisionResult?.created ? "account_created" : user ? "added" : "invited",
       platformRole: provisionResult?.created || provisionResult?.roleAdded ? roleForClassRole(role) : null,
       roleAdded: Boolean(provisionResult?.roleAdded && !provisionResult?.created),
+      // null when no invite mail was due (the welcome mail covered it).
+      mailed,
     });
   }
 
