@@ -22,6 +22,7 @@ const audioStudioController = require("../controllers/audioStudioController");
 const notificationController = require("../controllers/notificationController");
 const dashboardController = require("../controllers/dashboardController");
 const uploadController = require("../controllers/uploadController");
+const timetableOptionsController = require("../controllers/timetableOptionsController");
 
 const router = express.Router();
 
@@ -40,6 +41,11 @@ router.get("/notifications", asyncRoute(notificationController.list));
 router.post("/notifications/read", asyncRoute(notificationController.markRead));
 router.delete("/notifications/read", asyncRoute(notificationController.clearAll));
 router.delete("/notifications/:notificationId", asyncRoute(notificationController.remove));
+
+// Timetable-sourced pickers for the create-class form.
+router.get("/timetable/branches", asyncRoute(timetableOptionsController.listBranches));
+router.get("/timetable/semesters", asyncRoute(timetableOptionsController.listSemesters));
+router.get("/timetable/subjects", asyncRoute(timetableOptionsController.listSubjects));
 
 router.get("/classes", asyncRoute(classController.listMyClasses));
 router.post("/classes", requireClassCreator, asyncRoute(classController.createClass));

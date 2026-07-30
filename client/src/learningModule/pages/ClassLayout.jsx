@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { NavLink, Outlet, useNavigate, useParams } from 'react-router-dom';
+import { NavLink, Outlet, useParams } from 'react-router-dom';
 import {
   Badge,
   Box,
@@ -7,49 +7,71 @@ import {
   Flex,
   HStack,
   Heading,
+  IconButton,
   Text,
   Tooltip,
   useClipboard,
   useToast,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
+import { loginPathFor } from '../../authRedirect';
 import { ErrorState, Loading } from '../components/common';
+import useStableNavigate from '../hooks/useStableNavigate';
 
+// People and Settings are about the class rather than its work, so they sit in
+// the header beside the class code instead of competing with the teaching tabs.
 const TABS = [
   { path: '', label: 'Stream', end: true },
-  { path: 'classwork', label: 'Classwork' },
+  { path: 'material', label: 'Material' },
+  { path: 'quizzes', label: 'Quizzes' },
   { path: 'tutorials', label: 'Tutorials' },
   { path: 'shorts', label: 'Shorts' },
-  { path: 'people', label: 'People' },
   { path: 'grades', label: 'Grades' },
-  { path: 'studio', label: 'AI Studio', teacherOnly: false },
+  { path: 'studio', label: 'AI Studio' },
+  { path: 'playground', label: 'AI Playground', studentOnly: true },
   { path: 'insights', label: 'Insights', teacherOnly: true },
-  { path: 'settings', label: 'Settings', teacherOnly: true },
 ];
+
+// Sits on the coloured header, so the active state has to read against the
+// class colour rather than the usual blue-on-white.
+const headerLinkStyles = {
+  bg: 'whiteAlpha.300',
+  color: 'white',
+  fontWeight: '500',
+  _hover: { bg: 'whiteAlpha.400', textDecoration: 'none' },
+  _active: { bg: 'whiteAlpha.500' },
+  sx: { '&.active': { bg: 'white', color: 'gray.800', fontWeight: '600' } },
+};
 
 export default function ClassLayout() {
   const { classId } = useParams();
   const [klass, setKlass] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const navigate = useNavigate();
+  const navigate = useStableNavigate();
   const toast = useToast();
   const { onCopy, hasCopied } = useClipboard(klass?.code || '');
 
+  // Refreshes triggered by a child (a new member, a renamed class) must not
+  // unmount the header and tabs underneath the user, so only the initial fetch
+  // for a class touches `loading`.
   const load = useCallback(async () => {
-    setLoading(true);
     setError(null);
     try {
       setKlass(await lmApi.getClass(classId));
     } catch (err) {
       setError(err);
-      if (err.status === 401) navigate('/login', { replace: true });
+      // See LearningLayout: `window.location` keeps the current page out of
+      // this callback's dependencies, and matches it under BrowserRouter.
+      if (err.status === 401) navigate(loginPathFor(window.location), { replace: true });
     } finally {
       setLoading(false);
     }
   }, [classId, navigate]);
 
   useEffect(() => {
+    setLoading(true);
+    setKlass(null);
     load();
   }, [load]);
 
@@ -67,7 +89,9 @@ export default function ClassLayout() {
   if (!klass) return null;
 
   const isTeacher = klass.isTeacher;
-  const visibleTabs = TABS.filter((tab) => !tab.teacherOnly || isTeacher);
+  const visibleTabs = TABS.filter(
+    (tab) => (!tab.teacherOnly || isTeacher) && (!tab.studentOnly || !isTeacher),
+  );
 
   return (
     <Box>
@@ -89,31 +113,56 @@ export default function ClassLayout() {
             </Text>
             <HStack mt={3} spacing={3} fontSize="sm" opacity={0.9} wrap="wrap">
               <Text>👤 {klass.ownerName}</Text>
-              <Text>👥 {klass.counts?.studentCount ?? 0} students</Text>
               <Text>📄 {klass.counts?.courseworkCount ?? 0} items</Text>
               {klass.status === 'archived' && <Badge colorScheme="orange">Archived</Badge>}
             </HStack>
           </Box>
 
-          {isTeacher && (
-            <Box textAlign="right" bg="whiteAlpha.300" borderRadius="md" px={4} py={3}>
-              <Text fontSize="xs" opacity={0.9}>
-                Class code
-              </Text>
-              <Tooltip label={hasCopied ? 'Copied!' : 'Click to copy'}>
-                <Text
-                  as="button"
-                  onClick={onCopy}
-                  fontSize="xl"
-                  fontWeight="700"
-                  letterSpacing="wider"
-                  fontFamily="mono"
-                >
-                  {klass.code}
+          <Flex direction="column" align="flex-end" gap={3}>
+            <HStack spacing={2}>
+              <Button
+                as={NavLink}
+                to={`/learning/class/${classId}/people`}
+                size="sm"
+                leftIcon={<span>👥</span>}
+                {...headerLinkStyles}
+              >
+                People · {klass.counts?.studentCount ?? 0}
+              </Button>
+              {isTeacher && (
+                <Tooltip label="Class settings">
+                  <IconButton
+                    as={NavLink}
+                    to={`/learning/class/${classId}/settings`}
+                    size="sm"
+                    aria-label="Class settings"
+                    icon={<span>⚙️</span>}
+                    {...headerLinkStyles}
+                  />
+                </Tooltip>
+              )}
+            </HStack>
+
+            {isTeacher && (
+              <Box textAlign="right" bg="whiteAlpha.300" borderRadius="md" px={4} py={3}>
+                <Text fontSize="xs" opacity={0.9}>
+                  Class code
                 </Text>
-              </Tooltip>
-            </Box>
-          )}
+                <Tooltip label={hasCopied ? 'Copied!' : 'Click to copy'}>
+                  <Text
+                    as="button"
+                    onClick={onCopy}
+                    fontSize="xl"
+                    fontWeight="700"
+                    letterSpacing="wider"
+                    fontFamily="mono"
+                  >
+                    {klass.code}
+                  </Text>
+                </Tooltip>
+              </Box>
+            )}
+          </Flex>
         </Flex>
       </Box>
 

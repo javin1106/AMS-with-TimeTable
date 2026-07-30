@@ -77,29 +77,43 @@ const presenterView = (short, session, slideResults, responseCount) => ({
 const participantView = (short, session, slideResults, myResponse) => {
   const slide = slideOf(short, session.currentSlideIndex);
   const revealed = session.slideState === 'revealed';
+  // A slide the presenter has not opened yet is withheld rather than merely
+  // hidden by the phone: the question is on the projector seconds later anyway,
+  // but one student reading it early out of the network tab is an unfair head
+  // start on a graded short.
+  const pending = session.slideState === 'waiting';
 
   return {
     sessionId: session._id,
     title: short.title,
+    description: short.description,
     status: session.status,
     revision: session.revision,
     slideIndex: session.currentSlideIndex,
     slideCount: short.slides.length,
     slideState: session.slideState,
     slideDeadline: session.slideDeadline,
+    // Shown on the hold screen so a student can tell they joined the right room.
+    presentedByName: session.presentedByName,
+    participantCount: (session.participants || []).length,
     slide: slide
       ? {
           _id: slide._id,
           type: slide.type,
-          question: slide.question,
-          options: slide.options,
-          timeLimitSec: slide.timeLimitSec,
-          scaleMin: slide.scaleMin,
-          scaleMax: slide.scaleMax,
-          scaleMinLabel: slide.scaleMinLabel,
-          scaleMaxLabel: slide.scaleMaxLabel,
-          maxWords: slide.maxWords,
-          maxLength: slide.maxLength,
+          pending,
+          ...(pending
+            ? {}
+            : {
+                question: slide.question,
+                options: slide.options,
+                timeLimitSec: slide.timeLimitSec,
+                scaleMin: slide.scaleMin,
+                scaleMax: slide.scaleMax,
+                scaleMinLabel: slide.scaleMinLabel,
+                scaleMaxLabel: slide.scaleMaxLabel,
+                maxWords: slide.maxWords,
+                maxLength: slide.maxLength,
+              }),
         }
       : null,
     // Only sent when the teacher chose to mirror the tally to phones, or once

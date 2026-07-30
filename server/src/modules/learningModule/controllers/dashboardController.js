@@ -3,8 +3,13 @@ const LmMembership = require("../models/lmMembership");
 const LmCoursework = require("../models/lmCoursework");
 const LmSubmission = require("../models/lmSubmission");
 const LmAnnouncement = require("../models/lmAnnouncement");
+const LmQuiz = require("../models/lmQuiz");
 const LmQuizAttempt = require("../models/lmQuizAttempt");
+const LmShortSession = require("../models/lmShortSession");
 const LmAudioSession = require("../models/lmAudioSession");
+// The academic calendar (term dates + holidays) belongs to the attendance /
+// timetable side of the app; this module only reads it.
+const Allotment = require("../../../models/allotment");
 
 const myActiveClassIds = async (userId) => {
   const memberships = await LmMembership.find({ userId, status: "active" })
@@ -92,39 +97,149 @@ exports.getTodo = async (req, res) => {
   });
 };
 
-/** Due dates across every class the caller is in, for the calendar view. */
+/** "YYYY-MM-DD" — the shape the attendance module stores holidays in. */
+const dayKey = (date) => new Date(date).toISOString().slice(0, 10);
+const shiftDays = (date, days) => new Date(date.getTime() + days * 864e5);
+
+/**
+ * Everything the caller's month contains: coursework due dates, the quizzes
+ * that ran, the Shorts that were presented, and the institute's non-working
+ * days. The holidays come from the attendance module's Allotment record so the
+ * learning calendar and the attendance calendar never disagree about which days
+ * are off.
+ */
 exports.getCalendar = async (req, res) => {
   const { classes, roleByClass } = await myActiveClassIds(req.lmUser.id);
   const classById = new Map(classes.map((c) => [String(c._id), c]));
+  const classIds = classes.map((c) => c._id);
 
   const from = req.query.from ? new Date(req.query.from) : new Date(Date.now() - 7 * 864e5);
   const to = req.query.to ? new Date(req.query.to) : new Date(Date.now() + 60 * 864e5);
 
-  const coursework = await LmCoursework.find({
-    classId: { $in: classes.map((c) => c._id) },
-    status: "published",
-    dueDate: { $gte: from, $lte: to },
-  })
-    .select("title dueDate points workType classId")
-    .sort({ dueDate: 1 })
-    .lean();
+  const [coursework, quizzes, shortSessions, allotments] = await Promise.all([
+    // Coursework sits on its due date. Items set without one (materials, and
+    // assignments left open-ended) would otherwise never show up at all, so
+    // they sit on the day they were posted instead.
+    LmCoursework.find({
+      classId: { $in: classIds },
+      status: "published",
+      $or: [
+        { dueDate: { $gte: from, $lte: to } },
+        { dueDate: null, publishedAt: { $gte: from, $lte: to } },
+      ],
+    })
+      .select("title dueDate publishedAt points workType classId")
+      .lean(),
+    // A quiz is "conducted" on the day its window opens; papers with no window
+    // fall back to when they were set up, which is the only date they have.
+    LmQuiz.find({
+      classId: { $in: classIds },
+      published: true,
+      $or: [
+        { "settings.availableFrom": { $gte: from, $lte: to } },
+        { "settings.availableFrom": null, created_at: { $gte: from, $lte: to } },
+      ],
+    })
+      .select(
+        "title classId totalMarks created_at settings.availableFrom settings.availableTo settings.timeLimitMinutes",
+      )
+      .lean(),
+    // Sessions, not decks: a Short only "happened" on the day it was presented,
+    // and the same deck is often run in several classes on different days.
+    LmShortSession.find({
+      classId: { $in: classIds },
+      startedAt: { $gte: from, $lte: to },
+    })
+      .select("title shortId classId status startedAt endedAt participants presentedByName")
+      .sort({ startedAt: 1 })
+      .lean(),
+    Allotment.find({ "nonWorkingDays.0": { $exists: true } })
+      .select("session nonWorkingDays")
+      .lean(),
+  ]);
 
-  const mySubmissions = await LmSubmission.find({
-    studentId: req.lmUser.id,
-    courseworkId: { $in: coursework.map((c) => c._id) },
-  })
-    .select("courseworkId state grade")
-    .lean();
+  const [mySubmissions, myAttempts] = await Promise.all([
+    LmSubmission.find({
+      studentId: req.lmUser.id,
+      courseworkId: { $in: coursework.map((c) => c._id) },
+    })
+      .select("courseworkId state grade")
+      .lean(),
+    LmQuizAttempt.find({
+      studentId: req.lmUser.id,
+      quizId: { $in: quizzes.map((q) => q._id) },
+    })
+      .select("quizId status percent")
+      .lean(),
+  ]);
   const byCoursework = new Map(mySubmissions.map((s) => [String(s.courseworkId), s]));
+  const byQuiz = new Map(myAttempts.map((a) => [String(a.quizId), a]));
 
-  return res.json(
-    coursework.map((item) => ({
-      ...item,
-      class: classById.get(String(item.classId)) || null,
-      myRole: roleByClass.get(String(item.classId)) || null,
-      mySubmissionState: byCoursework.get(String(item._id))?.state || null,
+  // Holiday keys are local dates while from/to arrive as UTC instants, so the
+  // window is widened by a day at each end; the client matches on the exact key.
+  const fromKey = dayKey(shiftDays(from, -1));
+  const toKey = dayKey(shiftDays(to, 1));
+  const holidayByDate = new Map();
+  allotments.forEach((allotment) => {
+    (allotment.nonWorkingDays || []).forEach((day) => {
+      const date = String(day?.date || "").slice(0, 10);
+      if (!date || date < fromKey || date > toKey || holidayByDate.has(date)) return;
+      holidayByDate.set(date, {
+        date,
+        remark: day.remark || "Holiday",
+        session: allotment.session || "",
+      });
+    });
+  });
+
+  const decorateClass = (item) => ({
+    class: classById.get(String(item.classId)) || null,
+    myRole: roleByClass.get(String(item.classId)) || null,
+  });
+
+  return res.json({
+    coursework: coursework
+      .map((item) => ({
+        ...item,
+        ...decorateClass(item),
+        // The day this item occupies on the grid, and why it occupies it.
+        calendarDate: item.dueDate || item.publishedAt,
+        dateKind: item.dueDate ? "due" : "posted",
+        mySubmissionState: byCoursework.get(String(item._id))?.state || null,
+      }))
+      .sort((a, b) => new Date(a.calendarDate) - new Date(b.calendarDate)),
+    quizzes: quizzes
+      .map((quiz) => {
+        const attempt = byQuiz.get(String(quiz._id));
+        return {
+          _id: quiz._id,
+          classId: quiz.classId,
+          title: quiz.title,
+          totalMarks: quiz.totalMarks,
+          conductedAt: quiz.settings?.availableFrom || quiz.created_at,
+          availableFrom: quiz.settings?.availableFrom || null,
+          availableTo: quiz.settings?.availableTo || null,
+          timeLimitMinutes: quiz.settings?.timeLimitMinutes || 0,
+          myAttemptStatus: attempt?.status || null,
+          myPercent: attempt?.status === "submitted" ? attempt.percent : null,
+          ...decorateClass(quiz),
+        };
+      })
+      .sort((a, b) => new Date(a.conductedAt) - new Date(b.conductedAt)),
+    shorts: shortSessions.map((session) => ({
+      _id: session._id,
+      shortId: session.shortId,
+      classId: session.classId,
+      title: session.title || "Short",
+      status: session.status,
+      startedAt: session.startedAt,
+      endedAt: session.endedAt,
+      participantCount: (session.participants || []).length,
+      presentedByName: session.presentedByName || "",
+      ...decorateClass(session),
     })),
-  );
+    nonWorkingDays: [...holidayByDate.values()].sort((a, b) => a.date.localeCompare(b.date)),
+  });
 };
 
 /** Per-class analytics for the teacher's Insights tab. */

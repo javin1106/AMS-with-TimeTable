@@ -72,7 +72,7 @@ export default function QuizResults() {
     <Box>
       <Flex justify="space-between" align="flex-start" mb={4} gap={3} wrap="wrap">
         <Box>
-          <Button size="sm" variant="ghost" onClick={() => navigate(`/learning/class/${classId}/grades`)}>
+          <Button size="sm" variant="ghost" onClick={() => navigate(`/learning/class/${classId}/quizzes`)}>
             ← Back to quizzes
           </Button>
           <Heading size="md" mt={1}>

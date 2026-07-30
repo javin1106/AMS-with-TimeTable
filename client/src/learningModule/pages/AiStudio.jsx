@@ -792,7 +792,7 @@ function SessionWorkspace({ classId, sessionId, topics, onChanged, onClose }) {
           <TabPanel px={0}>
             <SectionCard
               title={`Quiz draft (${draftQuestions.length} questions)`}
-              subtitle="Review and edit every question, then turn it into a real quiz. Nothing reaches students until you publish it from the Grades → Quizzes tab."
+              subtitle="Review and edit every question, then turn it into a real quiz. Nothing reaches students until you publish it from the Quizzes tab."
               action={
                 draftQuestions.length ? (
                   <HStack>
@@ -818,7 +818,7 @@ function SessionWorkspace({ classId, sessionId, topics, onChanged, onClose }) {
                         const quiz = await run(
                           'makeQuiz',
                           () => lmApi.publishQuizDraft(classId, sessionId, { questions: draftQuestions }),
-                          'Quiz created — publish it from Grades → Quizzes',
+                          'Quiz created — publish it from the Quizzes tab',
                         );
                         if (quiz?._id) navigate(`/learning/class/${classId}/quiz/${quiz._id}/edit`);
                       }}

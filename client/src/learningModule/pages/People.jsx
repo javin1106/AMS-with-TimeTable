@@ -63,9 +63,13 @@ function InviteModal({ isOpen, onClose, classId, onDone }) {
       });
       const count = (status) => result.results.filter((r) => r.status === status).length;
       const failures = result.results.filter((r) => r.status === 'error');
+      // `mailed === false` means the person was enrolled but the invitation
+      // email did not leave — worth saying out loud rather than reporting a
+      // clean success.
+      const unmailed = result.results.filter((r) => r.mailed === false);
 
       toast({
-        status: failures.length ? 'warning' : 'success',
+        status: failures.length || unmailed.length ? 'warning' : 'success',
         title: 'Invites processed',
         description: [
           count('account_created') && `${count('account_created')} account(s) created`,
@@ -73,6 +77,7 @@ function InviteModal({ isOpen, onClose, classId, onDone }) {
           count('invited') && `${count('invited')} invited by email`,
           count('already_member') && `${count('already_member')} already in the class`,
           failures.length && `${failures.length} failed`,
+          unmailed.length && `${unmailed.length} enrolled but the email could not be sent`,
         ]
           .filter(Boolean)
           .join(', '),
@@ -80,7 +85,7 @@ function InviteModal({ isOpen, onClose, classId, onDone }) {
       });
 
       setReport(result.results);
-      if (!failures.length) {
+      if (!failures.length && !unmailed.length) {
         setEmails('');
         onDone();
         onClose();
@@ -167,21 +172,24 @@ function InviteModal({ isOpen, onClose, classId, onDone }) {
               {report.map((entry) => (
                 <Flex key={entry.email} fontSize="xs" justify="space-between" py={1} gap={2}>
                   <Text noOfLines={1}>{entry.email}</Text>
-                  <Badge
-                    colorScheme={
-                      entry.status === 'error'
-                        ? 'red'
-                        : entry.status === 'already_member'
-                          ? 'gray'
-                          : 'green'
-                    }
-                  >
-                    {entry.status === 'account_created'
-                      ? `account created (${entry.platformRole})`
-                      : entry.status === 'error'
-                        ? entry.message || 'failed'
-                        : entry.status.replace(/_/g, ' ')}
-                  </Badge>
+                  <HStack spacing={1}>
+                    <Badge
+                      colorScheme={
+                        entry.status === 'error'
+                          ? 'red'
+                          : entry.status === 'already_member'
+                            ? 'gray'
+                            : 'green'
+                      }
+                    >
+                      {entry.status === 'account_created'
+                        ? `account created (${entry.platformRole})`
+                        : entry.status === 'error'
+                          ? entry.message || 'failed'
+                          : entry.status.replace(/_/g, ' ')}
+                    </Badge>
+                    {entry.mailed === false && <Badge colorScheme="orange">email failed</Badge>}
+                  </HStack>
                 </Flex>
               ))}
             </Box>

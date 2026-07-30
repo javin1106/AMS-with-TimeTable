@@ -76,6 +76,11 @@ const lmApi = {
   clearReadNotifications: () => request('/notifications/read', { method: 'DELETE' }),
   deleteNotification: (id) => request(`/notifications/${id}`, { method: 'DELETE' }),
 
+  /* timetable-sourced pickers (create class) */
+  ttBranches: () => request('/timetable/branches'),
+  ttSemesters: (code) => request(`/timetable/semesters${qs({ code })}`),
+  ttSubjects: (code, sem) => request(`/timetable/subjects${qs({ code, sem })}`),
+
   /* classes */
   listClasses: (status) => request(`/classes${qs({ status })}`),
   createClass: (body) => request('/classes', { method: 'POST', body }),
