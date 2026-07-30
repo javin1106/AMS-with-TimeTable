@@ -154,6 +154,118 @@ class — a low percentage means the method needs revisiting, which a single
 correct value could never tell you. Manual mark adjustment with feedback sits on
 top of auto-marking for partial credit.
 
+## Quiz / online-test options
+
+The option set matches the aim2Crack exam engine, so a placement-style test can
+be run from this module. Everything below is per-quiz.
+
+### Delivery methodology
+
+| Mode | Behaviour |
+| --- | --- |
+| `all_at_once` (default) | every question on one page, free navigation, one clock |
+| `one_at_a_time` | the server hands out one question at a time and keeps the cursor |
+
+In `one_at_a_time`, `allowBacktracking` decides whether a delivered question can
+be revisited (off = placement-test behaviour). The cursor, the dealt paper and
+every answer live on the attempt document, so **a refresh, a crashed tab or a
+dropped connection resumes exactly where it left off** rather than restarting or
+losing the sitting.
+
+### Timing
+
+- `perQuestionTiming` — each question gets its own countdown and auto-submits on
+  expiry; otherwise one clock covers the paper.
+- `timeLimitMinutes` — whole-paper limit, also the fallback for any question
+  without its own clock.
+- `marginMinutes` — late-entry window. The test stays open for those already
+  sitting it while turning away anyone arriving after it; that separation is the
+  whole point of the setting.
+- `availableFrom` / `availableTo` — the open window.
+- `resultReleaseAt` — scores stay hidden after submitting until this moment, so a
+  cohort is released together.
+
+The effective deadline for a question is the *earliest* of its own clock, the
+paper clock and the close time — and it is computed server-side from when the
+question was served, so reloading cannot reset it.
+
+### Question types and marking
+
+Five types: `mcq` (single), `msq` (multiple), `truefalse`, `numerical`, `short`.
+The aim2Crack names `single` / `multiple` / `integer` are accepted on input and
+translated, so questions can be imported without rewriting.
+
+- Per-question `marks`, `difficulty`, `topic`, `timeLimitSec`, `sectionId`.
+- Per-question `negativeMarks`, falling back to the quiz-wide `negativeMarking`.
+  **An unattempted question is never penalised** — that is what makes leaving one
+  blank a real choice.
+- `numerical` answers are marked against a relative *and* absolute tolerance
+  (the larger wins), because a percentage alone cannot mark an answer near zero.
+- A negatively-marked wipeout clamps to zero in the gradebook, while the raw
+  figure is kept for the teacher.
+
+### Sections
+
+Named sections with their own notes. Question order is only ever shuffled
+*within* a section — moving a question across sections would break the section
+timings and the student's mental model of the paper.
+
+### Randomisation
+
+- `shuffleQuestions` — per-student order, deterministic from
+  `(quizId, studentId, attemptNumber)`.
+- `shuffleOptions` — per-student option order. Stored answers always refer to the
+  *original* indices, so marking is unaffected; True/False is left alone.
+- `questionsPerAttempt` — draw N at random from the bank per student, with
+  `totalMarks` scaled to the drawn paper.
+
+### Proctoring
+
+Deterrents, not guarantees — a determined student defeats any of them with
+devtools. What makes them useful is that **every event is recorded on the
+attempt** for the teacher to review, and the enforcement decision is the
+server's, not the browser's.
+
+- `preventMobile` — checked server-side from the User-Agent when starting.
+- `allowTabChange` / `maxTabSwitches` / `autoSubmitOnTabLimit` — tab and window
+  blur is counted; passing the budget warns, or ends the attempt if configured.
+- `requireFullscreen` — the sitting is gated behind fullscreen, and exits are
+  recorded.
+- `disableCopyPaste`, `disableRightClick`.
+
+Every event lands in `attempt.violations` with a timestamp, and terminated
+attempts carry a `terminationReason`.
+
+### Collaborators
+
+A quiz may name co-authors by email who can edit *that quiz* without being class
+teachers. Only a class teacher can change the collaborator list.
+
+### Analytics
+
+- Per attempt: score, percent, pass/fail, correct / wrong / unattempted, marks
+  lost to negatives, duration, tab switches, flags, device.
+- Per question: success rate **over students who attempted it**, with skip rate
+  reported separately so a widely-skipped question does not masquerade as a hard
+  one; plus average time spent.
+- Per section: score, correct/wrong/skipped, average time per student.
+- Score distribution in five bands, median / highest / lowest.
+- Full CSV export: one row per attempt, with a column per section and per
+  question.
+- `DELETE …/responses` clears every attempt so the same cohort can re-sit,
+  resetting their gradebook rows too.
+
+### Student flow
+
+```
+/quiz/:quizId                        brief — rules, timings, eligibility, countdowns
+      │  Start (blocked by window, margin, device, attempts)
+      ▼
+/quiz/:quizId/attempt/:attemptId     the sitting (either delivery mode)
+      │  submit, auto-submit on expiry, or termination
+      ▼                              score + per-question review (if released)
+```
+
 ## Rich text authoring
 
 Every authoring surface uses a Quill-based editor (`components/RichTextEditor`):
@@ -363,15 +475,27 @@ GET    /gradebook.csv            T   CSV export
 POST   /gradebook/bulk           T   bulk grade entry
 
 GET    /quizzes                      (students never receive the answer key)
-POST   /quizzes              T
+POST   /quizzes                  T
 GET    /quizzes/:quizId
-PATCH  /quizzes/:quizId      T
-DELETE /quizzes/:quizId      T
-POST   /quizzes/:quizId/publish  T   also creates/updates the Classwork item
-GET    /quizzes/:quizId/results  T   attempts + per-question analysis
+PATCH  /quizzes/:quizId          *   teacher or a named collaborator
+DELETE /quizzes/:quizId          *
+POST   /quizzes/:quizId/publish  *   also creates/updates the Classwork item
+POST   /quizzes/:quizId/collaborators  T   set co-authors by email
+DELETE /quizzes/:quizId/responses      *   wipe every attempt
+
+GET    /quizzes/:quizId/brief        pre-test screen: rules, timings, eligibility
 POST   /quizzes/:quizId/attempts     start (resumes an in-progress attempt)
-POST   /attempts/:attemptId/submit   auto-grade and mirror into the gradebook
-GET    /attempts/:attemptId
+GET    /attempts/:id/paper           all_at_once: the whole paper in this
+                                     student's order and option permutation
+GET    /attempts/:id/current         one_at_a_time: current question + deadline
+POST   /attempts/:id/answer          save the answer and advance (or go back)
+POST   /attempts/:id/save            save an all_at_once draft
+POST   /attempts/:id/violation       record a proctoring event
+POST   /attempts/:id/submit          auto-grade and mirror into the gradebook
+GET    /attempts/:id
+
+GET    /quizzes/:quizId/results      T   attempts, question/section analysis
+GET    /quizzes/:quizId/results.csv  T   full export
 
 GET    /tutorials                            parameterised tutorials
 POST   /tutorials                        T   create

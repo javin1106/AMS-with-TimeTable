@@ -172,10 +172,29 @@ const lmApi = {
   publishQuiz: (classId, quizId, body) =>
     request(`/classes/${classId}/quizzes/${quizId}/publish`, { method: 'POST', body: body || {} }),
   quizResults: (classId, quizId) => request(`/classes/${classId}/quizzes/${quizId}/results`),
+  setQuizCollaborators: (classId, quizId, emails) =>
+    request(`/classes/${classId}/quizzes/${quizId}/collaborators`, { method: 'POST', body: { emails } }),
+  deleteQuizResponses: (classId, quizId) =>
+    request(`/classes/${classId}/quizzes/${quizId}/responses`, { method: 'DELETE' }),
+  quizResultsCsvUrl: (classId, quizId) => `${BASE()}/classes/${classId}/quizzes/${quizId}/results.csv`,
+
+  /* quiz sitting */
+  quizBrief: (classId, quizId) => request(`/classes/${classId}/quizzes/${quizId}/brief`),
   startAttempt: (classId, quizId) =>
     request(`/classes/${classId}/quizzes/${quizId}/attempts`, { method: 'POST', body: {} }),
-  submitAttempt: (classId, attemptId, answers) =>
-    request(`/classes/${classId}/attempts/${attemptId}/submit`, { method: 'POST', body: { answers } }),
+  getAttemptPaper: (classId, attemptId) => request(`/classes/${classId}/attempts/${attemptId}/paper`),
+  getCurrentQuestion: (classId, attemptId) => request(`/classes/${classId}/attempts/${attemptId}/current`),
+  answerAndAdvance: (classId, attemptId, body) =>
+    request(`/classes/${classId}/attempts/${attemptId}/answer`, { method: 'POST', body }),
+  saveAttemptDraft: (classId, attemptId, answers) =>
+    request(`/classes/${classId}/attempts/${attemptId}/save`, { method: 'POST', body: { answers } }),
+  recordViolation: (classId, attemptId, type) =>
+    request(`/classes/${classId}/attempts/${attemptId}/violation`, { method: 'POST', body: { type } }),
+  submitAttempt: (classId, attemptId, answers, expired = false) =>
+    request(`/classes/${classId}/attempts/${attemptId}/submit`, {
+      method: 'POST',
+      body: { answers, expired },
+    }),
   getAttempt: (classId, attemptId) => request(`/classes/${classId}/attempts/${attemptId}`),
 
   /* parameterised tutorials */

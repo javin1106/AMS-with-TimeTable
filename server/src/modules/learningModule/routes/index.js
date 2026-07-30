@@ -118,17 +118,32 @@ classRouter.get("/gradebook", asyncRoute(submissionController.getGradebook));
 classRouter.get("/gradebook.csv", requireTeacher, asyncRoute(submissionController.exportGradebookCsv));
 classRouter.post("/gradebook/bulk", requireTeacher, asyncRoute(submissionController.bulkGrade));
 
-// quizzes
+// quizzes — authoring. PATCH/DELETE/publish are not requireTeacher because a
+// named collaborator may edit a quiz without being class staff; the controller
+// checks that itself (canManage).
 classRouter.get("/quizzes", asyncRoute(quizController.listQuizzes));
 classRouter.post("/quizzes", requireTeacher, asyncRoute(quizController.createQuiz));
 classRouter.get("/quizzes/:quizId", asyncRoute(quizController.getQuiz));
-classRouter.patch("/quizzes/:quizId", requireTeacher, asyncRoute(quizController.updateQuiz));
-classRouter.delete("/quizzes/:quizId", requireTeacher, asyncRoute(quizController.deleteQuiz));
-classRouter.post("/quizzes/:quizId/publish", requireTeacher, asyncRoute(quizController.publishQuiz));
-classRouter.get("/quizzes/:quizId/results", requireTeacher, asyncRoute(quizController.getQuizResults));
+classRouter.patch("/quizzes/:quizId", asyncRoute(quizController.updateQuiz));
+classRouter.delete("/quizzes/:quizId", asyncRoute(quizController.deleteQuiz));
+classRouter.post("/quizzes/:quizId/publish", asyncRoute(quizController.publishQuiz));
+classRouter.post("/quizzes/:quizId/collaborators", requireTeacher, asyncRoute(quizController.setCollaborators));
+classRouter.delete("/quizzes/:quizId/responses", asyncRoute(quizController.deleteResponses));
+
+// quizzes — sitting
+classRouter.get("/quizzes/:quizId/brief", asyncRoute(quizController.getQuizBrief));
 classRouter.post("/quizzes/:quizId/attempts", asyncRoute(quizController.startAttempt));
+classRouter.get("/attempts/:attemptId/paper", asyncRoute(quizController.getAttemptPaper));
+classRouter.get("/attempts/:attemptId/current", asyncRoute(quizController.getCurrentQuestion));
+classRouter.post("/attempts/:attemptId/answer", asyncRoute(quizController.answerAndAdvance));
+classRouter.post("/attempts/:attemptId/save", asyncRoute(quizController.saveAttemptDraft));
+classRouter.post("/attempts/:attemptId/violation", asyncRoute(quizController.recordViolation));
 classRouter.post("/attempts/:attemptId/submit", asyncRoute(quizController.submitAttempt));
 classRouter.get("/attempts/:attemptId", asyncRoute(quizController.getAttempt));
+
+// quizzes — analytics
+classRouter.get("/quizzes/:quizId/results", requireTeacher, asyncRoute(quizController.getQuizResults));
+classRouter.get("/quizzes/:quizId/results.csv", requireTeacher, asyncRoute(quizController.exportResultsCsv));
 
 // parameterised tutorials — every student gets their own numbers
 classRouter.get("/tutorials", asyncRoute(tutorialController.listTutorials));
