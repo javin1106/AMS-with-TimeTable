@@ -713,6 +713,22 @@ export default function RollAssign({ fixedDepartment = '' }) {
                         onNext={() => openQueueItem(currentQueue, modal.item.folderName, 1)}
                         position={queueIdx + 1} total={currentQueue.length}
                         toast={toast}
+                        showToast={showToast}
+                        onPhotoDeleted={(filename) => {
+                            setModal(prev => {
+                                if (!prev) return prev;
+                                return {
+                                    ...prev,
+                                    item: {
+                                        ...prev.item,
+                                        embeddingFiles: (prev.item.embeddingFiles || []).filter(f => f !== filename),
+                                        imageFiles: (prev.item.imageFiles || []).filter(f => f !== filename),
+                                        previewFiles: (prev.item.previewFiles || []).filter(f => f !== filename),
+                                        imageCount: Math.max(0, (prev.item.imageCount || 1) - 1)
+                                    }
+                                };
+                            });
+                        }}
                     />
                 );
             })(), document.body)}
@@ -1833,7 +1849,7 @@ function InModalToast({ toast }) {
     );
 }
 
-function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRoll, setOverrideRoll, saving, onApprove, onFlag, onClose, hasPrev, hasNext, onPrev, onNext, position, total, toast }) {
+function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRoll, setOverrideRoll, saving, onApprove, onFlag, onClose, hasPrev, hasNext, onPrev, onNext, position, total, toast, showToast, onPhotoDeleted }) {
     const conf           = match?.confidence;
     const allCandidates  = match?.candidates || [];
     const candMap        = {};
@@ -1845,6 +1861,50 @@ function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRo
     const displayRoll    = match?.rollNo || primaryMatch?.rollNo || null;
     const folderForPhoto = item.currentFolder || item.folderName;
     const [candOpen, setCandOpen] = useState(false);
+    
+    const [deletingPhoto, setDeletingPhoto] = useState(null);
+    const images = item.imageFiles?.length > 0 ? item.imageFiles : item.previewFiles || [];
+
+    const [gtImages, setGtImages] = useState(null);
+    useEffect(() => {
+        if (!displayRoll) {
+            setGtImages(null);
+            return;
+        }
+        let active = true;
+        const RA_BASE = photoUrl('','','').split('/photo/')[0];
+        fetch(`${RA_BASE}/student-ground-truth/${encodeURIComponent(batchName)}/${encodeURIComponent(displayRoll)}`)
+            .then(res => res.ok ? res.json() : null)
+            .then(data => {
+                if (active && data?.embeddingFiles?.length) {
+                    setGtImages(data.embeddingFiles.slice(0, 6));
+                } else if (active) {
+                    setGtImages(null);
+                }
+            })
+            .catch(() => { if (active) setGtImages(null); });
+        return () => { active = false; };
+    }, [batchName, displayRoll, photoUrl]);
+
+    const handleDeletePhoto = async (filename) => {
+        if (images.length <= 1) {
+            showToast && showToast('Keep at least one image while approving.', 'error');
+            return;
+        }
+        if (!window.confirm(`Delete "${filename}" permanently?`)) return;
+        setDeletingPhoto(filename);
+        try {
+            const res = await fetch(`${RA_BASE}/cluster-photo/${encodeURIComponent(item._id)}/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Delete failed');
+            if (onPhotoDeleted) onPhotoDeleted(filename);
+            showToast && showToast(`Deleted ${filename}`);
+        } catch (err) {
+            showToast && showToast(err.message, 'error');
+        } finally {
+            setDeletingPhoto(null);
+        }
+    };
     useEffect(() => {
         const handler = (e) => {
             if (e.key === 'ArrowLeft'  && hasPrev && !saving) onPrev();
@@ -1875,9 +1935,22 @@ function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRo
                     <div>
                         <div style={{ fontSize: '11px', fontWeight: 600, color: theme.textMuted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Extracted Face Images</div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5 }}>
-                            {(item.imageFiles?.length > 0 ? item.imageFiles : item.previewFiles || []).map((f, i) => (
-                                <img key={i} src={photoUrl(batchName, folderForPhoto, f)} alt="" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 6, border: `1px solid ${theme.border}` }} onError={e => { e.target.style.display = 'none'; }} />
-                            ))}
+                            {images.map((f, i) => {
+                                const isDeleting = deletingPhoto === f;
+                                return (
+                                    <div key={i} style={{ position: 'relative', opacity: isDeleting ? 0.45 : 1, transition: 'opacity 0.15s' }}>
+                                        <img src={photoUrl(batchName, folderForPhoto, f)} alt="" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 6, border: `1px solid ${theme.border}`, display: 'block' }} onError={e => { e.target.style.display = 'none'; }} />
+                                        <button onClick={() => handleDeletePhoto(f)} disabled={isDeleting} title="Delete photo"
+                                            style={{ position: 'absolute', top: 4, right: 4, width: 22, height: 22, borderRadius: 5, background: '#ffffff', border: `1.5px solid ${theme.danger}`, color: theme.danger, cursor: isDeleting ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}>
+                                            <svg width="11" height="12" viewBox="0 0 11 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                                <path d="M1 3h9M4 3V2h3v1M2 3l.6 7.5a.5.5 0 00.5.5h4.8a.5.5 0 00.5-.5L9 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+                                                <line x1="4.5" y1="5.5" x2="4.5" y2="9.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
+                                                <line x1="6.5" y1="5.5" x2="6.5" y2="9.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                );
+                            })}
                         </div>
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -1895,6 +1968,16 @@ function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRo
                                 <div style={{ textAlign: 'center', color: theme.textMuted, fontSize: '12px', padding: '10px 0', borderRadius: 8, background: theme.bg, border: `1px dashed ${theme.border}` }}>No ERP match</div>
                             )}
                         </div>
+                        {gtImages && gtImages.length > 0 && (
+                            <div style={{ marginTop: 2 }}>
+                                <div style={{ fontSize: '11px', fontWeight: 600, color: theme.textMuted, marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Existing Embeddings (GT)</div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 4 }}>
+                                    {gtImages.map((img, i) => (
+                                        <img key={i} src={img.url} alt="" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 4, border: `1px solid ${theme.border}` }} onError={e => { e.target.style.display = 'none'; }} />
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                         {allCandidates.length > 0 && (
                             <div style={{ borderRadius: 8, border: `1px solid ${theme.border}`, overflow: 'hidden' }}>
                                 <button onClick={() => setCandOpen(o => !o)} style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 10px', background: theme.bg, border: 'none', cursor: 'pointer', fontSize: '10px', fontWeight: 600, color: theme.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
