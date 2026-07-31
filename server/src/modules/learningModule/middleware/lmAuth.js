@@ -7,37 +7,50 @@ const getUserDetails = require("../../usermanagement/controllers/dto");
 const User = require("../../../models/usermanagement/user");
 const LmClass = require("../models/lmClass");
 const LmMembership = require("../models/lmMembership");
+// Cookie first, then Authorization: Bearer — shared with the rest of the
+// platform's middlewares.
+const readAuthToken = require("../../readAuthToken");
 
 const PLATFORM_ADMIN_ROLES = ["admin", "iams-admin", "SUPERADMIN"];
 const TEACHER_PLATFORM_ROLES = ["FACULTY", "ITTC", "TTADMIN", "iams-dept-admin"];
+const STUDENT_PLATFORM_ROLES = ["STUDENT"];
 
 const rolesOf = (value) => (Array.isArray(value) ? value : [value].filter(Boolean));
 
 const isPlatformAdmin = (roles) => rolesOf(roles).some((r) => PLATFORM_ADMIN_ROLES.includes(r));
 
-// Accepts either the jwt cookie used by the rest of the platform or the
-// Authorization: Bearer header that main.jsx also attaches — the same login
-// issues both, and API clients hitting this module directly only have the
-// header.
-function readToken(req) {
-  if (req.cookies?.jwt) return req.cookies.jwt;
-  const header = req.get("Authorization") || "";
-  if (header.startsWith("Bearer ")) return header.slice(7).trim();
-  return null;
-}
+// The platform roles this module is for at all. It is deliberately *not* an
+// authorisation check — membership still decides everything inside a class (a
+// teacher may invite an existing account without granting it STUDENT, see
+// memberController.inviteMembers) — it only tells the two reasons for a refusal
+// apart: an account that could never open these pages, versus a student who is
+// simply not on this class's roll. Case-insensitive, because these strings are
+// typed by hand in user management.
+const hasLearningRole = (roles) => {
+  const known = [...STUDENT_PLATFORM_ROLES, ...TEACHER_PLATFORM_ROLES, ...PLATFORM_ADMIN_ROLES].map(
+    (role) => role.toUpperCase(),
+  );
+  return rolesOf(roles).some((role) => known.includes(String(role).toUpperCase()));
+};
 
-async function authenticate(req, res, next) {
-  const token = readToken(req);
-  if (!token) return res.status(401).json({ message: "Unauthorized" });
+// Name the class the way the student knows it — by subject, with its code when
+// there is one — so "you are not enrolled" points at something recognisable.
+const subjectLabel = (klass) => {
+  const subject = klass.subject || klass.name;
+  return klass.subjectCode ? `${subject} (${klass.subjectCode})` : subject;
+};
 
+// Returns the lmUser a token stands for, or null if it stands for nobody.
+async function resolveUser(token) {
+  if (!token) return null;
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const details = await getUserDetails(decoded.id);
-    if (!details) return res.status(401).json({ message: "Unauthorized" });
+    if (!details) return null;
 
     const emails = rolesOf(details.email);
     const profile = await User.findById(decoded.id).select("name").lean();
-    req.lmUser = {
+    const lmUser = {
       id: String(decoded.id),
       email: emails[0] || "",
       emails: emails.map((e) => String(e).toLowerCase()),
@@ -45,11 +58,32 @@ async function authenticate(req, res, next) {
       roles: rolesOf(decoded.role || details.role),
       department: details.department || "",
     };
-    req.lmUser.isAdmin = isPlatformAdmin(req.lmUser.roles);
-    return next();
+    lmUser.isAdmin = isPlatformAdmin(lmUser.roles);
+    return lmUser;
   } catch (err) {
-    return res.status(401).json({ message: "Unauthorized" });
+    return null;
   }
+}
+
+async function authenticate(req, res, next) {
+  const lmUser = await resolveUser(readAuthToken(req));
+  if (!lmUser) return res.status(401).json({ message: "Unauthorized" });
+  req.lmUser = lmUser;
+  return next();
+}
+
+/**
+ * Authenticates when it can and shrugs when it cannot: no token, or a bad one,
+ * leaves `req.lmUser` undefined and the request continues.
+ *
+ * Only for endpoints that decide the question themselves — the Shorts
+ * participant routes, where whether a sign-in is required is a property of the
+ * deck being joined, and is not knowable until the join code resolves.
+ */
+async function authenticateOptional(req, res, next) {
+  const lmUser = await resolveUser(readAuthToken(req));
+  if (lmUser) req.lmUser = lmUser;
+  return next();
 }
 
 // Only faculty/admin accounts may open a class. Students join existing ones.
@@ -85,8 +119,31 @@ async function loadClass(req, res, next) {
     if (!role && req.lmUser.isAdmin) role = "teacher";
     if (!role && String(klass.ownerId) === req.lmUser.id) role = "teacher";
 
+    // Three different problems, three different answers. One flat "you are not a
+    // member" left a student unable to tell a missing role from a missing
+    // enrolment from an unapproved join request, and so unable to fix any of it.
     if (!role) {
-      return res.status(403).json({ message: "You are not a member of this class." });
+      if (!hasLearningRole(req.lmUser.roles)) {
+        return res.status(403).json({
+          code: "ROLE_REQUIRED",
+          message:
+            "You do not have the necessary role to open these pages. Classes, quizzes and tests are available to student and teaching-staff accounts only — ask your administrator to grant your account the right role.",
+        });
+      }
+
+      if (membership?.status === "pending") {
+        return res.status(403).json({
+          code: "JOIN_PENDING",
+          subject: subjectLabel(klass),
+          message: `Your request to join ${subjectLabel(klass)} has not been approved yet. You will be able to open this subject once the teacher accepts it.`,
+        });
+      }
+
+      return res.status(403).json({
+        code: "NOT_ENROLLED",
+        subject: subjectLabel(klass),
+        message: `You do not have the necessary access to ${subjectLabel(klass)} because you are not enrolled in this subject. Ask your teacher to add you, or join with the class code.`,
+      });
     }
 
     req.lmClass = klass;
@@ -132,11 +189,14 @@ const asyncRoute = (handler) => (req, res, next) =>
 
 module.exports = {
   authenticate,
+  authenticateOptional,
   requireClassCreator,
   loadClass,
   requireTeacher,
   requireOwner,
   asyncRoute,
   isPlatformAdmin,
+  hasLearningRole,
   TEACHER_PLATFORM_ROLES,
+  STUDENT_PLATFORM_ROLES,
 };

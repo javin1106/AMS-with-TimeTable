@@ -99,12 +99,20 @@ const lmQuizSchema = new mongoose.Schema({
     // Only meaningful for one_at_a_time. False reproduces a placement test
     // where a delivered question cannot be revisited.
     allowBacktracking: { type: Boolean, default: false },
+    // The two timing methods are mutually exclusive — a paper is either run on
+    // one clock or on a clock per question, never both, because a student
+    // watching two countdowns cannot tell which one will end their sitting.
     // True: each question gets its own countdown and auto-submits on expiry.
-    // False: one countdown for the whole paper.
+    // Only meaningful for one_at_a_time; the all-at-once page has no way to
+    // enforce it, so the controller clears it when the delivery mode changes.
     perQuestionTiming: { type: Boolean, default: false },
 
     /* ---- timing ---- */
+    // Whole-paper clock. Held at 0 while perQuestionTiming is on.
     timeLimitMinutes: { type: Number, default: 0 },
+    // Seconds stamped on each newly added question, chosen once when the quiz
+    // is created so the teacher is not asked again per question.
+    defaultQuestionSec: { type: Number, default: 60 },
     // Latest a student may *start*, expressed as minutes after availableFrom.
     // Mirrors aim2Crack's marginTime: the test stays open but late arrivals are
     // turned away rather than given a full clock.

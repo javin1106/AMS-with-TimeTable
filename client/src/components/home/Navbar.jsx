@@ -7,6 +7,8 @@ import getEnvironment from '../../getenvironment';
 import { Text, Button, Flex } from '@chakra-ui/react';
 import NavBar from '../../reviewmodule/components/NavBar';
 import DMNavbar from '../../diabeticsModule/components/DMNavbar';
+import { isStudentOnly } from '../../learningModule/roles';
+import { loginPathFor } from '../../authRedirect';
 
 export default function Navbar() {
   const [navbarOpen, setNavbarOpen] = useState(false);
@@ -98,12 +100,20 @@ export default function Navbar() {
       publicPaths.includes(location.pathname) ||
       location.pathname.startsWith('/services/') ||
       location.pathname.startsWith('/cm/c/') ||
-      location.pathname.startsWith('/timetable/faculty/');
+      location.pathname.startsWith('/timetable/faculty/') ||
+      // Joining and answering a live Short. Whether these need an account is a
+      // per-deck setting the teacher controls, so the server decides; forcing a
+      // login here would make the open decks impossible to reach.
+      location.pathname.startsWith('/learning/short/join') ||
+      location.pathname.startsWith('/learning/short/live/');
 
     if (!isLoading && !isAuthenticated && !isPublicPath) {
-      navigate('/login');
+      // Replace, not push: the user never chose to visit the login page, so it
+      // shouldn't sit in their history between the page they wanted and wherever
+      // they came from.
+      navigate(loginPathFor(location), { replace: true });
     }
-  }, [isLoading, isAuthenticated, navigate, location.pathname]);
+  }, [isLoading, isAuthenticated, navigate, location]);
 
   const excludedRoutes = ['/login', '/cm/c'];
 
@@ -112,6 +122,13 @@ export default function Navbar() {
   );
 
   if (isLoading || isExcluded) {
+    return null;
+  }
+
+  // A student's whole surface is the learning module, whose own header carries
+  // their name and the logout action. The platform bar links to modules they
+  // cannot use, so they never see it — on any route, not just /learning.
+  if (isStudentOnly(userDetails?.user?.role)) {
     return null;
   }
 

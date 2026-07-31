@@ -5,14 +5,16 @@ import LearningLayout from './components/LearningLayout';
 import ClassLayout from './pages/ClassLayout';
 import Dashboard from './pages/Dashboard';
 import Stream from './pages/Stream';
-import Classwork from './pages/Classwork';
+import Material from './pages/Material';
 import CourseworkDetail from './pages/CourseworkDetail';
 import GradeWork from './pages/GradeWork';
 import People from './pages/People';
 import Grades from './pages/Grades';
 import AiStudio from './pages/AiStudio';
+import AiPlayground from './pages/AiPlayground';
 import Insights from './pages/Insights';
 import ClassSettings from './pages/ClassSettings';
+import Quizzes from './pages/Quizzes';
 import QuizBrief from './pages/QuizBrief';
 import QuizAttempt from './pages/QuizAttempt';
 import QuizEditor from './pages/QuizEditor';
@@ -39,28 +41,37 @@ import Notifications from './pages/Notifications';
 export default function LearningRoutes() {
   return (
     <Routes>
+      {/* Joining and answering a Short sit outside class/:classId — someone who
+          scanned the QR at the front of the room has a code, not a class — and
+          outside LearningLayout, whose bootstrap fetches the signed-in user and
+          would bounce a guest to the login page. A deck with `requireLogin` off
+          admits people with no account at all, so these two screens have to
+          stand on their own. */}
+      <Route path="short/join" element={<ShortJoin />} />
+      <Route path="short/join/:code" element={<ShortJoin />} />
+      <Route path="short/live/:sessionId" element={<ShortPlay />} />
+
       <Route element={<LearningLayout />}>
         <Route index element={<Dashboard />} />
         <Route path="todo" element={<Todo />} />
         <Route path="calendar" element={<Calendar />} />
         <Route path="notifications" element={<Notifications />} />
 
-        {/* Joining and answering a Short sit outside class/:classId: someone who
-            scanned the QR at the front of the room has a code, not a class. */}
-        <Route path="short/join" element={<ShortJoin />} />
-        <Route path="short/join/:code" element={<ShortJoin />} />
-        <Route path="short/live/:sessionId" element={<ShortPlay />} />
-
         <Route path="class/:classId" element={<ClassLayout />}>
           <Route index element={<Stream />} />
-          <Route path="classwork" element={<Classwork />} />
+          <Route path="material" element={<Material />} />
+          {/* Classwork was split across Material, Quizzes, Shorts and Tutorials;
+              old links land on the tab that inherited its reading material. */}
+          <Route path="classwork" element={<Navigate to="../material" replace />} />
           <Route path="work/:courseworkId" element={<CourseworkDetail />} />
           <Route path="work/:courseworkId/grade" element={<GradeWork />} />
           <Route path="people" element={<People />} />
           <Route path="grades" element={<Grades />} />
           <Route path="studio" element={<AiStudio />} />
+          <Route path="playground" element={<AiPlayground />} />
           <Route path="insights" element={<Insights />} />
           <Route path="settings" element={<ClassSettings />} />
+          <Route path="quizzes" element={<Quizzes />} />
           <Route path="quiz/:quizId" element={<QuizBrief />} />
           <Route path="quiz/:quizId/attempt/:attemptId" element={<QuizAttempt />} />
           <Route path="quiz/:quizId/edit" element={<QuizEditor />} />

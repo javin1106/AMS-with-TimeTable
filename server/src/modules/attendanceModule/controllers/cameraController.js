@@ -458,31 +458,72 @@ async stopRecording(req, res) {
 
 async listRecordings(req, res) {
     try {
-        const result = await axios.get(`${ML_URL}/recordings`, { timeout: 8000 });
-        return res.json(result.data);
+        const fs = require('fs');
+        const fsPromises = fs.promises;
+        const path = require('path');
+        const RECORDINGS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'recordings');
+        
+        let activeRecordings = [];
+        try {
+            const mlResult = await axios.get(`${ML_URL}/recordings`, { timeout: 8000 });
+            activeRecordings = Array.isArray(mlResult.data) ? mlResult.data : [];
+        } catch (mlError) {
+            // Ignore error if ML service is unreachable
+        }
+
+        const diskFiles = [];
+        if (fs.existsSync(RECORDINGS_DIR)) {
+            const files = await fsPromises.readdir(RECORDINGS_DIR);
+            for (const file of files) {
+                if (!file.endsWith('.mp4')) continue;
+                
+                const stats = await fsPromises.stat(path.join(RECORDINGS_DIR, file));
+                
+                let label = "Unknown";
+                const parts = file.replace('.mp4', '').split('_');
+                if (parts.length >= 3) {
+                    label = parts.slice(0, parts.length - 2).join('_');
+                } else if (parts.length > 0) {
+                    label = parts[0];
+                }
+
+                diskFiles.push({
+                    recordingId: file, // Node uses filename as ID for past recordings
+                    filename: file,
+                    label: label,
+                    started: stats.mtimeMs / 1000,
+                    status: "done",
+                    sizeBytes: stats.size,
+                    format: "video+audio"
+                });
+            }
+        }
+
+        const activeFileNames = new Set(activeRecordings.map(r => r.filename));
+        const merged = [
+            ...activeRecordings,
+            ...diskFiles.filter(f => !activeFileNames.has(f.filename))
+        ];
+
+        merged.sort((a, b) => b.started - a.started);
+        return res.json(merged);
     } catch (error) {
         return sendKnownError(res, error);
     }
 }
 
 async downloadRecording(req, res) {
-    // The recording lives on the ML service's own disk (it's the process that
-    // ran ffmpeg), not Node's — stream the bytes from there rather than
-    // assuming a local copy exists.
     const path = require('path');
+    const fs = require('fs');
     const safe = path.basename(req.params.filename);
-    try {
-        const upstream = await axios.get(
-            `${ML_URL}/recordings/${encodeURIComponent(safe)}/download`,
-            { responseType: 'stream', timeout: 30000 },
-        );
-        res.setHeader('Content-Type', 'video/mp4');
-        res.setHeader('Content-Disposition', `attachment; filename="${safe}"`);
-        upstream.data.pipe(res);
-    } catch (error) {
-        if (error.response?.status === 404) return res.status(404).json({ error: 'File not found' });
-        return sendKnownError(res, error);
+    const RECORDINGS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'recordings');
+    const filePath = path.join(RECORDINGS_DIR, safe);
+    
+    if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: 'File not found' });
     }
+    
+    res.download(filePath, safe);
 }
 
 async downloadAudio(req, res) {
@@ -507,20 +548,25 @@ async downloadAudio(req, res) {
 }
 
 async deleteRecording(req, res){
-    const path = require('path')
+    const path = require('path');
+    const fs = require('fs');
     const safe = path.basename(req.params.filename);
+    const RECORDINGS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'recordings');
+    const filePath = path.join(RECORDINGS_DIR, safe);
+    
     console.log("Deleting: ", safe);
     
-    try{
-        const response = await axios.delete(
-            `${ML_URL}/recordings/${encodeURIComponent(safe)}`,
-            {timeout : 30000}
-        )
-        return res.status(response.status).json(response.data);
+    try {
+        await axios.delete(`${ML_URL}/recordings/${encodeURIComponent(safe)}`, { timeout: 8000 });
+    } catch(err) {
+        // ML service throws 404 if not in memory, ignore
     }
-    catch(error){
-        if(error.response?.status === 404) return res.status(404).json({error: 'File not found'})
-        return sendKnownError(res, error)        
+
+    if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        return res.json({ message: "Recording deleted" });
+    } else {
+        return res.status(404).json({ error: 'File not found' });
     }
 }
 

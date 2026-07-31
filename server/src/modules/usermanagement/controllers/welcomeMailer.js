@@ -19,7 +19,33 @@ function resolveFrontendBase(req) {
 
 const P = 'style="margin:0 0 16px;font-size:14px;color:#444;line-height:1.6;"';
 
-function sendWelcomeEmail({ email, frontendBase, heading, intro, accountCreated }) {
+// `heading` carries caller-supplied text (a class name, a department), so it is
+// escaped before landing in the markup. The subject line keeps the raw string —
+// entities would show up literally there.
+const escapeHtml = (value) =>
+  String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[ch]));
+
+/**
+ * @param {string} [banner]
+ *        Text in the teal bar at the top. Defaults to the platform wordmark the
+ *        admin-created-account mails use; the Learning module overrides it so a
+ *        provisioned student's welcome mail is topped the same way as the invite
+ *        mail they might otherwise have received.
+ */
+function sendWelcomeEmail({
+  email,
+  frontendBase,
+  heading,
+  intro,
+  accountCreated,
+  banner = "XCEED — NIT Jalandhar",
+}) {
   const resetLink = `${frontendBase}/forgot-password`;
   const loginLink = `${frontendBase}/login`;
   const passwordSection = accountCreated
@@ -40,10 +66,10 @@ function sendWelcomeEmail({ email, frontendBase, heading, intro, accountCreated 
 <div style="background:#f4f6fb;padding:32px 16px;font-family:Arial,Helvetica,sans-serif;">
   <div style="max-width:480px;margin:0 auto;background:#ffffff;border-radius:12px;border:1px solid #e4e8f5;overflow:hidden;">
     <div style="background:#0e7490;padding:20px 28px;">
-      <div style="color:#ffffff;font-size:18px;font-weight:700;letter-spacing:.02em;">XCEED — NIT Jalandhar</div>
+      <div style="color:#ffffff;font-size:18px;font-weight:700;letter-spacing:.02em;">${escapeHtml(banner)}</div>
     </div>
     <div style="padding:28px;">
-      <h1 style="margin:0 0 12px;font-size:20px;color:#1a1f3c;">${heading}</h1>
+      <h1 style="margin:0 0 12px;font-size:20px;color:#1a1f3c;">${escapeHtml(heading)}</h1>
       <p style="margin:0 0 8px;font-size:14px;color:#444;line-height:1.6;">Dear User,</p>
       <div style="font-size:14px;color:#444;line-height:1.6;">
         ${intro}

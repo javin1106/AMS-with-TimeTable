@@ -1,19 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link as RouterLink, useOutletContext } from 'react-router-dom';
 import {
-  Badge,
   Box,
   Button,
   Flex,
   HStack,
-  Heading,
   Input,
   Table,
-  Tab,
-  TabList,
-  TabPanel,
-  TabPanels,
-  Tabs,
   Tbody,
   Td,
   Text,
@@ -23,7 +16,7 @@ import {
   useToast,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
-import { EmptyState, ErrorState, Loading, SectionCard } from '../components/common';
+import { EmptyState, ErrorState, Loading } from '../components/common';
 
 function GradebookGrid({ classId, isTeacher }) {
   const [data, setData] = useState(null);
@@ -190,181 +183,9 @@ function GradebookGrid({ classId, isTeacher }) {
   );
 }
 
-function QuizList({ classId, isTeacher }) {
-  const [quizzes, setQuizzes] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [dueDates, setDueDates] = useState({});
-  const toast = useToast();
-
-  const load = useCallback(async () => {
-    setError(null);
-    try {
-      setQuizzes(await lmApi.listQuizzes(classId));
-    } catch (err) {
-      setError(err);
-    } finally {
-      setLoading(false);
-    }
-  }, [classId]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  const togglePublish = async (quiz) => {
-    try {
-      await lmApi.publishQuiz(classId, quiz._id, {
-        publish: !quiz.published,
-        dueDate: dueDates[quiz._id] || undefined,
-      });
-      toast({ status: 'success', title: quiz.published ? 'Quiz unpublished' : 'Quiz published to the class' });
-      await load();
-    } catch (err) {
-      toast({ status: 'error', title: err.message });
-    }
-  };
-
-  const remove = async (quiz) => {
-    // eslint-disable-next-line no-alert
-    if (!window.confirm(`Delete "${quiz.title}" and all its attempts?`)) return;
-    try {
-      await lmApi.deleteQuiz(classId, quiz._id);
-      await load();
-    } catch (err) {
-      toast({ status: 'error', title: err.message });
-    }
-  };
-
-  if (loading) return <Loading label="Loading quizzes…" />;
-  if (error) return <ErrorState error={error} onRetry={load} />;
-  if (!quizzes.length) {
-    return (
-      <EmptyState
-        icon="🧠"
-        title="No quizzes yet"
-        description={
-          isTeacher
-            ? 'Generate one from a class recording in the AI Studio, then review and publish it.'
-            : 'Your teacher has not published any quizzes.'
-        }
-        action={
-          isTeacher ? (
-            <Button as={RouterLink} to={`/learning/class/${classId}/studio`} size="sm" colorScheme="purple">
-              Open AI Studio
-            </Button>
-          ) : null
-        }
-      />
-    );
-  }
-
-  return (
-    <Box>
-      {quizzes.map((quiz) => (
-        <Flex
-          key={quiz._id}
-          bg="white"
-          borderWidth="1px"
-          borderColor="gray.200"
-          borderRadius="lg"
-          p={4}
-          mb={3}
-          align="center"
-          gap={4}
-          wrap="wrap"
-        >
-          <Box flex="1" minW="220px">
-            <HStack>
-              <Heading size="sm">{quiz.title}</Heading>
-              {quiz.source === 'ai' && <Badge colorScheme="purple">✨ AI</Badge>}
-              {isTeacher && (
-                <Badge colorScheme={quiz.published ? 'green' : 'gray'}>
-                  {quiz.published ? 'Published' : 'Draft'}
-                </Badge>
-              )}
-            </HStack>
-            <Text fontSize="xs" color="gray.500" mt={1}>
-              {quiz.questions?.length || 0} questions · {quiz.totalMarks} marks
-              {quiz.settings?.timeLimitMinutes ? ` · ${quiz.settings.timeLimitMinutes} min` : ''}
-            </Text>
-            {isTeacher && quiz.stats && (
-              <Text fontSize="xs" color="gray.500">
-                {quiz.stats.attempts} attempt(s)
-                {quiz.stats.avg !== null && quiz.stats.avg !== undefined
-                  ? ` · avg ${Math.round(quiz.stats.avg * 10) / 10}%`
-                  : ''}
-              </Text>
-            )}
-            {!isTeacher && quiz.bestAttempt && (
-              <Badge colorScheme={quiz.bestAttempt.passed ? 'green' : 'red'} mt={1}>
-                Best: {quiz.bestAttempt.score}/{quiz.bestAttempt.maxScore} ({quiz.bestAttempt.percent}%)
-              </Badge>
-            )}
-          </Box>
-
-          <HStack>
-            {isTeacher ? (
-              <>
-                {!quiz.published && (
-                  <Input
-                    size="sm"
-                    type="datetime-local"
-                    maxW="200px"
-                    value={dueDates[quiz._id] || ''}
-                    onChange={(event) => setDueDates((prev) => ({ ...prev, [quiz._id]: event.target.value }))}
-                    placeholder="Due date"
-                  />
-                )}
-                <Button as={RouterLink} to={`/learning/class/${classId}/quiz/${quiz._id}/edit`} size="sm" variant="outline">
-                  Edit
-                </Button>
-                <Button as={RouterLink} to={`/learning/class/${classId}/quiz/${quiz._id}/results`} size="sm" variant="outline">
-                  Results
-                </Button>
-                <Button size="sm" colorScheme={quiz.published ? 'gray' : 'green'} onClick={() => togglePublish(quiz)}>
-                  {quiz.published ? 'Unpublish' : 'Publish'}
-                </Button>
-                <Button size="sm" variant="ghost" colorScheme="red" onClick={() => remove(quiz)}>
-                  ✕
-                </Button>
-              </>
-            ) : (
-              <Button
-                as={RouterLink}
-                to={`/learning/class/${classId}/quiz/${quiz._id}`}
-                size="sm"
-                colorScheme="purple"
-                isDisabled={!quiz.available}
-              >
-                {quiz.attemptsUsed > 0 ? 'Review / retake' : 'Start quiz'}
-              </Button>
-            )}
-          </HStack>
-        </Flex>
-      ))}
-    </Box>
-  );
-}
-
+// Quizzes used to sit behind a sub-tab here. They now have their own class tab,
+// which is where they are authored and published; this page is the gradebook.
 export default function Grades() {
   const { classId, isTeacher } = useOutletContext();
-  return (
-    <Tabs colorScheme="blue" variant="enclosed">
-      <TabList>
-        <Tab fontSize="sm">Gradebook</Tab>
-        <Tab fontSize="sm">Quizzes</Tab>
-      </TabList>
-      <TabPanels>
-        <TabPanel px={0}>
-          <GradebookGrid classId={classId} isTeacher={isTeacher} />
-        </TabPanel>
-        <TabPanel px={0}>
-          <SectionCard>
-            <QuizList classId={classId} isTeacher={isTeacher} />
-          </SectionCard>
-        </TabPanel>
-      </TabPanels>
-    </Tabs>
-  );
+  return <GradebookGrid classId={classId} isTeacher={isTeacher} />;
 }

@@ -6,15 +6,20 @@ import { ChakraProvider } from '@chakra-ui/react';
 import './index.css';
 import { RecoilRoot } from 'recoil';
 import axios from 'axios';
+import getEnvironment from './getenvironment';
 
 const helmetContext = {};
 
 const originalFetch = window.fetch;
+// The API host varies by deployment, so ask getEnvironment rather than listing
+// hosts here — a missed host means no Authorization header, and the session
+// then rests entirely on a SameSite=None cookie that private windows drop.
+const apiOrigin = getEnvironment();
 window.fetch = function(url, options = {}) {
   const token = localStorage.getItem('token');
-  const isOwnServer = typeof url === 'string' && 
-    (url.includes('xceed.nitj.ac.in') || url.includes('localhost:8010'));
-  
+  const target = typeof url === 'string' ? url : url?.url || String(url ?? '');
+  const isOwnServer = target.startsWith(apiOrigin);
+
   if (isOwnServer) {
     options.credentials = 'include';
     if (token) {

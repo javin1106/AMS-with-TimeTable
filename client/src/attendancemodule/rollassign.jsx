@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Fragment } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { createPortal } from 'react-dom';
 import getEnvironment from '../getenvironment';
 import { DEGREES, theme, styles, cssReset } from './config';
@@ -76,7 +77,8 @@ export default function RollAssign({ fixedDepartment = '' }) {
     const { departments, deptLoading, deptError } = useDepartments();
     const { batchYears, batchYearsLoading } = useBatchYears();
 
-    const [activeTab,      setActiveTab]      = useState('assign');
+    const [searchParams] = useSearchParams();
+    const [activeTab,      setActiveTab]      = useState(()=> searchParams.get('tab')|| 'assign');
     const [summary,        setSummary]        = useState([]);
     const [summaryLoading, setSummaryLoading] = useState(false);
     const [summaryError,   setSummaryError]   = useState(null);
@@ -713,22 +715,6 @@ export default function RollAssign({ fixedDepartment = '' }) {
                         onNext={() => openQueueItem(currentQueue, modal.item.folderName, 1)}
                         position={queueIdx + 1} total={currentQueue.length}
                         toast={toast}
-                        showToast={showToast}
-                        onPhotoDeleted={(filename) => {
-                            setModal(prev => {
-                                if (!prev) return prev;
-                                return {
-                                    ...prev,
-                                    item: {
-                                        ...prev.item,
-                                        embeddingFiles: (prev.item.embeddingFiles || []).filter(f => f !== filename),
-                                        imageFiles: (prev.item.imageFiles || []).filter(f => f !== filename),
-                                        previewFiles: (prev.item.previewFiles || []).filter(f => f !== filename),
-                                        imageCount: Math.max(0, (prev.item.imageCount || 1) - 1)
-                                    }
-                                };
-                            });
-                        }}
                     />
                 );
             })(), document.body)}
@@ -1101,6 +1087,8 @@ function parseBatch(batch) {
 }
 
 function SummaryPanel({ summary, summaryLoading, summaryError, fixedDepartment }) {
+    const [expandedRow, setExpandedRow] = useState(null); // batch name currently expanded, or null
+
     if (summaryLoading) return (
         <div style={{ textAlign: 'center', padding: '60px 20px', color: theme.textMuted, fontSize: '14px' }}>Loading summary…</div>
     );
@@ -1134,13 +1122,15 @@ function SummaryPanel({ summary, summaryLoading, summaryError, fixedDepartment }
                         .map(dept => {
                 const rows = groups[dept].slice().sort((a, b) => a.batch.localeCompare(b.batch));
                 const totals = rows.reduce((acc, r) => ({
-                    total:      acc.total     + r.total,
-                    approved:   acc.approved  + r.approved,
-                    pending:    acc.pending   + r.pending,
-                    flagged:    acc.flagged   + r.flagged,
-                    unmatched:  acc.unmatched + r.unmatched,
-                    cross_dept: acc.cross_dept + (r.cross_dept || 0),
-                }), { total: 0, approved: 0, pending: 0, flagged: 0, unmatched: 0, cross_dept: 0 });
+                    total:         acc.total         + r.total,
+                    approved:      acc.approved      + r.approved,
+                    pending:       acc.pending       + r.pending,
+                    flagged:       acc.flagged       + r.flagged,
+                    unmatched:     acc.unmatched     + r.unmatched,
+                    cross_dept:    acc.cross_dept    + (r.cross_dept || 0),
+                    unclustered:   acc.unclustered   + (r.unclustered || 0),
+                    erpPhotoTotal: acc.erpPhotoTotal + (r.erpPhotoTotal || 0),
+                }), { total: 0, approved: 0, pending: 0, flagged: 0, unmatched: 0, cross_dept: 0, unclustered: 0, erpPhotoTotal: 0 });
 
                 return (
                     <div key={dept} style={{ ...styles.card, marginBottom: 24, overflow: 'hidden', padding: 0 }}>
@@ -1153,39 +1143,73 @@ function SummaryPanel({ summary, summaryLoading, summaryError, fixedDepartment }
                                 <thead>
                                     <tr>
                                         <th>Batch</th>
+                                        <th style={{ textAlign: 'right' }}>ERP Photos</th>
                                         <th style={{ textAlign: 'right' }}>Total</th>
                                         <th style={{ textAlign: 'right', color: theme.success }}>Approved</th>
                                         <th style={{ textAlign: 'right', color: '#f59e0b' }}>Pending Review</th>
                                         <th style={{ textAlign: 'right', color: theme.warning }}>Flagged</th>
                                         <th style={{ textAlign: 'right', color: '#a78bfa' }}>Diff Dept</th>
                                         <th style={{ textAlign: 'right' }}>Unmatched</th>
+                                        <th style={{ textAlign: 'right', color: '#ef4444' }}>Unclustered</th>
+                                        <th></th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {rows.map(r => {
                                         const { degree, year } = parseBatch(r.batch);
+                                        const isExpanded = expandedRow === r.batch;
                                         return (
-                                            <tr key={r.batch}>
-                                                <td>{degree} {year}</td>
-                                                <td style={{ textAlign: 'right' }}>{r.total}</td>
-                                                <td style={{ textAlign: 'right' }}>{badge(r.approved,           theme.success)}</td>
-                                                <td style={{ textAlign: 'right' }}>{badge(r.pending,            '#f59e0b')}</td>
-                                                <td style={{ textAlign: 'right' }}>{badge(r.flagged,            theme.warning)}</td>
-                                                <td style={{ textAlign: 'right' }}>{badge(r.cross_dept || 0,   '#a78bfa')}</td>
-                                                <td style={{ textAlign: 'right', color: theme.textMuted }}>{r.unmatched}</td>
-                                            </tr>
+                                            <Fragment key={r.batch}>
+                                                <tr>
+                                                    <td>{degree} {year}</td>
+                                                    <td style={{ textAlign: 'right', color: theme.textMuted }}>{r.erpPhotoTotal ?? '—'}</td>
+                                                    <td style={{ textAlign: 'right' }}>{r.total}</td>
+                                                    <td style={{ textAlign: 'right' }}>{badge(r.approved,           theme.success)}</td>
+                                                    <td style={{ textAlign: 'right' }}>{badge(r.pending,            '#f59e0b')}</td>
+                                                    <td style={{ textAlign: 'right' }}>{badge(r.flagged,            theme.warning)}</td>
+                                                    <td style={{ textAlign: 'right' }}>{badge(r.cross_dept || 0,   '#a78bfa')}</td>
+                                                    <td style={{ textAlign: 'right', color: theme.textMuted }}>{r.unmatched}</td>
+                                                    <td style={{ textAlign: 'right' }}>{badge(r.unclustered || 0,  '#ef4444')}</td>
+                                                    <td style={{ textAlign: 'right' }}>
+                                                        <button
+                                                            onClick={() => setExpandedRow(isExpanded ? null : r.batch)}
+                                                            style={{
+                                                                padding: '3px 10px', fontSize: '11px', fontWeight: 600,
+                                                                borderRadius: 6, border: `1px solid ${theme.border}`,
+                                                                background: isExpanded ? theme.accent : 'transparent',
+                                                                color: isExpanded ? '#fff' : theme.accent, cursor: 'pointer',
+                                                            }}
+                                                        >
+                                                            Roll Nos {isExpanded ? '▲' : '▼'}
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                                {isExpanded && (
+                                                    <tr>
+                                                        <td colSpan={10} style={{ background: theme.bg, padding: '12px 18px' }}>
+                                                            <RollNoDropdown
+                                                                approvedRollNos={r.approvedRollNos || []}
+                                                                pendingRollNos={r.pendingRollNos || []}
+                                                            />
+                                                        </td>
+                                                    </tr>
+                                                )}
+                                            </Fragment>
                                         );
                                     })}
                                 </tbody>
                                 <tfoot>
                                     <tr>
                                         <td style={{ fontSize: '11px', color: theme.textMuted, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Total</td>
+                                        <td style={{ textAlign: 'right', color: theme.textMuted }}>{totals.erpPhotoTotal}</td>
                                         <td style={{ textAlign: 'right' }}>{totals.total}</td>
                                         <td style={{ textAlign: 'right' }}>{badge(totals.approved,   theme.success)}</td>
                                         <td style={{ textAlign: 'right' }}>{badge(totals.pending,    '#f59e0b')}</td>
                                         <td style={{ textAlign: 'right' }}>{badge(totals.flagged,    theme.warning)}</td>
                                         <td style={{ textAlign: 'right' }}>{badge(totals.cross_dept, '#a78bfa')}</td>
                                         <td style={{ textAlign: 'right', color: theme.textMuted }}>{totals.unmatched}</td>
+                                        <td style={{ textAlign: 'right' }}>{badge(totals.unclustered, '#ef4444')}</td>
+                                        <td></td>
                                     </tr>
                                 </tfoot>
                             </table>
@@ -1196,6 +1220,54 @@ function SummaryPanel({ summary, summaryLoading, summaryError, fixedDepartment }
         </div>
     );
 }
+
+function RollNoDropdown({ approvedRollNos, pendingRollNos }) {
+    const [tab, setTab] = useState('approved');
+    const list = tab === 'approved' ? approvedRollNos : pendingRollNos;
+    return (
+        <div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                <button
+                    onClick={() => setTab('approved')}
+                    style={{
+                        padding: '4px 12px', fontSize: '11px', fontWeight: 700, borderRadius: 999,
+                        border: `1px solid ${theme.success}`,
+                        background: tab === 'approved' ? theme.success : 'transparent',
+                        color: tab === 'approved' ? '#fff' : theme.success, cursor: 'pointer',
+                    }}
+                >
+                    Approved ({approvedRollNos.length})
+                </button>
+                <button
+                    onClick={() => setTab('pending')}
+                    style={{
+                        padding: '4px 12px', fontSize: '11px', fontWeight: 700, borderRadius: 999,
+                        border: '1px solid #f59e0b',
+                        background: tab === 'pending' ? '#f59e0b' : 'transparent',
+                        color: tab === 'pending' ? '#fff' : '#f59e0b', cursor: 'pointer',
+                    }}
+                >
+                    Pending ({pendingRollNos.length})
+                </button>
+            </div>
+            {list.length === 0 ? (
+                <div style={{ fontSize: '12px', color: theme.textMuted }}>None</div>
+            ) : (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, maxHeight: 160, overflowY: 'auto' }}>
+                    {list.map((rn) => (
+                        <span key={rn} style={{
+                            fontFamily: theme.fontMono, fontSize: '11px', padding: '3px 8px',
+                            borderRadius: 5, background: theme.surface, border: `1px solid ${theme.border}`,
+                        }}>
+                            {rn}
+                        </span>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+}
+
 
 // ─────────────────────────────────────────────────────────────────
 
@@ -1849,7 +1921,7 @@ function InModalToast({ toast }) {
     );
 }
 
-function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRoll, setOverrideRoll, saving, onApprove, onFlag, onClose, hasPrev, hasNext, onPrev, onNext, position, total, toast, showToast, onPhotoDeleted }) {
+function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRoll, setOverrideRoll, saving, onApprove, onFlag, onClose, hasPrev, hasNext, onPrev, onNext, position, total, toast }) {
     const conf           = match?.confidence;
     const allCandidates  = match?.candidates || [];
     const candMap        = {};
@@ -1861,50 +1933,6 @@ function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRo
     const displayRoll    = match?.rollNo || primaryMatch?.rollNo || null;
     const folderForPhoto = item.currentFolder || item.folderName;
     const [candOpen, setCandOpen] = useState(false);
-    
-    const [deletingPhoto, setDeletingPhoto] = useState(null);
-    const images = item.imageFiles?.length > 0 ? item.imageFiles : item.previewFiles || [];
-
-    const [gtImages, setGtImages] = useState(null);
-    useEffect(() => {
-        if (!displayRoll) {
-            setGtImages(null);
-            return;
-        }
-        let active = true;
-        const RA_BASE = photoUrl('','','').split('/photo/')[0];
-        fetch(`${RA_BASE}/student-ground-truth/${encodeURIComponent(batchName)}/${encodeURIComponent(displayRoll)}`)
-            .then(res => res.ok ? res.json() : null)
-            .then(data => {
-                if (active && data?.embeddingFiles?.length) {
-                    setGtImages(data.embeddingFiles.slice(0, 6));
-                } else if (active) {
-                    setGtImages(null);
-                }
-            })
-            .catch(() => { if (active) setGtImages(null); });
-        return () => { active = false; };
-    }, [batchName, displayRoll, photoUrl]);
-
-    const handleDeletePhoto = async (filename) => {
-        if (images.length <= 1) {
-            showToast && showToast('Keep at least one image while approving.', 'error');
-            return;
-        }
-        if (!window.confirm(`Delete "${filename}" permanently?`)) return;
-        setDeletingPhoto(filename);
-        try {
-            const res = await fetch(`${RA_BASE}/cluster-photo/${encodeURIComponent(item._id)}/${encodeURIComponent(filename)}`, { method: 'DELETE' });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || 'Delete failed');
-            if (onPhotoDeleted) onPhotoDeleted(filename);
-            showToast && showToast(`Deleted ${filename}`);
-        } catch (err) {
-            showToast && showToast(err.message, 'error');
-        } finally {
-            setDeletingPhoto(null);
-        }
-    };
     useEffect(() => {
         const handler = (e) => {
             if (e.key === 'ArrowLeft'  && hasPrev && !saving) onPrev();
@@ -1935,22 +1963,9 @@ function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRo
                     <div>
                         <div style={{ fontSize: '11px', fontWeight: 600, color: theme.textMuted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Extracted Face Images</div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5 }}>
-                            {images.map((f, i) => {
-                                const isDeleting = deletingPhoto === f;
-                                return (
-                                    <div key={i} style={{ position: 'relative', opacity: isDeleting ? 0.45 : 1, transition: 'opacity 0.15s' }}>
-                                        <img src={photoUrl(batchName, folderForPhoto, f)} alt="" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 6, border: `1px solid ${theme.border}`, display: 'block' }} onError={e => { e.target.style.display = 'none'; }} />
-                                        <button onClick={() => handleDeletePhoto(f)} disabled={isDeleting} title="Delete photo"
-                                            style={{ position: 'absolute', top: 4, right: 4, width: 22, height: 22, borderRadius: 5, background: '#ffffff', border: `1.5px solid ${theme.danger}`, color: theme.danger, cursor: isDeleting ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}>
-                                            <svg width="11" height="12" viewBox="0 0 11 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                                <path d="M1 3h9M4 3V2h3v1M2 3l.6 7.5a.5.5 0 00.5.5h4.8a.5.5 0 00.5-.5L9 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
-                                                <line x1="4.5" y1="5.5" x2="4.5" y2="9.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
-                                                <line x1="6.5" y1="5.5" x2="6.5" y2="9.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
-                                            </svg>
-                                        </button>
-                                    </div>
-                                );
-                            })}
+                            {(item.imageFiles?.length > 0 ? item.imageFiles : item.previewFiles || []).map((f, i) => (
+                                <img key={i} src={photoUrl(batchName, folderForPhoto, f)} alt="" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 6, border: `1px solid ${theme.border}` }} onError={e => { e.target.style.display = 'none'; }} />
+                            ))}
                         </div>
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -1968,16 +1983,6 @@ function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRo
                                 <div style={{ textAlign: 'center', color: theme.textMuted, fontSize: '12px', padding: '10px 0', borderRadius: 8, background: theme.bg, border: `1px dashed ${theme.border}` }}>No ERP match</div>
                             )}
                         </div>
-                        {gtImages && gtImages.length > 0 && (
-                            <div style={{ marginTop: 2 }}>
-                                <div style={{ fontSize: '11px', fontWeight: 600, color: theme.textMuted, marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Existing Embeddings (GT)</div>
-                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 4 }}>
-                                    {gtImages.map((img, i) => (
-                                        <img key={i} src={img.url} alt="" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 4, border: `1px solid ${theme.border}` }} onError={e => { e.target.style.display = 'none'; }} />
-                                    ))}
-                                </div>
-                            </div>
-                        )}
                         {allCandidates.length > 0 && (
                             <div style={{ borderRadius: 8, border: `1px solid ${theme.border}`, overflow: 'hidden' }}>
                                 <button onClick={() => setCandOpen(o => !o)} style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 10px', background: theme.bg, border: 'none', cursor: 'pointer', fontSize: '10px', fontWeight: 600, color: theme.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>

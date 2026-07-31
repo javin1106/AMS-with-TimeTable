@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
 import {
+  Alert,
+  AlertIcon,
   Badge,
   Box,
   Button,
@@ -19,6 +21,7 @@ import {
   ModalFooter,
   ModalHeader,
   ModalOverlay,
+  Select,
   SimpleGrid,
   Tab,
   TabList,
@@ -26,12 +29,19 @@ import {
   TabPanels,
   Tabs,
   Text,
-  Textarea,
   useToast,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
-import { EmptyState, ErrorState, Loading, StatTile } from '../components/common';
+import {
+  ClassCardPreview,
+  ColorPicker,
+  EmptyState,
+  ErrorState,
+  Loading,
+  StatTile,
+} from '../components/common';
 import { CLASS_COLORS } from '../format';
+import { canCreateClass } from '../roles';
 
 function ClassCard({ klass, onOpen }) {
   const isTeacher = ['teacher', 'co-teacher'].includes(klass.myRole);
@@ -85,29 +95,118 @@ function ClassCard({ klass, onOpen }) {
   );
 }
 
+// A class is always "a subject, taught to one semester of one branch", and the
+// timetable module already holds that catalogue — so the form picks from it
+// rather than asking the teacher to retype names and codes. Everything else
+// (room, description, meeting link) is left to class settings.
 function CreateClassModal({ isOpen, onClose, onCreated }) {
-  const blank = {
-    name: '',
-    section: '',
-    subject: '',
-    subjectCode: '',
-    room: '',
-    description: '',
-    coverColor: CLASS_COLORS[0],
-  };
-  const [form, setForm] = useState(blank);
+  const [branches, setBranches] = useState([]);
+  const [semesters, setSemesters] = useState([]);
+  const [subjects, setSubjects] = useState([]);
+  const [loadingBranches, setLoadingBranches] = useState(false);
+  const [loadingSemesters, setLoadingSemesters] = useState(false);
+  const [loadingSubjects, setLoadingSubjects] = useState(false);
+  const [catalogueError, setCatalogueError] = useState(null);
+
+  const [branchCode, setBranchCode] = useState('');
+  const [semester, setSemester] = useState('');
+  const [subjectId, setSubjectId] = useState('');
+  const [name, setName] = useState('');
+  const [coverColor, setCoverColor] = useState(CLASS_COLORS[0]);
   const [saving, setSaving] = useState(false);
+  // Once the teacher edits the name themselves, stop overwriting it when they
+  // change the subject.
+  const [nameTouched, setNameTouched] = useState(false);
   const toast = useToast();
 
-  const set = (field) => (event) => setForm((prev) => ({ ...prev, [field]: event.target.value }));
+  const branch = branches.find((item) => item.code === branchCode) || null;
+  const subject = subjects.find((item) => item.id === subjectId) || null;
+  const section = semester ? `Sem ${semester}` : '';
+
+  const reset = useCallback(() => {
+    setBranchCode('');
+    setSemester('');
+    setSubjectId('');
+    setName('');
+    setNameTouched(false);
+    setCoverColor(CLASS_COLORS[0]);
+  }, []);
+
+  // Branches of the current academic session.
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    let cancelled = false;
+    setLoadingBranches(true);
+    setCatalogueError(null);
+    lmApi
+      .ttBranches()
+      .then((list) => {
+        if (cancelled) return;
+        setBranches(list);
+        // Nothing to choose between when the department runs a single branch.
+        if (list.length === 1) setBranchCode(list[0].code);
+      })
+      .catch((error) => !cancelled && setCatalogueError(error))
+      .finally(() => !cancelled && setLoadingBranches(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    setSemester('');
+    setSubjectId('');
+    setSemesters([]);
+    if (!branchCode) return undefined;
+    let cancelled = false;
+    setLoadingSemesters(true);
+    lmApi
+      .ttSemesters(branchCode)
+      .then((list) => !cancelled && setSemesters(list))
+      .catch(() => !cancelled && setSemesters([]))
+      .finally(() => !cancelled && setLoadingSemesters(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [branchCode]);
+
+  useEffect(() => {
+    setSubjectId('');
+    setSubjects([]);
+    if (!branchCode || !semester) return undefined;
+    let cancelled = false;
+    setLoadingSubjects(true);
+    lmApi
+      .ttSubjects(branchCode, semester)
+      .then((list) => !cancelled && setSubjects(list))
+      .catch(() => !cancelled && setSubjects([]))
+      .finally(() => !cancelled && setLoadingSubjects(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [branchCode, semester]);
+
+  // The subject name is the sensible class name; keep it in step until edited.
+  useEffect(() => {
+    if (nameTouched) return;
+    setName(subject ? subject.name : '');
+  }, [subject, nameTouched]);
 
   const submit = async () => {
-    if (!form.name.trim()) return;
+    if (!subject || !name.trim()) return;
     setSaving(true);
     try {
-      const created = await lmApi.createClass(form);
+      const created = await lmApi.createClass({
+        name: name.trim(),
+        section,
+        subject: subject.subName || subject.name,
+        subjectCode: subject.subCode,
+        semester,
+        dept: branch?.dept || '',
+        coverColor,
+      });
       toast({ status: 'success', title: `"${created.name}" created`, description: `Class code: ${created.code}` });
-      setForm(blank);
+      reset();
       onCreated(created);
     } catch (error) {
       toast({ status: 'error', title: 'Could not create class', description: error.message });
@@ -116,69 +215,129 @@ function CreateClassModal({ isOpen, onClose, onCreated }) {
     }
   };
 
+  const close = () => {
+    reset();
+    onClose();
+  };
+
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="lg">
+    <Modal isOpen={isOpen} onClose={close} size="lg">
       <ModalOverlay />
       <ModalContent>
         <ModalHeader>Create a class</ModalHeader>
         <ModalCloseButton />
         <ModalBody>
-          <FormControl isRequired mb={4}>
-            <FormLabel fontSize="sm">Class name</FormLabel>
-            <Input value={form.name} onChange={set('name')} placeholder="Digital Signal Processing" autoFocus />
-          </FormControl>
+          <ErrorState error={catalogueError} />
+          {!catalogueError && !loadingBranches && branches.length === 0 && (
+            <Alert status="warning" borderRadius="md" mb={4} fontSize="sm">
+              <AlertIcon />
+              No timetable is set up for the current session yet, so there are no branches to pick
+              from. Ask the timetable admin to publish one.
+            </Alert>
+          )}
+
           <SimpleGrid columns={{ base: 1, sm: 2 }} spacing={4} mb={4}>
-            <FormControl>
-              <FormLabel fontSize="sm">Section</FormLabel>
-              <Input value={form.section} onChange={set('section')} placeholder="ECE-6A" />
+            <FormControl isRequired>
+              <FormLabel fontSize="sm">Branch</FormLabel>
+              <Select
+                value={branchCode}
+                onChange={(event) => setBranchCode(event.target.value)}
+                placeholder={loadingBranches ? 'Loading…' : 'Select branch'}
+                isDisabled={loadingBranches || branches.length === 0}
+                autoFocus
+              >
+                {branches.map((item) => (
+                  <option key={item.code} value={item.code}>
+                    {item.dept}
+                  </option>
+                ))}
+              </Select>
             </FormControl>
-            <FormControl>
-              <FormLabel fontSize="sm">Subject</FormLabel>
-              <Input value={form.subject} onChange={set('subject')} placeholder="Signal Processing" />
-            </FormControl>
-            <FormControl>
-              <FormLabel fontSize="sm">Subject code</FormLabel>
-              <Input value={form.subjectCode} onChange={set('subjectCode')} placeholder="ECPC-302" />
-            </FormControl>
-            <FormControl>
-              <FormLabel fontSize="sm">Room</FormLabel>
-              <Input value={form.room} onChange={set('room')} placeholder="LT-3" />
+            <FormControl isRequired>
+              <FormLabel fontSize="sm">Semester</FormLabel>
+              <Select
+                value={semester}
+                onChange={(event) => setSemester(event.target.value)}
+                placeholder={loadingSemesters ? 'Loading…' : 'Select semester'}
+                isDisabled={!branchCode || loadingSemesters}
+              >
+                {semesters.map((item) => (
+                  <option key={item} value={item}>
+                    Semester {item}
+                  </option>
+                ))}
+              </Select>
+              {branchCode && !loadingSemesters && semesters.length === 0 && (
+                <FormHelperText color="orange.600">
+                  No subjects are registered for this branch yet.
+                </FormHelperText>
+              )}
             </FormControl>
           </SimpleGrid>
-          <FormControl mb={4}>
-            <FormLabel fontSize="sm">Description</FormLabel>
-            <Textarea
-              value={form.description}
-              onChange={set('description')}
-              rows={3}
-              placeholder="What this course covers…"
+
+          <FormControl isRequired mb={4}>
+            <FormLabel fontSize="sm">Subject</FormLabel>
+            <Select
+              value={subjectId}
+              onChange={(event) => setSubjectId(event.target.value)}
+              placeholder={loadingSubjects ? 'Loading…' : 'Select subject'}
+              isDisabled={!semester || loadingSubjects}
+            >
+              {subjects.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {[item.subCode, item.name].filter(Boolean).join(' — ')}
+                  {item.type ? ` (${item.type})` : ''}
+                </option>
+              ))}
+            </Select>
+            {semester && !loadingSubjects && subjects.length === 0 && (
+              <FormHelperText color="orange.600">
+                No subjects found for this branch and semester in the timetable.
+              </FormHelperText>
+            )}
+          </FormControl>
+
+          <FormControl isRequired mb={4}>
+            <FormLabel fontSize="sm">Class name</FormLabel>
+            <Input
+              value={name}
+              onChange={(event) => {
+                setNameTouched(true);
+                setName(event.target.value);
+              }}
+              placeholder="Picked from the subject — edit if you want"
             />
           </FormControl>
-          <FormControl>
+
+          <FormControl mb={4}>
             <FormLabel fontSize="sm">Theme colour</FormLabel>
-            <HStack spacing={2}>
-              {CLASS_COLORS.map((color) => (
-                <Box
-                  key={color}
-                  as="button"
-                  aria-label={`Use colour ${color}`}
-                  w="30px"
-                  h="30px"
-                  borderRadius="full"
-                  bg={color}
-                  borderWidth={form.coverColor === color ? '3px' : '1px'}
-                  borderColor={form.coverColor === color ? 'gray.800' : 'gray.200'}
-                  onClick={() => setForm((prev) => ({ ...prev, coverColor: color }))}
-                />
-              ))}
-            </HStack>
+            <ColorPicker value={coverColor} options={CLASS_COLORS} onChange={setCoverColor} />
           </FormControl>
+
+          <Box>
+            <Text fontSize="xs" color="gray.500" mb={2}>
+              Preview
+            </Text>
+            <ClassCardPreview
+              color={coverColor}
+              title={name || 'Class name'}
+              subtitle={
+                [section, subject?.subName || subject?.name].filter(Boolean).join(' · ') ||
+                'Semester · Subject'
+              }
+            />
+          </Box>
         </ModalBody>
         <ModalFooter gap={2}>
-          <Button variant="ghost" onClick={onClose}>
+          <Button variant="ghost" onClick={close}>
             Cancel
           </Button>
-          <Button colorScheme="blue" onClick={submit} isLoading={saving} isDisabled={!form.name.trim()}>
+          <Button
+            colorScheme="blue"
+            onClick={submit}
+            isLoading={saving}
+            isDisabled={!subject || !name.trim()}
+          >
             Create class
           </Button>
         </ModalFooter>
@@ -282,7 +441,7 @@ function JoinClassModal({ isOpen, onClose, onJoined }) {
 }
 
 export default function Dashboard() {
-  const { overview, reloadOverview } = useOutletContext() || {};
+  const { me, overview, reloadOverview } = useOutletContext() || {};
   const [classes, setClasses] = useState([]);
   const [archived, setArchived] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -290,7 +449,10 @@ export default function Dashboard() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
 
-  const showCreate = searchParams.get('create') === '1';
+  // Creating a class is faculty-only on the server, so a student never sees
+  // the entry points — nor the modal if they land on ?create=1 by hand.
+  const mayCreateClass = canCreateClass(me?.roles);
+  const showCreate = mayCreateClass && searchParams.get('create') === '1';
   const showJoin = searchParams.get('join') === '1';
   const closeModals = () => setSearchParams({}, { replace: true });
 
@@ -331,12 +493,12 @@ export default function Dashboard() {
             Everything you teach or are enrolled in.
           </Text>
         </Box>
+        {/* Creating a class lives only in the module header, so it is not
+            offered twice on the same screen. Joining stays here: it is the
+            action a student came for. */}
         <HStack>
           <Button variant="outline" onClick={() => setSearchParams({ join: '1' })}>
             Join class
-          </Button>
-          <Button colorScheme="blue" onClick={() => setSearchParams({ create: '1' })}>
-            Create class
           </Button>
         </HStack>
       </Flex>
@@ -366,16 +528,15 @@ export default function Dashboard() {
                 <EmptyState
                   icon="🏫"
                   title="No classes yet"
-                  description="Create a class if you teach, or join one with the code your teacher shared."
+                  description={
+                    mayCreateClass
+                      ? 'Use Create in the header if you teach, or join one with the code your teacher shared.'
+                      : 'Join one with the code your teacher shared.'
+                  }
                   action={
-                    <HStack>
-                      <Button size="sm" variant="outline" onClick={() => setSearchParams({ join: '1' })}>
-                        Join a class
-                      </Button>
-                      <Button size="sm" colorScheme="blue" onClick={() => setSearchParams({ create: '1' })}>
-                        Create a class
-                      </Button>
-                    </HStack>
+                    <Button size="sm" variant="outline" onClick={() => setSearchParams({ join: '1' })}>
+                      Join a class
+                    </Button>
                   }
                 />
               ) : (

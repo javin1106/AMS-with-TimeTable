@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useLocation, useParams, useNavigate } from 'react-router-dom';
 import './navbar.css';
+import { loginPathFor } from '../../../authRedirect';
 // import jwt from 'jsonwebtoken';
 import aim2CrackLogo from '../../assets/images/navbar/Aim2Crack-logo.png';
 
@@ -57,7 +58,9 @@ useEffect(() => {
     const checkLoginStatus = async () => {
       if (!token) {
         // No token, navigate to login
-        navigate('/login',{state:{from: location.pathname}});
+        // The `from` goes in the URL rather than router state: the login form
+        // finishes with a full page load, which drops state but keeps the query.
+        navigate(loginPathFor(location), { replace: true });
         // setTokenState(false);
       } else {
         // Token found, set tokenState to true

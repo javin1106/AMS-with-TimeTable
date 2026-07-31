@@ -113,6 +113,28 @@ const prepareQuestions = (input, sections) => {
   });
 };
 
+/**
+ * Keeps the two timing methods exclusive, whatever a client sends.
+ *
+ * Per-question timers are only enforceable when the server hands out one
+ * question at a time (the all-at-once page runs a single paper clock, and
+ * `questionDeadline` is called with no question there), so an all-at-once quiz
+ * always falls back to the whole-paper clock. Mutate the merged settings rather
+ * than the request body, so a partial update is judged on the end state.
+ */
+const normaliseTiming = (settings) => {
+  if (settings.deliveryMode !== "one_at_a_time") settings.perQuestionTiming = false;
+  if (settings.perQuestionTiming) {
+    settings.timeLimitMinutes = 0;
+    // Backtracking is only offered under the whole-paper clock: re-serving a
+    // question restamps `currentServedAt`, so a student could farm a fresh
+    // countdown by stepping back and forward again.
+    settings.allowBacktracking = false;
+  }
+  settings.defaultQuestionSec = Math.max(0, Math.min(Number(settings.defaultQuestionSec) || 0, 7200));
+  return settings;
+};
+
 const prepareSections = (input) =>
   (Array.isArray(input) ? input : []).map((section, index) => ({
     _id: section._id || undefined,
@@ -190,6 +212,7 @@ exports.createQuiz = async (req, res) => {
     createdByName: req.lmUser.name,
   });
   if (req.body.settings) Object.assign(quiz.settings, req.body.settings);
+  normaliseTiming(quiz.settings);
   await quiz.save();
   return res.status(201).json(quiz);
 };
@@ -274,6 +297,7 @@ exports.updateQuiz = async (req, res) => {
     quiz.questions = prepareQuestions(req.body.questions, quiz.sections);
   }
   if (req.body.settings) Object.assign(quiz.settings, req.body.settings);
+  normaliseTiming(quiz.settings);
 
   quiz.updated_at = new Date();
   await quiz.save();
@@ -358,12 +382,13 @@ exports.publishQuiz = async (req, res) => {
   }
 
   // A per-question-timed paper with a question that has no clock would hang the
-  // student on that question forever.
+  // student on that question forever — and with the whole-paper clock now held
+  // at 0 in this mode, there is no fallback to catch it.
   if (quiz.settings.perQuestionTiming) {
     const untimed = quiz.questions.filter((question) => !question.timeLimitSec);
-    if (untimed.length && !quiz.settings.timeLimitMinutes) {
+    if (untimed.length) {
       return res.status(400).json({
-        message: `Per-question timing is on but ${untimed.length} question(s) have no time limit. Set one on each, or set an overall time limit as a fallback.`,
+        message: `Per-question timing is on but ${untimed.length} question(s) have no time limit. Set a time on each question, or switch to a single timer for the whole paper.`,
       });
     }
   }

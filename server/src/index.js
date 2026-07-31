@@ -86,7 +86,10 @@ app.use(
     ], // Change this to your allowed origins or '*' to allow all origins
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
     optionsSuccessStatus: 204,
-    allowedHeaders: "Content-Type, Authorization",
+    // X-Short-Guest carries a live Short's guest identity for participants with
+    // no account. Omitting it here makes the browser fail the preflight, so an
+    // open Short would be unjoinable from any deployed origin.
+    allowedHeaders: "Content-Type, Authorization, X-Short-Guest",
     credentials: true, // Set to true if you need to allow credentials (e.g., cookies)
   })
 );

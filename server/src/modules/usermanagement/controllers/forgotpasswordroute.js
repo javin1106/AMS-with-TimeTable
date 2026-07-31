@@ -9,10 +9,18 @@ const mailSender = require("../../mailsender");
 const path = require("path");
 const ejsTemplatePath = path.join(__dirname, "otpbody.ejs");
 console.log(ejsTemplatePath);
+
+// Addresses are stored lowercased (accounts provisioned by a teacher always
+// are), but people re-type them however they like. Match case-insensitively so
+// "Hari@nitj.ac.in" still finds the account — the reset step already does the
+// same, and without this an invitee could never get past "User not exists".
+const emailMatcher = (email) =>
+  new RegExp(`^${String(email).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+
 async function forgotPassword(req, res) {
   try {
     const email = String(req.body.email || "").trim();
-    const checkuser = await User.findOne({ email: email });
+    const checkuser = await User.findOne({ email: emailMatcher(email) });
     if (!checkuser) {
       console.log("User not exists");
       return res.status(200).json({
@@ -39,7 +47,7 @@ async function forgotPassword(req, res) {
 
 const sendOTP = async (email) => {
   try {
-    const checkuser = await User.findOne({ email: email });
+    const checkuser = await User.findOne({ email: emailMatcher(email) });
     if (!checkuser) {
       console.log("User not exists");
       return {

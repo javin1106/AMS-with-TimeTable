@@ -1,4 +1,6 @@
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 
 const LmShort = require('../models/lmShort');
 const LmShortSession = require('../models/lmShortSession');
@@ -67,6 +69,103 @@ async function settleExpiredSlide(session, short) {
   return session;
 }
 
+/* ─────────────────────────── guest participants ───────────────────────── */
+
+// A guest's identity for the length of one session. Signed rather than stored,
+// so a phone that reloads mid-deck keeps its answers without the server holding
+// a session table — and so nobody can hand back somebody else's participant id
+// and overwrite their answers.
+const GUEST_TOKEN_TTL = '8h';
+const GUEST_TOKEN_KIND = 'lm_short_guest';
+const GUEST_NAME_MAX = 60;
+const GUEST_HEADER = 'X-Short-Guest';
+
+const signGuestToken = (sessionId, participantId, name) =>
+  jwt.sign(
+    { kind: GUEST_TOKEN_KIND, sid: String(sessionId), pid: String(participantId), name },
+    process.env.JWT_SECRET,
+    { expiresIn: GUEST_TOKEN_TTL },
+  );
+
+/** The guest this request carries a token for, if it is valid *for this session*. */
+const readGuestToken = (req, sessionId) => {
+  const raw = req.get(GUEST_HEADER);
+  if (!raw) return null;
+  try {
+    const decoded = jwt.verify(raw, process.env.JWT_SECRET);
+    if (decoded.kind !== GUEST_TOKEN_KIND) return null;
+    // Scoped to one session: a token from this morning's lecture is not a way
+    // into this afternoon's.
+    if (String(decoded.sid) !== String(sessionId)) return null;
+    return { id: String(decoded.pid), name: decoded.name || 'Guest' };
+  } catch {
+    return null;
+  }
+};
+
+const guestsAllowedOn = (short) => short.settings?.requireLogin === false;
+
+// Forwards `code` alongside the message: the join screen branches on it to
+// decide between sending the visitor to log in and merely asking for a name.
+// The internal `status` field stays out of the body.
+const sendParticipantError = (res, error) =>
+  res.status(error.status).json({
+    message: error.message,
+    ...(error.code ? { code: error.code } : {}),
+  });
+
+/**
+ * Who is answering, and whether they are allowed to.
+ *
+ * Three ways in, in order of standing:
+ *   - signed in and on the class roll   → a student; scores can be graded
+ *   - signed in but not enrolled        → allowed only on an open deck, as a guest
+ *   - not signed in, holding a token    → allowed only on an open deck, as a guest
+ *
+ * `isGuest` means "not on the roll of the class running this", which is exactly
+ * the condition under which a score must not reach the gradebook.
+ */
+const resolveParticipant = async (req, session, short) => {
+  if (req.lmUser) {
+    const membership = await LmMembership.findOne({
+      classId: session.classId,
+      userId: req.lmUser.id,
+      status: 'active',
+    }).lean();
+
+    if (!membership && !guestsAllowedOn(short)) {
+      return { error: { status: 403, message: 'You are not a member of the class running this short.' } };
+    }
+
+    return {
+      identity: {
+        id: String(req.lmUser.id),
+        name: req.lmUser.name,
+        email: req.lmUser.email || '',
+        rollNumber: membership?.rollNumber || '',
+        isGuest: !membership,
+      },
+    };
+  }
+
+  if (!guestsAllowedOn(short)) {
+    return {
+      error: { status: 401, message: 'Sign in to join this short.', code: 'LOGIN_REQUIRED' },
+    };
+  }
+
+  const guest = readGuestToken(req, session._id);
+  if (!guest) {
+    return {
+      error: { status: 401, message: 'Enter the code again to rejoin this short.', code: 'GUEST_TOKEN_REQUIRED' },
+    };
+  }
+
+  return {
+    identity: { id: guest.id, name: guest.name, email: '', rollNumber: '', isGuest: true },
+  };
+};
+
 /** What the presenter's screen needs. */
 const presenterView = (short, session, slideResults, responseCount) => {
   // Derived rather than read straight off the row: a slide whose countdown has
@@ -122,29 +221,43 @@ const participantView = (short, session, slideResults, myResponse) => {
   // the moment the countdown passes, without waiting on the presenter.
   const slideState = agg.effectiveSlideState(session, short);
   const revealed = slideState === 'revealed';
+  // A slide the presenter has not opened yet is withheld rather than merely
+  // hidden by the phone: the question is on the projector seconds later anyway,
+  // but one student reading it early out of the network tab is an unfair head
+  // start on a graded short.
+  const pending = slideState === 'waiting';
 
   return {
     sessionId: session._id,
     title: short.title,
+    description: short.description,
     status: session.status,
     revision: session.revision,
     slideIndex: session.currentSlideIndex,
     slideCount: short.slides.length,
     slideState,
     slideDeadline: slideState === 'open' ? session.slideDeadline : null,
+    // Shown on the hold screen so a student can tell they joined the right room.
+    presentedByName: session.presentedByName,
+    participantCount: (session.participants || []).length,
     slide: slide
       ? {
           _id: slide._id,
           type: slide.type,
-          question: slide.question,
-          options: slide.options,
-          timeLimitSec: slide.timeLimitSec,
-          scaleMin: slide.scaleMin,
-          scaleMax: slide.scaleMax,
-          scaleMinLabel: slide.scaleMinLabel,
-          scaleMaxLabel: slide.scaleMaxLabel,
-          maxWords: slide.maxWords,
-          maxLength: slide.maxLength,
+          pending,
+          ...(pending
+            ? {}
+            : {
+                question: slide.question,
+                options: slide.options,
+                timeLimitSec: slide.timeLimitSec,
+                scaleMin: slide.scaleMin,
+                scaleMax: slide.scaleMax,
+                scaleMinLabel: slide.scaleMinLabel,
+                scaleMaxLabel: slide.scaleMaxLabel,
+                maxWords: slide.maxWords,
+                maxLength: slide.maxLength,
+              }),
         }
       : null,
     // Only sent when the teacher chose to mirror the tally to phones, or once
@@ -545,7 +658,10 @@ exports.endSession = async (req, res) => {
 
       const now = new Date();
       for (const entry of rollup.leaderboard) {
-        if (!entry.userId) continue;
+        // Guests have no place in the gradebook: a signed-out visitor's id
+        // refs no user, and an enrolled-elsewhere account is not a student of
+        // this class. Their answers still count in the room's results.
+        if (!entry.userId || entry.isGuest) continue;
         // eslint-disable-next-line no-await-in-loop
         await LmSubmission.findOneAndUpdate(
           { courseworkId: coursework._id, studentId: entry.userId },
@@ -576,24 +692,16 @@ exports.endSession = async (req, res) => {
 /* ───────────────────────── joining (participant) ──────────────────────── */
 
 /**
- * Resolves a join code to a live session. Class membership is enforced here
- * rather than by the router, because the participant only has a code — they do
- * not know the classId yet.
+ * Resolves a join code to a live session. Who may join is settled here rather
+ * than by the router, because the participant only has a code — they do not
+ * know the classId, and the deck's own settings decide whether a sign-in is
+ * needed at all.
  */
 exports.joinByCode = async (req, res) => {
   const code = String(req.params.code || '').trim();
   const session = await LmShortSession.findOne({ joinCode: code, status: 'live' });
   if (!session) {
     return res.status(404).json({ message: 'No live short matches that code.', code: 'NO_SESSION' });
-  }
-
-  const membership = await LmMembership.findOne({
-    classId: session.classId,
-    userId: req.lmUser.id,
-    status: 'active',
-  }).lean();
-  if (!membership) {
-    return res.status(403).json({ message: 'You are not a member of the class running this short.' });
   }
 
   const short = await LmShort.findById(session.shortId);
@@ -603,15 +711,50 @@ exports.joinByCode = async (req, res) => {
     return res.status(403).json({ message: 'This short has already moved on and is not accepting new joiners.' });
   }
 
+  let identity;
+  let guestToken = null;
+
+  if (req.lmUser || !guestsAllowedOn(short)) {
+    // Signed in, or a deck that insists on it — the standing rules apply and
+    // produce the 401/403 when they are not met.
+    const resolved = await resolveParticipant(req, session, short);
+    if (resolved.error) {
+      return sendParticipantError(res, resolved.error);
+    }
+    identity = resolved.identity;
+  } else {
+    // An open deck, joined by somebody with no account. A phone that still
+    // holds a valid token for *this* session keeps the identity it had, so a
+    // re-join after a reload does not orphan the answers already given.
+    const existing = readGuestToken(req, session._id);
+    const name = String(req.body?.name || '').trim().slice(0, GUEST_NAME_MAX);
+    if (!existing && !name) {
+      return res.status(400).json({
+        message: 'Enter the name the room should see.',
+        code: 'NAME_REQUIRED',
+      });
+    }
+    const participantId = existing ? existing.id : new mongoose.Types.ObjectId();
+    identity = {
+      id: String(participantId),
+      name: name || existing.name,
+      email: '',
+      rollNumber: '',
+      isGuest: true,
+    };
+    guestToken = signGuestToken(session._id, participantId, identity.name);
+  }
+
   const already = (session.participants || []).some(
-    (participant) => String(participant.userId) === req.lmUser.id,
+    (participant) => String(participant.userId) === String(identity.id),
   );
   if (!already) {
     session.participants.push({
-      userId: req.lmUser.id,
-      name: req.lmUser.name,
-      email: req.lmUser.email,
-      rollNumber: membership.rollNumber || '',
+      userId: identity.id,
+      name: identity.name,
+      email: identity.email,
+      rollNumber: identity.rollNumber,
+      isGuest: identity.isGuest,
     });
     touchRevision(session);
     await session.save();
@@ -622,6 +765,11 @@ exports.joinByCode = async (req, res) => {
     classId: session.classId,
     title: short.title,
     joined: true,
+    displayName: identity.name,
+    isGuest: identity.isGuest,
+    // Only ever issued to a signed-out joiner; the client keeps it for the rest
+    // of the session and sends it back on every participant call.
+    ...(guestToken ? { guestToken } : {}),
   });
 };
 
@@ -629,21 +777,18 @@ const loadSessionForParticipant = async (req) => {
   const session = await LmShortSession.findById(req.params.sessionId);
   if (!session) return { error: { status: 404, message: 'Session not found.' } };
 
-  const membership = await LmMembership.findOne({
-    classId: session.classId,
-    userId: req.lmUser.id,
-    status: 'active',
-  }).lean();
-  if (!membership) return { error: { status: 403, message: 'Forbidden' } };
-
   const short = await LmShort.findById(session.shortId);
   if (!short) return { error: { status: 404, message: 'Short not found.' } };
-  return { session, short, membership };
+
+  const resolved = await resolveParticipant(req, session, short);
+  if (resolved.error) return { error: resolved.error };
+
+  return { session, short, identity: resolved.identity };
 };
 
 exports.getParticipantState = async (req, res) => {
-  const { session, short, error } = await loadSessionForParticipant(req);
-  if (error) return res.status(error.status).json({ message: error.message });
+  const { session, short, identity, error } = await loadSessionForParticipant(req);
+  if (error) return sendParticipantError(res, error);
 
   await settleExpiredSlide(session, short);
   const slide = slideOf(short, session.currentSlideIndex);
@@ -653,7 +798,7 @@ exports.getParticipantState = async (req, res) => {
       ? LmShortResponse.findOne({
           sessionId: session._id,
           slideId: slide._id,
-          participantId: req.lmUser.id,
+          participantId: identity.id,
         }).lean()
       : null,
   ]);
@@ -662,8 +807,8 @@ exports.getParticipantState = async (req, res) => {
 };
 
 exports.submitResponse = async (req, res) => {
-  const { session, short, membership, error } = await loadSessionForParticipant(req);
-  if (error) return res.status(error.status).json({ message: error.message });
+  const { session, short, identity, error } = await loadSessionForParticipant(req);
+  if (error) return sendParticipantError(res, error);
 
   if (session.status !== 'live') return res.status(400).json({ message: 'This short has ended.' });
   if (session.slideState !== 'open') {
@@ -691,7 +836,7 @@ exports.submitResponse = async (req, res) => {
   const existing = await LmShortResponse.findOne({
     sessionId: session._id,
     slideId: slide._id,
-    participantId: req.lmUser.id,
+    participantId: identity.id,
   });
   if (existing && short.settings?.allowChangeAnswer === false) {
     return res.status(400).json({ message: 'You have already answered this slide.', code: 'ALREADY_ANSWERED' });
@@ -703,15 +848,16 @@ exports.submitResponse = async (req, res) => {
     : null;
 
   await LmShortResponse.findOneAndUpdate(
-    { sessionId: session._id, slideId: slide._id, participantId: req.lmUser.id },
+    { sessionId: session._id, slideId: slide._id, participantId: identity.id },
     {
       $set: {
         shortId: short._id,
         classId: session.classId,
         slideIndex: session.currentSlideIndex,
         slideType: slide.type,
-        participantName: req.lmUser.name,
-        rollNumber: membership.rollNumber || '',
+        participantName: identity.name,
+        rollNumber: identity.rollNumber,
+        isGuest: identity.isGuest,
         selected: normalised.selected,
         text: normalised.text,
         number: normalised.number,
@@ -727,7 +873,7 @@ exports.submitResponse = async (req, res) => {
   // Keep the presence timestamp fresh so the presenter's participant count
   // reflects who is actually in the room.
   await LmShortSession.updateOne(
-    { _id: session._id, 'participants.userId': req.lmUser.id },
+    { _id: session._id, 'participants.userId': identity.id },
     { $set: { 'participants.$.lastSeenAt': new Date() } },
   );
 
@@ -838,14 +984,15 @@ exports.streamPresenter = async (req, res) => {
 };
 
 exports.streamParticipant = async (req, res) => {
-  // Membership is checked once up front rather than on every tick — the class
+  // Standing is checked once up front rather than on every tick — the class
   // roster is not going to change mid-slide, and re-querying it 40 times a
   // minute per student would be the most expensive part of the loop.
-  const { session, short, error } = await loadSessionForParticipant(req);
-  if (error) return res.status(error.status).json({ message: error.message });
+  const { session, short, identity, error } = await loadSessionForParticipant(req);
+  if (error) return sendParticipantError(res, error);
 
   const sessionId = session._id;
   const shortId = short._id;
+  const participantId = identity.id;
 
   await streamLoop(req, res, async () => {
     const live = await LmShortSession.findById(sessionId);
@@ -862,7 +1009,7 @@ exports.streamParticipant = async (req, res) => {
         ? LmShortResponse.findOne({
             sessionId: live._id,
             slideId: slide._id,
-            participantId: req.lmUser.id,
+            participantId,
           }).lean()
         : null,
     ]);
@@ -965,7 +1112,10 @@ exports.exportSessionCsv = async (req, res) => {
     lines.push(
       [
         entry.rollNumber,
-        entry.name,
+        // Marked inline rather than in a column of its own: a guest row has no
+        // roll number or email, which on its own reads like a student whose
+        // details are simply missing.
+        entry.isGuest ? `${entry.name} (guest)` : entry.name,
         entry.email,
         entry.answered,
         entry.correct,

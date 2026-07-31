@@ -44,16 +44,76 @@ const escapeHtml = (value) =>
     "'": '&#39;',
   }[ch]));
 
-// `body` may already be trusted HTML (the invite mail composes its own), so
-// callers pass pre-escaped content; `title` is always plain and is escaped here.
-const emailShell = (title, body, link) => `
-  <div style="font-family:Segoe UI,Arial,sans-serif;max-width:560px;margin:auto">
-    <h2 style="color:#1967d2;margin-bottom:4px">${escapeHtml(title)}</h2>
-    <p style="color:#3c4043;line-height:1.6">${body}</p>
-    ${link ? `<p><a href="${escapeHtml(link)}" style="color:#1967d2">Open in XCEED Learning</a></p>` : ""}
-    <hr style="border:none;border-top:1px solid #e0e0e0;margin:24px 0" />
-    <p style="color:#80868b;font-size:12px">XCEED Learning Module — NIT Jalandhar</p>
-  </div>`;
+// Links in a notification are stored as in-app paths ("/learning/class/…"),
+// which a mail client cannot resolve. Absolutise them against the deployed
+// frontend, the same base welcomeMailer falls back to.
+const frontendBase = (base) =>
+  String(base || process.env.FRONTEND_URL || "https://xceed.nitj.ac.in").replace(/\/+$/, "");
+
+const absoluteLink = (link, base) => {
+  const value = String(link || "");
+  if (!value) return "";
+  if (/^https?:\/\//i.test(value)) return value;
+  return `${frontendBase(base)}/${value.replace(/^\/+/, "")}`;
+};
+
+/**
+ * The platform's mail frame — same 480px card, teal banner, "Dear User,"
+ * greeting and footer as the forgot-password OTP mail (otpbody.ejs) and the
+ * welcome mail (usermanagement/welcomeMailer). Learning module mail used to
+ * carry its own lighter markup, which read as coming from somewhere else
+ * entirely.
+ *
+ * `banner` defaults to the platform wordmark the other mails use; the invite
+ * greets the person instead, since for many of them it is the first XCEED
+ * Learning mail they have ever received.
+ *
+ * `bodyHtml` is trusted HTML — every caller escapes its own interpolations.
+ */
+const emailShell = ({
+  heading,
+  bodyHtml,
+  banner = "XCEED — NIT Jalandhar",
+  ctaLabel = "",
+  ctaHref = "",
+  chipLabel = "",
+  chip = "",
+  footnote = "",
+}) => `
+<div style="background:#f4f6fb;padding:32px 16px;font-family:Arial,Helvetica,sans-serif;">
+  <div style="max-width:480px;margin:0 auto;background:#ffffff;border-radius:12px;border:1px solid #e4e8f5;overflow:hidden;">
+    <div style="background:#0e7490;padding:20px 28px;">
+      <div style="color:#ffffff;font-size:18px;font-weight:700;letter-spacing:.02em;">${escapeHtml(banner)}</div>
+    </div>
+    <div style="padding:28px;">
+      <h1 style="margin:0 0 12px;font-size:20px;color:#1a1f3c;">${escapeHtml(heading)}</h1>
+      <p style="margin:0 0 8px;font-size:14px;color:#444;line-height:1.6;">Dear User,</p>
+      <div style="margin:0 0 20px;font-size:14px;color:#444;line-height:1.6;">${bodyHtml}</div>
+      ${
+        ctaHref
+          ? `<div style="text-align:center;margin:0 0 20px;">
+        <a href="${escapeHtml(ctaHref)}"
+           style="display:inline-block;padding:12px 32px;background:#0e7490;color:#ffffff;
+                  text-decoration:none;border-radius:8px;font-size:14px;font-weight:600;">
+          ${escapeHtml(ctaLabel || "Open in XCEED")}</a>
+      </div>`
+          : ""
+      }
+      ${
+        chip
+          ? `${chipLabel ? `<p style="margin:0 0 8px;font-size:14px;color:#444;line-height:1.6;text-align:center;">${escapeHtml(chipLabel)}</p>` : ""}
+      <div style="text-align:center;margin:0 0 20px;">
+        <span style="display:inline-block;background:#f0f9ff;border:1px dashed #0e7490;border-radius:10px;padding:12px 28px;font-size:22px;font-weight:700;letter-spacing:6px;color:#0e7490;font-family:'Courier New',monospace;">${escapeHtml(chip)}</span>
+      </div>`
+          : ""
+      }
+      ${footnote ? `<p style="margin:0;font-size:12px;color:#888;line-height:1.6;">${footnote}</p>` : ""}
+    </div>
+    <div style="padding:14px 28px;border-top:1px solid #e4e8f5;background:#fafbfe;">
+      <span style="font-size:11px;color:#999;">Automated email from the XCEED platform — please do not reply.</span>
+    </div>
+  </div>
+</div>`;
 
 /**
  * Fan a notification out to class members.
@@ -124,10 +184,17 @@ async function notifyClass(opts) {
     if (email && sendMail && klass.settings?.emailNotifications && emailAddresses.length) {
       // Digest-style single send rather than one mail per member — the SMTP
       // pool in mailer.js is shared with the rest of the platform.
+      const href = absoluteLink(link);
       await sendMail(
         emailAddresses.join(","),
         `[${klass.name}] ${title}`,
-        emailShell(title, escapeHtml(plainBody), link),
+        emailShell({
+          heading: title,
+          bodyHtml: `<p style="margin:0;">${escapeHtml(plainBody)}</p>`,
+          ctaLabel: "Open in XCEED Learning",
+          ctaHref: href,
+          footnote: `Posted in <strong>${escapeHtml(klass.name)}</strong>. You can turn these emails off in the class settings.`,
+        }),
       ).catch(
         (err) => console.error("[LearningModule] notification mail failed:", err.message),
       );
@@ -156,17 +223,66 @@ async function notifyUser({ userId, klass, type, title, body = "", link = "", ac
   }
 }
 
-async function sendInviteMail(to, klass, inviterName) {
-  if (!sendMail || !to) return;
-  const title = `You have been added to ${klass.name}`;
-  // A class name, section and the inviter's name are all user-supplied, so they
-  // are escaped before landing in the email markup.
-  const body = `${escapeHtml(inviterName)} added you to the class <b>${escapeHtml(klass.name)}</b>${
-    klass.section ? ` (${escapeHtml(klass.section)})` : ""
-  }. Sign in to XCEED and open the Learning module, or join manually with the class code <b>${escapeHtml(klass.code)}</b>.`;
-  await sendMail(to, `[XCEED Learning] ${title}`, emailShell(title, body, "")).catch((err) =>
-    console.error("[LearningModule] invite mail failed:", err.message),
-  );
+/**
+ * Mail sent to someone a teacher just added to a class.
+ *
+ * Resolves to `true` only when the mail actually left, so the invite response
+ * can tell the teacher which addresses were not reached — this used to swallow
+ * every failure and report a clean success.
+ *
+ * @param {string} to
+ * @param {object} klass
+ * @param {string} inviterName
+ * @param {string} [base]  frontend origin, for the "Open the class" link
+ * @param {boolean} [enrolled]
+ *        True when the recipient already has a platform account and was
+ *        enrolled as an active member in this same request. Such a person has
+ *        nothing to join manually, so the class code is omitted — it only
+ *        raises "do I need to enter this?".
+ *
+ *        False means the invite is waiting on an address with no account yet.
+ *        `claimInvites` matches on email, so it enrols them automatically *if*
+ *        they register with this same address; the code is the fallback for
+ *        when they sign up under a different one, and is the only case where
+ *        it earns its place.
+ * @returns {Promise<boolean>}
+ */
+async function sendInviteMail(to, klass, inviterName, base, enrolled = false) {
+  if (!sendMail || !to) return false;
+
+  const heading = `You have been added to ${klass.name}`;
+  // The class name, section, code and the inviter's name are all user-supplied,
+  // so they are escaped before landing in the email markup.
+  const bodyHtml = `<p style="margin:0 0 12px;">${escapeHtml(inviterName || "A teacher")} added you to the class
+      <strong>${escapeHtml(klass.name)}</strong>${klass.section ? ` (${escapeHtml(klass.section)})` : ""}
+      on the XCEED platform (NIT Jalandhar).</p>
+    <p style="margin:0;">Sign in and open the <strong>Learning</strong> module to see the class, its
+      classwork and its schedule.</p>`;
+
+  const showCode = !enrolled && Boolean(klass.code);
+
+  try {
+    await sendMail(
+      to,
+      `${heading} — XCEED NITJ`,
+      emailShell({
+        heading,
+        bodyHtml,
+        banner: "Welcome to XCEED Learning!",
+        ctaLabel: "Open the class",
+        ctaHref: absoluteLink(`/learning/class/${klass._id}`, base),
+        chipLabel: showCode ? "Signing up with a different address? Join with this class code:" : "",
+        chip: showCode ? klass.code : "",
+        footnote: enrolled
+          ? ""
+          : "If you do not have an XCEED account for this address yet, the class will be waiting for you the first time you sign in with it.",
+      }),
+    );
+    return true;
+  } catch (err) {
+    console.error("[LearningModule] invite mail failed:", to, err.message);
+    return false;
+  }
 }
 
 module.exports = { notifyClass, notifyUser, sendInviteMail };

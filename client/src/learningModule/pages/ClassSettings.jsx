@@ -9,7 +9,6 @@ import {
   FormControl,
   FormHelperText,
   FormLabel,
-  HStack,
   Input,
   Select,
   SimpleGrid,
@@ -19,7 +18,7 @@ import {
   useToast,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
-import { SectionCard } from '../components/common';
+import { ClassCardPreview, ColorPicker, SectionCard } from '../components/common';
 import { CLASS_COLORS } from '../format';
 
 export default function ClassSettings() {
@@ -139,25 +138,24 @@ export default function ClassSettings() {
           <FormLabel fontSize="sm">Meeting link</FormLabel>
           <Input value={form.meetLink} onChange={set('meetLink')} placeholder="https://meet.google.com/…" />
         </FormControl>
-        <FormControl>
+        <FormControl mb={4}>
           <FormLabel fontSize="sm">Theme colour</FormLabel>
-          <HStack>
-            {CLASS_COLORS.map((color) => (
-              <Box
-                key={color}
-                as="button"
-                aria-label={`Use colour ${color}`}
-                w="30px"
-                h="30px"
-                borderRadius="full"
-                bg={color}
-                borderWidth={form.coverColor === color ? '3px' : '1px'}
-                borderColor={form.coverColor === color ? 'gray.800' : 'gray.200'}
-                onClick={() => setForm((prev) => ({ ...prev, coverColor: color }))}
-              />
-            ))}
-          </HStack>
+          <ColorPicker
+            value={form.coverColor}
+            options={CLASS_COLORS}
+            onChange={(color) => setForm((prev) => ({ ...prev, coverColor: color }))}
+          />
         </FormControl>
+        <Box maxW="360px">
+          <Text fontSize="xs" color="gray.500" mb={2}>
+            Preview
+          </Text>
+          <ClassCardPreview
+            color={form.coverColor}
+            title={form.name || 'Class name'}
+            subtitle={[form.section, form.subject].filter(Boolean).join(' · ')}
+          />
+        </Box>
       </SectionCard>
 
       <SectionCard title="Class code" subtitle="Students use this to join." mb={4}>
