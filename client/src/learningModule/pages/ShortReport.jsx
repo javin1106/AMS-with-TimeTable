@@ -159,7 +159,16 @@ export default function ShortReport() {
               {leaderboard.map((entry, index) => (
                 <Tr key={String(entry.userId) + index} opacity={entry.answered ? 1 : 0.5}>
                   <Td>{index + 1}</Td>
-                  <Td>{entry.name || entry.email || '—'}</Td>
+                  <Td>
+                    {entry.name || entry.email || '—'}
+                    {/* Without this a guest reads as a student whose roll
+                        number and email happen to be missing. */}
+                    {entry.isGuest ? (
+                      <Badge ml={2} colorScheme="orange" fontSize="0.65rem">
+                        guest
+                      </Badge>
+                    ) : null}
+                  </Td>
                   <Td>{entry.rollNumber || '—'}</Td>
                   <Td isNumeric>{entry.answered}</Td>
                   {hasGradableSlides && <Td isNumeric>{entry.correct}</Td>}

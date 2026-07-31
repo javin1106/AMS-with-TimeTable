@@ -216,6 +216,14 @@ export default function ShortPresent() {
               <Text fontSize="sm" opacity={0.75}>
                 {joined} {joined === 1 ? 'person' : 'people'} joined · {answered} answered this slide
               </Text>
+              {/* The teacher set this when authoring, possibly weeks ago. It
+                  changes who can walk in, so it belongs next to the code they
+                  are about to put on a projector. */}
+              {state.settings?.requireLogin === false ? (
+                <Badge colorScheme="orange" mt={1}>
+                  Open — anyone with the code can join
+                </Badge>
+              ) : null}
             </Box>
           </HStack>
 

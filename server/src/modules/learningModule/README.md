@@ -63,6 +63,21 @@ Two layers, deliberately separate:
   student in a colleague's class, and a `admin`/`iams-admin` gets an implicit
   teacher view for support without being enrolled.
 
+When `loadClass` turns somebody away it says *which* of the two is missing,
+because the fixes are unrelated. The 403 carries a `code` the UI keys off:
+
+| `code` | Meaning | What the user is told to do |
+| --- | --- | --- |
+| `ROLE_REQUIRED` | The account holds none of the student/teaching/admin platform roles | Ask an administrator for the right role |
+| `NOT_ENROLLED` | The role is fine; they are not on this class's roll | Ask the teacher to add them, or join with the class code |
+| `JOIN_PENDING` | They used the join code on a class that requires approval | Wait for the teacher to accept |
+
+The role check runs *after* the membership lookup, never before: a teacher may
+invite an existing account without granting it `STUDENT`
+(`inviteMembers`'s `grantRoleToExisting`), so an active membership is always
+sufficient on its own. The platform role only explains a refusal — it never
+causes one.
+
 ## Feature set
 
 **Classes** — create, edit, archive/restore, delete; unguessable 7-character
@@ -187,17 +202,31 @@ be run from this module. Everything below is per-quiz.
 | `one_at_a_time` | the server hands out one question at a time and keeps the cursor |
 
 In `one_at_a_time`, `allowBacktracking` decides whether a delivered question can
-be revisited (off = placement-test behaviour). The cursor, the dealt paper and
-every answer live on the attempt document, so **a refresh, a crashed tab or a
-dropped connection resumes exactly where it left off** rather than restarting or
-losing the sitting.
+be revisited (off = placement-test behaviour). The teacher is only offered that
+choice **under the whole-paper clock** — re-serving a question restamps
+`currentServedAt`, so under per-question timers a student could farm a fresh
+countdown by stepping back and forward again. The controller forces it off for
+that combination whatever a client sends. In `all_at_once` the setting is moot:
+the whole paper is on one page, so navigation is free by construction.
+
+The cursor, the dealt paper and every answer live on the attempt document, so
+**a refresh, a crashed tab or a dropped connection resumes exactly where it left
+off** rather than restarting or losing the sitting.
 
 ### Timing
 
-- `perQuestionTiming` — each question gets its own countdown and auto-submits on
-  expiry; otherwise one clock covers the paper.
-- `timeLimitMinutes` — whole-paper limit, also the fallback for any question
-  without its own clock.
+The two methods are **exclusive**, and which one applies is asked when the quiz is
+created rather than left to be discovered in the editor — a student watching two
+countdowns cannot tell which will end their sitting.
+
+- `perQuestionTiming` — each question gets its own countdown and auto-advances on
+  expiry; otherwise one clock covers the paper. Only enforceable under
+  `one_at_a_time`, so the controller clears it for an all-at-once paper, and the
+  editor disables the per-question boxes whenever it is off.
+- `timeLimitMinutes` — whole-paper limit. Held at 0 while `perQuestionTiming` is
+  on, which is why publishing then requires a time on *every* question.
+- `defaultQuestionSec` — seconds stamped on each newly added question, chosen
+  once at creation so the teacher is not asked again per question.
 - `marginMinutes` — late-entry window. The test stays open for those already
   sitting it while turning away anyone arriving after it; that separation is the
   whole point of the setting.
@@ -205,9 +234,9 @@ losing the sitting.
 - `resultReleaseAt` — scores stay hidden after submitting until this moment, so a
   cohort is released together.
 
-The effective deadline for a question is the *earliest* of its own clock, the
-paper clock and the close time — and it is computed server-side from when the
-question was served, so reloading cannot reset it.
+The effective deadline for a question is the *earliest* of whichever clock is in
+force and the close time — and it is computed server-side from when the question
+was served, so reloading cannot reset it.
 
 ### Question types and marking
 

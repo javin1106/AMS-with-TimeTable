@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { shortGuest } from '../api/lmApi';
+
 /**
  * Subscribes to a Shorts SSE endpoint and hands back the latest state.
  *
@@ -91,6 +93,10 @@ export default function useShortStream(url, { fetchState, enabled = true } = {})
       const headers = { Accept: 'text/event-stream' };
       const token = localStorage.getItem('token');
       if (token) headers.Authorization = `Bearer ${token}`;
+      // A guest watching an open Short has no account token — this is the whole
+      // of their identity, and without it the stream 401s and gives up.
+      const guestToken = shortGuest.token();
+      if (guestToken) headers['X-Short-Guest'] = guestToken;
 
       let response;
       try {

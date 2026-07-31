@@ -2,6 +2,7 @@ const express = require("express");
 
 const {
   authenticate,
+  authenticateOptional,
   requireClassCreator,
   loadClass,
   requireTeacher,
@@ -26,8 +27,22 @@ const timetableOptionsController = require("../controllers/timetableOptionsContr
 
 const router = express.Router();
 
-// Every endpoint in the module requires a signed-in platform user; per-class
-// authorisation is layered on top by loadClass/requireTeacher.
+// Shorts — the live participant side. These sit outside classRouter on purpose:
+// somebody joining from a phone has a six-digit code and nothing else, so there
+// is no classId to put in the path.
+//
+// They are also the module's only routes registered *above* the blanket
+// `authenticate` below, and they take the optional variant instead. Whether a
+// sign-in is required is a per-deck setting the teacher controls, and it cannot
+// be known until the join code has been resolved to a short — so the check
+// belongs in the controller, not in front of it.
+router.post("/shorts/join/:code", authenticateOptional, asyncRoute(shortsController.joinByCode));
+router.get("/shorts/live/:sessionId", authenticateOptional, asyncRoute(shortsController.getParticipantState));
+router.get("/shorts/live/:sessionId/stream", authenticateOptional, asyncRoute(shortsController.streamParticipant));
+router.post("/shorts/live/:sessionId/answer", authenticateOptional, asyncRoute(shortsController.submitResponse));
+
+// Every other endpoint in the module requires a signed-in platform user;
+// per-class authorisation is layered on top by loadClass/requireTeacher.
 router.use(authenticate);
 
 /* ─────────────────────── account-level (no classId) ───────────────────── */
@@ -54,15 +69,6 @@ router.get("/classes/all", asyncRoute(classController.listAllClasses));
 router.post("/join", asyncRoute(memberController.joinByCode));
 router.post("/claim-invites", asyncRoute(memberController.claimInvites));
 router.get("/preview/:code", asyncRoute(memberController.previewByCode));
-
-// Shorts — the live participant side. These sit outside classRouter on purpose:
-// somebody joining from a phone has a six-digit code and nothing else, so there
-// is no classId to put in the path. Class membership is checked inside the
-// controller once the code resolves to a session.
-router.post("/shorts/join/:code", asyncRoute(shortsController.joinByCode));
-router.get("/shorts/live/:sessionId", asyncRoute(shortsController.getParticipantState));
-router.get("/shorts/live/:sessionId/stream", asyncRoute(shortsController.streamParticipant));
-router.post("/shorts/live/:sessionId/answer", asyncRoute(shortsController.submitResponse));
 
 router.post(
   "/uploads",

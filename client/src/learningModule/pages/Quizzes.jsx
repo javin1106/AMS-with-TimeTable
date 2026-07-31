@@ -4,6 +4,7 @@ import {
   Badge,
   Box,
   Button,
+  Checkbox,
   Flex,
   FormControl,
   FormHelperText,
@@ -71,8 +72,28 @@ const PRESETS = {
   },
 };
 
+// The two clocks are exclusive, and the choice is made here rather than in the
+// editor: a teacher who has already typed times onto twenty questions should
+// never discover afterwards that only the paper clock was ever running.
+const TIMING = {
+  overall: {
+    label: 'One timer for the whole paper',
+    hint: 'Students see a single countdown and the test submits when it reaches zero.',
+    field: 'Time limit (minutes)',
+    placeholder: 'Leave blank for no limit',
+  },
+  per_question: {
+    label: 'A timer on each question',
+    hint: 'Each question gets its own countdown and moves on by itself. Questions are delivered one at a time, with no going back.',
+    field: 'Seconds per question',
+    placeholder: '60',
+  },
+};
+
 function CreateQuizModal({ isOpen, onClose, classId }) {
   const [mode, setMode] = useState('quiz');
+  const [timing, setTiming] = useState('overall');
+  const [allowBack, setAllowBack] = useState(false);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [timeLimit, setTimeLimit] = useState('');
@@ -80,8 +101,16 @@ function CreateQuizModal({ isOpen, onClose, classId }) {
   const navigate = useNavigate();
   const toast = useToast();
 
+  // Going back is only a decision to make when questions are handed out one at
+  // a time *and* one clock covers the paper. On a single-page quiz students can
+  // already move freely, and under per-question timers a revisit would restart
+  // that question's countdown — so there is nothing coherent to offer.
+  const canChooseBacktracking = mode === 'exam' && timing === 'overall';
+
   const reset = () => {
     setMode('quiz');
+    setTiming('overall');
+    setAllowBack(false);
     setTitle('');
     setDescription('');
     setTimeLimit('');
@@ -96,14 +125,30 @@ function CreateQuizModal({ isOpen, onClose, classId }) {
     if (!title.trim()) return;
     setSaving(true);
     try {
-      const minutes = Number(timeLimit);
+      const entered = Number(timeLimit);
+      const value = Number.isFinite(entered) && entered > 0 ? entered : 0;
+      // Per-question timers are only enforceable one question at a time, so
+      // choosing them settles the delivery mode too — the server holds the same
+      // rule, and a quiz that claimed both would run on the paper clock alone.
+      const timingSettings =
+        timing === 'per_question'
+          ? {
+              perQuestionTiming: true,
+              deliveryMode: 'one_at_a_time',
+              allowBacktracking: false,
+              timeLimitMinutes: 0,
+              defaultQuestionSec: value || 60,
+            }
+          : {
+              perQuestionTiming: false,
+              timeLimitMinutes: value,
+              defaultQuestionSec: 0,
+              ...(canChooseBacktracking ? { allowBacktracking: allowBack } : {}),
+            };
       const created = await lmApi.createQuiz(classId, {
         title: title.trim(),
         description: description.trim(),
-        settings: {
-          ...PRESETS[mode].settings,
-          timeLimitMinutes: Number.isFinite(minutes) && minutes > 0 ? minutes : 0,
-        },
+        settings: { ...PRESETS[mode].settings, ...timingSettings },
       });
       reset();
       onClose();
@@ -174,17 +219,76 @@ function CreateQuizModal({ isOpen, onClose, classId }) {
             <FormHelperText>Every one of these settings stays editable afterwards.</FormHelperText>
           </FormControl>
 
+          <FormControl mb={4}>
+            <FormLabel fontSize="sm">Timing</FormLabel>
+            <RadioGroup
+              value={timing}
+              // The number below changes unit with the mode, so a value typed
+              // for the other one must not carry over.
+              onChange={(value) => {
+                setTiming(value);
+                setTimeLimit('');
+              }}
+            >
+              <Stack spacing={3}>
+                {Object.entries(TIMING).map(([key, option]) => (
+                  <Box
+                    key={key}
+                    borderWidth="1px"
+                    borderColor={timing === key ? 'blue.400' : 'gray.200'}
+                    bg={timing === key ? 'blue.50' : 'white'}
+                    borderRadius="md"
+                    px={3}
+                    py={2}
+                  >
+                    <Radio value={key}>
+                      <Text fontSize="sm" fontWeight="600">
+                        {option.label}
+                      </Text>
+                      <Text fontSize="xs" color="gray.600">
+                        {option.hint}
+                      </Text>
+                    </Radio>
+                  </Box>
+                ))}
+              </Stack>
+            </RadioGroup>
+            <FormHelperText>
+              Only one clock ever runs. Pick per-question timing and the whole-paper limit is switched
+              off; pick a paper limit and the per-question boxes stay disabled.
+            </FormHelperText>
+          </FormControl>
+
           <FormControl>
-            <FormLabel fontSize="sm">Time limit (minutes)</FormLabel>
+            <FormLabel fontSize="sm">{TIMING[timing].field}</FormLabel>
             <Input
               type="number"
               min={0}
               value={timeLimit}
               onChange={(event) => setTimeLimit(event.target.value)}
-              placeholder="Leave blank for no limit"
+              placeholder={TIMING[timing].placeholder}
               maxW="220px"
             />
+            <FormHelperText fontSize="xs">
+              {timing === 'per_question'
+                ? 'Stamped on every question you add — change it per question in the editor.'
+                : 'Leave blank or 0 for an untimed quiz.'}
+            </FormHelperText>
           </FormControl>
+
+          {canChooseBacktracking && (
+            <Checkbox
+              mt={4}
+              size="sm"
+              isChecked={allowBack}
+              onChange={(event) => setAllowBack(event.target.checked)}
+            >
+              <Text fontSize="sm">Let students go back to earlier questions</Text>
+              <Text fontSize="xs" color="gray.600">
+                Off is placement-test behaviour: once a question is answered, it is closed.
+              </Text>
+            </Checkbox>
+          )}
         </ModalBody>
         <ModalFooter gap={2}>
           <Button variant="ghost" onClick={close}>

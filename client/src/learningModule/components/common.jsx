@@ -28,8 +28,57 @@ export function Loading({ label = 'Loading…', minH = '200px' }) {
   );
 }
 
+/**
+ * The refusals a user can act on, keyed by the `code` the API sends alongside a
+ * 403 (see server middleware/lmAuth.js loadClass). They are not failures: there
+ * is nothing to retry, and "Something went wrong" would hide the one thing the
+ * user needs to know — whether their account lacks the role, or they are simply
+ * not enrolled in this subject.
+ */
+const ACCESS_DENIED = {
+  ROLE_REQUIRED: { icon: '🔒', title: 'You do not have the necessary role for these pages' },
+  NOT_ENROLLED: { icon: '📕', title: 'You do not have access to this subject' },
+  JOIN_PENDING: { icon: '⏳', title: 'Waiting for your teacher to approve you' },
+};
+
+export const accessDeniedOf = (error) =>
+  error?.status === 403 ? ACCESS_DENIED[error?.payload?.code] || null : null;
+
 export function ErrorState({ error, onRetry }) {
   if (!error) return null;
+
+  // The wording itself stays server-side, so it can name the subject and stay
+  // in step with the rule that produced it.
+  const denied = accessDeniedOf(error);
+  if (denied) {
+    return (
+      <Box
+        my={4}
+        p={5}
+        bg="white"
+        borderWidth="1px"
+        borderColor="orange.200"
+        borderLeftWidth="4px"
+        borderLeftColor="orange.400"
+        borderRadius="lg"
+      >
+        <Flex align="flex-start" gap={4}>
+          <Text fontSize="2xl" lineHeight="1.2" aria-hidden="true">
+            {denied.icon}
+          </Text>
+          <Box>
+            <Heading size="sm" color="gray.800">
+              {denied.title}
+            </Heading>
+            <Text fontSize="sm" color="gray.600" mt={2}>
+              {error.message}
+            </Text>
+          </Box>
+        </Flex>
+      </Box>
+    );
+  }
+
   return (
     <Alert status="error" borderRadius="md" my={4} alignItems="flex-start">
       <AlertIcon />

@@ -41,17 +41,21 @@ import Notifications from './pages/Notifications';
 export default function LearningRoutes() {
   return (
     <Routes>
+      {/* Joining and answering a Short sit outside class/:classId — someone who
+          scanned the QR at the front of the room has a code, not a class — and
+          outside LearningLayout, whose bootstrap fetches the signed-in user and
+          would bounce a guest to the login page. A deck with `requireLogin` off
+          admits people with no account at all, so these two screens have to
+          stand on their own. */}
+      <Route path="short/join" element={<ShortJoin />} />
+      <Route path="short/join/:code" element={<ShortJoin />} />
+      <Route path="short/live/:sessionId" element={<ShortPlay />} />
+
       <Route element={<LearningLayout />}>
         <Route index element={<Dashboard />} />
         <Route path="todo" element={<Todo />} />
         <Route path="calendar" element={<Calendar />} />
         <Route path="notifications" element={<Notifications />} />
-
-        {/* Joining and answering a Short sit outside class/:classId: someone who
-            scanned the QR at the front of the room has a code, not a class. */}
-        <Route path="short/join" element={<ShortJoin />} />
-        <Route path="short/join/:code" element={<ShortJoin />} />
-        <Route path="short/live/:sessionId" element={<ShortPlay />} />
 
         <Route path="class/:classId" element={<ClassLayout />}>
           <Route index element={<Stream />} />

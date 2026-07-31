@@ -17,6 +17,15 @@ describe('loginPathFor', () => {
     expect(loginPathFor({ pathname: '/userroles', search: '', hash: '' })).toBe('/login');
     expect(loginPathFor(null)).toBe('/login');
   });
+
+  // A page can trip two gates: the navbar redirects the moment its session
+  // check fails, then a request the page had already sent 401s and redirects
+  // again — by which point we are on /login and must keep what is there.
+  it('keeps a destination already recorded on the login URL', () => {
+    expect(
+      loginPathFor({ pathname: '/login', search: '?redirect=%2Flearning%2Fshort%2Fjoin', hash: '' }),
+    ).toBe('/login?redirect=%2Flearning%2Fshort%2Fjoin');
+  });
 });
 
 describe('redirectTargetFrom', () => {

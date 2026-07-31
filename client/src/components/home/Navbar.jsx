@@ -100,7 +100,12 @@ export default function Navbar() {
       publicPaths.includes(location.pathname) ||
       location.pathname.startsWith('/services/') ||
       location.pathname.startsWith('/cm/c/') ||
-      location.pathname.startsWith('/timetable/faculty/');
+      location.pathname.startsWith('/timetable/faculty/') ||
+      // Joining and answering a live Short. Whether these need an account is a
+      // per-deck setting the teacher controls, so the server decides; forcing a
+      // login here would make the open decks impossible to reach.
+      location.pathname.startsWith('/learning/short/join') ||
+      location.pathname.startsWith('/learning/short/live/');
 
     if (!isLoading && !isAuthenticated && !isPublicPath) {
       // Replace, not push: the user never chose to visit the login page, so it

@@ -125,9 +125,15 @@ export default function QuizAttempt() {
   const [busy, setBusy] = useState('');
   const [remaining, setRemaining] = useState(null);
   const [notice, setNotice] = useState(null);
+  // Set when Submit is pressed with questions still blank: the confirmation is
+  // rendered inline rather than as a modal, because a Chakra modal portals to
+  // document.body and would be invisible behind a fullscreened paper.
+  const [confirmSubmit, setConfirmSubmit] = useState(false);
   const finishedRef = useRef(false);
   const shellRef = useRef(null);
   const noticeTimer = useRef(null);
+  // Question card nodes, so the navigator can jump straight to one.
+  const questionRefs = useRef({});
 
   const sequential = settings?.deliveryMode === 'one_at_a_time';
 
@@ -325,13 +331,35 @@ export default function QuizAttempt() {
 
   /* ------------------------------ render ------------------------------- */
 
-  const answeredCount = useMemo(
+  // Which questions count as attempted — the navigator, the progress bar and
+  // the submit guard all read the same set, so they can never disagree.
+  const answeredIds = useMemo(
     () =>
-      Object.values(answers).filter(
-        (value) => (value.selected || []).length || String(value.text || '').trim(),
-      ).length,
+      new Set(
+        Object.entries(answers)
+          .filter(([, value]) => (value.selected || []).length || String(value.text || '').trim())
+          .map(([questionId]) => questionId),
+      ),
     [answers],
   );
+  const answeredCount = answeredIds.size;
+
+  const total = sequential ? current?.totalQuestions || 0 : paper?.questions?.length || 0;
+  const position = sequential ? (current?.cursor ?? 0) + 1 : answeredCount;
+  const unansweredCount = sequential ? 0 : Math.max(0, total - answeredCount);
+  const percentComplete = total ? Math.round((answeredCount / total) * 100) : 0;
+
+  const goToQuestion = useCallback((questionId) => {
+    questionRefs.current[questionId]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
+
+  const attemptSubmit = useCallback(() => {
+    if (unansweredCount > 0 && !confirmSubmit) {
+      setConfirmSubmit(true);
+      return;
+    }
+    finish(false);
+  }, [unansweredCount, confirmSubmit, finish]);
 
   const inFullscreen = proctoring.isFullscreen;
   const finished = Boolean(result) && Boolean(attempt) && attempt.status !== 'in_progress';
@@ -344,8 +372,6 @@ export default function QuizAttempt() {
   }, [finished, exitFullscreen]);
 
   const pending = attempt?.resultsPending;
-  const total = sequential ? current?.totalQuestions || 0 : paper?.questions?.length || 0;
-  const position = sequential ? (current?.cursor ?? 0) + 1 : answeredCount;
 
   let content;
   if (loading) content = <Loading label="Loading your paper…" />;
@@ -443,8 +469,11 @@ export default function QuizAttempt() {
   } else {
     content = (
       <Box userSelect={settings?.disableCopyPaste ? 'none' : undefined}>
-        {/* ---- sticky status bar ---- */}
-        <Flex
+        {/* ---- sticky status bar ----
+            The progress bar lives inside it rather than below it: on a long
+            single-page paper the one thing a student wants while scrolling is
+            how much is left, and anything above the fold scrolls away. */}
+        <Box
           position="sticky"
           top={inFullscreen ? 0 : '72px'}
           zIndex={5}
@@ -452,68 +481,114 @@ export default function QuizAttempt() {
           borderWidth="1px"
           borderColor="gray.200"
           borderRadius="lg"
-          px={4}
-          py={3}
           mb={4}
-          justify="space-between"
-          align="center"
-          gap={3}
-          wrap="wrap"
+          overflow="hidden"
+          boxShadow="sm"
         >
-          <Box>
-            <Text fontSize="sm" fontWeight="600">
-              {sequential ? `Question ${position} of ${total}` : `${answeredCount} of ${total} answered`}
-            </Text>
-            {current?.section && (
-              <Badge colorScheme="purple" fontSize="0.65rem">
-                {current.section}
-              </Badge>
-            )}
-          </Box>
-          <HStack>
-            {proctoring.remaining !== null && proctoring.remaining !== undefined && (
-              <Badge colorScheme={proctoring.remaining > 0 ? 'orange' : 'red'}>
-                {proctoring.remaining} tab switch(es) left
-              </Badge>
-            )}
-            {remaining !== null && (
-              <Badge
-                colorScheme={remaining < 30 ? 'red' : remaining < 120 ? 'orange' : 'green'}
-                fontSize="md"
-                px={3}
-                py={1}
-                borderRadius="md"
-              >
-                ⏱ {clock(remaining)}
-              </Badge>
-            )}
-            {!sequential && (
-              <Button
-                size="sm"
-                variant="outline"
-                isLoading={busy === 'save'}
-                onClick={async () => {
-                  setBusy('save');
-                  try {
-                    await lmApi.saveAttemptDraft(classId, attemptId, payload());
-                    notify({ status: 'success', title: 'Progress saved', duration: 1500 });
-                  } catch (err) {
-                    notify({ status: 'error', title: err.message });
-                  } finally {
-                    setBusy('');
-                  }
-                }}
-              >
-                Save
+          <Flex px={4} py={3} justify="space-between" align="center" gap={3} wrap="wrap">
+            <Box>
+              <HStack spacing={2}>
+                <Text fontSize="sm" fontWeight="600">
+                  {sequential ? `Question ${position} of ${total}` : `${answeredCount} of ${total} answered`}
+                </Text>
+                {!sequential && total > 0 && (
+                  <Badge colorScheme={percentComplete === 100 ? 'green' : 'purple'} borderRadius="full">
+                    {percentComplete}%
+                  </Badge>
+                )}
+              </HStack>
+              {!sequential && unansweredCount > 0 && (
+                <Text fontSize="xs" color="gray.500">
+                  {unansweredCount} still blank
+                </Text>
+              )}
+              {current?.section && (
+                <Badge colorScheme="purple" fontSize="0.65rem">
+                  {current.section}
+                </Badge>
+              )}
+            </Box>
+            <HStack>
+              {proctoring.remaining !== null && proctoring.remaining !== undefined && (
+                <Badge colorScheme={proctoring.remaining > 0 ? 'orange' : 'red'}>
+                  {proctoring.remaining} tab switch(es) left
+                </Badge>
+              )}
+              {remaining !== null && (
+                <Badge
+                  colorScheme={remaining < 30 ? 'red' : remaining < 120 ? 'orange' : 'green'}
+                  fontSize="md"
+                  px={3}
+                  py={1}
+                  borderRadius="md"
+                >
+                  ⏱ {clock(remaining)}
+                </Badge>
+              )}
+              {!sequential && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  isLoading={busy === 'save'}
+                  onClick={async () => {
+                    setBusy('save');
+                    try {
+                      await lmApi.saveAttemptDraft(classId, attemptId, payload());
+                      notify({ status: 'success', title: 'Progress saved', duration: 1500 });
+                    } catch (err) {
+                      notify({ status: 'error', title: err.message });
+                    } finally {
+                      setBusy('');
+                    }
+                  }}
+                >
+                  Save
+                </Button>
+              )}
+              {!sequential && (
+                <Button size="sm" colorScheme="purple" onClick={attemptSubmit} isLoading={busy === 'submit'}>
+                  Submit test
+                </Button>
+              )}
+            </HStack>
+          </Flex>
+          {total > 0 && (
+            <Progress
+              value={sequential ? (position / total) * 100 : percentComplete}
+              size="sm"
+              colorScheme={!sequential && percentComplete === 100 ? 'green' : 'purple'}
+              hasStripe={!sequential && percentComplete < 100}
+              aria-label="Quiz progress"
+            />
+          )}
+          {/* Submitting is irreversible, so a blank question is named before it
+              is accepted. It lives in the sticky bar rather than beside either
+              Submit button so it is visible wherever the student pressed one —
+              and inline rather than in a modal, which would portal to
+              document.body and disappear behind a fullscreened paper. */}
+          {confirmSubmit && unansweredCount > 0 && (
+            <Flex
+              bg="orange.50"
+              borderTopWidth="1px"
+              borderColor="orange.200"
+              px={4}
+              py={2}
+              gap={2}
+              align="center"
+              wrap="wrap"
+            >
+              <Text fontSize="sm" flex="1" minW="200px">
+                {unansweredCount} question{unansweredCount === 1 ? ' is' : 's are'} still blank.
+              </Text>
+              <Button size="xs" variant="ghost" onClick={() => setConfirmSubmit(false)}>
+                Keep working
               </Button>
-            )}
-            {!sequential && (
-              <Button size="sm" colorScheme="purple" onClick={() => finish(false)} isLoading={busy === 'submit'}>
-                Submit test
+              <Button size="xs" colorScheme="purple" onClick={() => finish(false)} isLoading={busy === 'submit'}>
+                Submit anyway
               </Button>
-            )}
-          </HStack>
-        </Flex>
+            </Flex>
+          )}
+        </Box>
 
         {notice && (
           <Alert status={notice.status || 'info'} borderRadius="md" mb={4}>
@@ -535,14 +610,49 @@ export default function QuizAttempt() {
           </Alert>
         )}
 
-        {total > 0 && (
-          <Progress
-            value={sequential ? (position / total) * 100 : (answeredCount / total) * 100}
-            size="xs"
-            colorScheme="purple"
-            borderRadius="full"
-            mb={4}
-          />
+        {/* ---- question navigator ----
+            Free navigation is the point of this mode, but on a twenty-question
+            paper scrolling is a poor way to exercise it. The grid doubles as
+            the "what have I missed" view the progress bar can only summarise. */}
+        {!sequential && total > 1 && (
+          <SectionCard mb={4} p={4}>
+            <Flex justify="space-between" align="center" gap={3} wrap="wrap" mb={3}>
+              <Text fontSize="xs" fontWeight="700" color="gray.600" textTransform="uppercase" letterSpacing="wide">
+                Jump to question
+              </Text>
+              <HStack spacing={3} fontSize="0.65rem" color="gray.500">
+                <HStack spacing={1.5}>
+                  <Box w="10px" h="10px" borderRadius="sm" bg="purple.500" />
+                  <Text>Answered</Text>
+                </HStack>
+                <HStack spacing={1.5}>
+                  <Box w="10px" h="10px" borderRadius="sm" borderWidth="1px" borderColor="gray.300" />
+                  <Text>Blank</Text>
+                </HStack>
+              </HStack>
+            </Flex>
+            <Flex wrap="wrap" gap={2}>
+              {paper.questions.map((question, index) => {
+                const done = answeredIds.has(question._id);
+                return (
+                  <Button
+                    key={question._id}
+                    size="sm"
+                    minW="38px"
+                    px={0}
+                    fontSize="xs"
+                    variant={done ? 'solid' : 'outline'}
+                    colorScheme={done ? 'purple' : 'gray'}
+                    color={done ? undefined : 'gray.600'}
+                    onClick={() => goToQuestion(question._id)}
+                    aria-label={`Question ${index + 1}, ${done ? 'answered' : 'not answered'}`}
+                  >
+                    {index + 1}
+                  </Button>
+                );
+              })}
+            </Flex>
+          </SectionCard>
         )}
 
         {/* ---- sequential: one question ---- */}
@@ -588,33 +698,68 @@ export default function QuizAttempt() {
 
         {/* ---- all at once: full paper ---- */}
         {!sequential &&
-          paper?.questions.map((question, index) => (
-            <SectionCard key={question._id} mb={3}>
-              <Flex justify="space-between" gap={3} mb={3}>
-                <Box flex="1" minW={0}>
-                  <HStack mb={1}>
-                    <Text fontWeight="600" fontSize="sm">
-                      Q{index + 1}.
-                    </Text>
-                    {question.sectionName && (
-                      <Badge colorScheme="purple" fontSize="0.6rem">
-                        {question.sectionName}
-                      </Badge>
-                    )}
-                  </HStack>
-                  <RichText>{question.question}</RichText>
-                </Box>
-                <Badge colorScheme="gray" flexShrink={0}>
-                  {question.marks} mark{question.marks === 1 ? '' : 's'}
-                </Badge>
-              </Flex>
-              <AnswerInput
-                question={question}
-                value={answers[question._id] || {}}
-                onChange={(value) => setAnswers((prev) => ({ ...prev, [question._id]: value }))}
-              />
-            </SectionCard>
-          ))}
+          paper?.questions.map((question, index) => {
+            const done = answeredIds.has(question._id);
+            return (
+              // SectionCard is a plain function component, so the scroll target
+              // is this wrapper. The margin keeps the sticky bar from landing on
+              // top of the question the navigator just jumped to.
+              <Box
+                key={question._id}
+                ref={(node) => {
+                  questionRefs.current[question._id] = node;
+                }}
+                scrollMarginTop={inFullscreen ? '96px' : '160px'}
+              >
+                <SectionCard
+                  mb={3}
+                  borderLeftWidth="3px"
+                  borderLeftColor={done ? 'purple.400' : 'transparent'}
+                  transition="border-color 0.2s"
+                >
+                  <Flex justify="space-between" gap={3} mb={3}>
+                    <Box flex="1" minW={0}>
+                      <HStack mb={2} spacing={2}>
+                        <Flex
+                          align="center"
+                          justify="center"
+                          w="24px"
+                          h="24px"
+                          borderRadius="md"
+                          flexShrink={0}
+                          fontSize="xs"
+                          fontWeight="700"
+                          bg={done ? 'purple.500' : 'gray.100'}
+                          color={done ? 'white' : 'gray.600'}
+                        >
+                          {index + 1}
+                        </Flex>
+                        {question.sectionName && (
+                          <Badge colorScheme="purple" fontSize="0.6rem">
+                            {question.sectionName}
+                          </Badge>
+                        )}
+                        {!done && (
+                          <Badge colorScheme="gray" fontSize="0.6rem" variant="outline">
+                            Not answered
+                          </Badge>
+                        )}
+                      </HStack>
+                      <RichText>{question.question}</RichText>
+                    </Box>
+                    <Badge colorScheme="gray" flexShrink={0} h="fit-content">
+                      {question.marks} mark{question.marks === 1 ? '' : 's'}
+                    </Badge>
+                  </Flex>
+                  <AnswerInput
+                    question={question}
+                    value={answers[question._id] || {}}
+                    onChange={(value) => setAnswers((prev) => ({ ...prev, [question._id]: value }))}
+                  />
+                </SectionCard>
+              </Box>
+            );
+          })}
 
         {!sequential && (
           <Button
@@ -622,7 +767,7 @@ export default function QuizAttempt() {
             size="lg"
             w="100%"
             mt={2}
-            onClick={() => finish(false)}
+            onClick={attemptSubmit}
             isLoading={busy === 'submit'}
           >
             Submit test ({answeredCount}/{total} answered)

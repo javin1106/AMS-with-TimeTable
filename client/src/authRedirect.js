@@ -15,9 +15,10 @@ const isInternalPath = (path) =>
   !path.startsWith('//') &&
   !path.startsWith('/\\');
 
-// Paths that are either the login page itself or the natural post-login
-// destination anyway — carrying them adds a query string for no benefit.
-const NOT_WORTH_RETURNING_TO = ['/', '/login', '/userroles'];
+// Where the user would end up after signing in anyway — carrying these adds a
+// query string for no benefit. (The login page itself is handled separately
+// below, because it may already carry a destination worth keeping.)
+const NOT_WORTH_RETURNING_TO = ['/', '/userroles'];
 
 /**
  * The login URL to send an unauthenticated visitor to, remembering where they
@@ -26,6 +27,12 @@ const NOT_WORTH_RETURNING_TO = ['/', '/login', '/userroles'];
 export const loginPathFor = (location) => {
   if (!location) return '/login';
   const { pathname = '', search = '', hash = '' } = location;
+  // Already on the login page. More than one gate can fire for a single page —
+  // the platform navbar redirects as soon as its session check fails, while a
+  // request the page had already sent 401s a moment later and redirects again.
+  // That straggler must not replace the login URL with a bare one, or the
+  // destination the first gate recorded is lost.
+  if (pathname === '/login') return `/login${search}`;
   if (NOT_WORTH_RETURNING_TO.includes(pathname)) return '/login';
   const from = `${pathname}${search}${hash}`;
   if (!isInternalPath(from)) return '/login';
