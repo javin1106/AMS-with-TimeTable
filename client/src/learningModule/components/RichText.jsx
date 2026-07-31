@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import { Box, Text } from '@chakra-ui/react';
-import DOMPurify from 'dompurify';
+import createDOMPurify from 'dompurify';
 import Markdown from './Markdown';
 
 /**
@@ -42,13 +42,93 @@ const SANITISE_CONFIG = {
     'hr',
   ],
   ALLOWED_ATTR: ['href', 'target', 'rel', 'src', 'alt', 'title', 'class', 'style', 'colspan', 'rowspan'],
-  // Quill writes inline styles for colour and alignment; allow those and
-  // nothing that can load or position arbitrary content.
-  ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|data:image\/(?:png|jpe?g|gif|webp|svg\+xml));?|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i,
+  // `data:image/svg+xml` is deliberately absent. An SVG loaded through <img> is
+  // a sandboxed image context in current browsers and will not run its scripts,
+  // but it is attack surface bought for nothing: Quill never produces one, so
+  // the only source would be someone hand-posting HTML to the API.
+  ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|data:image\/(?:png|jpe?g|gif|webp));?|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i,
   ADD_ATTR: ['target', 'rel'],
   FORBID_TAGS: ['script', 'style', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
   FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover', 'srcset', 'formaction'],
 };
+
+/**
+ * CSS properties an author may set inline.
+ *
+ * DOMPurify strips scripting but passes `style` through largely intact, and a
+ * style attribute alone is enough to do damage without a single line of
+ * JavaScript: `position:fixed;width:100vw;height:100vh;z-index:9999` on a
+ * comment in the class stream covers the entire page, and wrapped in a link it
+ * becomes an in-page phishing overlay. Nobody needs positioning to write an
+ * answer, so the allowlist is what Quill actually emits and nothing else.
+ */
+const ALLOWED_CSS = new Set([
+  'color',
+  'background-color',
+  'font-size',
+  'font-family',
+  'font-weight',
+  'font-style',
+  'text-align',
+  'text-decoration',
+  'line-height',
+  'padding-left',
+  'margin-left',
+  'vertical-align',
+  'white-space',
+]);
+
+const safeStyle = (value) =>
+  String(value)
+    .split(';')
+    .map((declaration) => declaration.trim())
+    .filter(Boolean)
+    .filter((declaration) => {
+      const [property, ...rest] = declaration.split(':');
+      const body = rest.join(':');
+      if (!ALLOWED_CSS.has(property.trim().toLowerCase())) return false;
+      // Even on an allowed property: no url() and no expression(). `url()` in
+      // CSS cannot execute script in any current browser, but it can silently
+      // fetch a remote resource, which turns reading a comment into a beacon.
+      return !/url\s*\(|expression\s*\(|@import/i.test(body);
+    })
+    .map((declaration) => declaration.trim())
+    .join('; ');
+
+/**
+ * A DOMPurify instance of our own.
+ *
+ * Hooks are registered per instance, and the default export is shared with
+ * every other module in this app. Adding the style filter to it would silently
+ * change how the conference, review and timetable modules sanitise their
+ * content — an improvement, probably, but not this module's call to make.
+ */
+const purify = createDOMPurify(window);
+
+purify.addHook('afterSanitizeAttributes', (node) => {
+  if (node.hasAttribute?.('style')) {
+    const cleaned = safeStyle(node.getAttribute('style'));
+    if (cleaned) node.setAttribute('style', cleaned);
+    else node.removeAttribute('style');
+  }
+
+  // A link opening in a new tab hands the opener to the target page unless
+  // told otherwise, which is a redirect of the still-signed-in original.
+  if (node.tagName === 'A' && node.getAttribute('target')) {
+    node.setAttribute('rel', 'noopener noreferrer');
+  }
+
+  // ALLOWED_URI_REGEXP does not govern this. DOMPurify special-cases `data:` on
+  // its built-in DATA_URI_TAGS — img among them — and lets any media type
+  // through, so narrowing the regexp above is not on its own enough to keep
+  // `data:image/svg+xml` out. Re-checking here is what actually excludes it.
+  if (node.tagName === 'IMG') {
+    const src = node.getAttribute('src') || '';
+    if (/^data:/i.test(src) && !/^data:image\/(?:png|jpe?g|gif|webp);base64,/i.test(src)) {
+      node.removeAttribute('src');
+    }
+  }
+});
 
 const PROSE_STYLES = {
   p: { mb: 2, lineHeight: 1.7 },
@@ -84,7 +164,7 @@ export default function RichText({ children, fallback = null, ...rest }) {
 
   const html = useMemo(() => {
     if (!HTML_PATTERN.test(source)) return null;
-    return DOMPurify.sanitize(source, SANITISE_CONFIG);
+    return purify.sanitize(source, SANITISE_CONFIG);
   }, [source]);
 
   if (!source.trim()) return fallback;

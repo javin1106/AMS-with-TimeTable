@@ -614,6 +614,93 @@ survives a phone.
 
 ---
 
+## Who can reach what
+
+Two independent layers, and only one of them is the boundary.
+
+**The server is the boundary.** `requireTeacher` on the route, plus a narrowing
+pass in the handler for anything a student legitimately reaches — a published
+filter, an ownership check, or a projection that drops the answer key.
+`tests/unit/learningModuleRouteGuards.test.js` reads the live Express router and
+pins every class-scoped endpoint to one side of the line, with a note saying what
+each student-reachable one relies on its handler to withhold. **A new route fails
+that suite until somebody has written down who may call it** — which is the point,
+because a missing guard is otherwise silent: the handler works perfectly, it just
+answers the wrong people.
+
+**The client is a courtesy.** `components/RequireTeacher.jsx` wraps the staff
+screens so a student who types a staff URL is sent to the class stream instead of
+meeting a bare 403 where a page should be. It decides from context ClassLayout has
+already resolved, so there is no flash of staff UI while a check is in flight.
+Removing it would leak nothing; it exists so the app does not look broken.
+
+### Withheld from students, by handler
+
+| Endpoint | What is held back |
+| --- | --- |
+| `GET /quizzes/:id` | `forStudent()` drops correct answers and explanations; unpublished 404s |
+| `GET /tutorials/:id` | the answer *formulas* |
+| `GET /shorts`, `/shorts/:id` | slides and the answer key |
+| `GET /gradebook` | scoped to the caller; 403 when the class hides grades; a grade appears only once returned |
+| `GET /members` | classmates' email addresses, and `invitedBy` / `lastSeenAt` / `muted`. Their own row keeps its email |
+| `GET /coursework/:id` | drafts 404; `audience` is enforced |
+| `GET /studio/sessions/:id` | the raw transcript and the unreviewed quiz draft |
+| `GET /notebooks/:id/attempt` | 403 until published; seeds the caller their own copy |
+| attempt endpoints | ownership, on every quiz / tutorial / notebook attempt |
+
+Quiz authoring (`PATCH`/`DELETE`/`publish`) is deliberately **not** `requireTeacher`:
+a named collaborator may edit one quiz without being class staff, so `canManage()`
+in the controller is the real check.
+
+---
+
+## Injection
+
+Every rich-text surface in the module — announcements, comments, question stems,
+options, notebook prose — is authored by one user and rendered to others.
+
+`components/RichText.jsx` sanitises **at render time, not on save**. The client
+is not a security boundary: anyone can POST raw HTML to the API, so trusting
+stored content would be unsafe whatever the editor sent. Sanitising on every
+render is the guarantee that actually holds.
+
+Three things beyond a stock DOMPurify config, each because the default was not
+enough:
+
+1. **A private DOMPurify instance.** Hooks are per-instance and the default
+   export is shared with the conference, review and timetable modules. Adding
+   this module's rules to it would silently change their sanitisation.
+
+2. **An inline-CSS allowlist.** DOMPurify strips scripting but passes `style`
+   through. A style attribute alone is enough without a line of JavaScript:
+   `position:fixed;width:100vw;height:100vh;z-index:9999` on a class
+   announcement covers the whole page, and wrapped in a link it is an in-page
+   phishing overlay. Only the properties Quill actually emits survive, and
+   `url()` is stripped even from those so that reading a comment cannot become a
+   tracking beacon.
+
+3. **A second look at `<img src>`.** `ALLOWED_URI_REGEXP` does not govern this:
+   DOMPurify special-cases `data:` on its built-in `DATA_URI_TAGS`, `img` among
+   them, and admits any media type. Narrowing the regexp is not on its own
+   enough to keep `data:image/svg+xml` out — the hook is what excludes it.
+
+Links with `target="_blank"` get `rel="noopener noreferrer"` added, or the opened
+page can navigate the still-signed-in original.
+
+`__tests__/RichTextInjection.test.jsx` throws 35 payloads at it — script tags,
+every `on*` handler shape, `javascript:` in several encodings, `srcdoc`, mutation
+XSS, `meta refresh`, `base`, and the style vectors above. The assertions are about
+outcome (no script node, no handler attribute, no executable scheme, nothing that
+can cover the page) rather than about DOMPurify's internals, so a future config
+change that still passes them is fine.
+
+**Not done, and worth knowing:** the app sets `contentSecurityPolicy: false` in
+`server/src/index.js`. A CSP is the backstop that catches whatever the sanitiser
+misses, and turning it on is an app-wide change affecting every module — out of
+scope here, but the single highest-value hardening left.
+
+---
+
 ## Rich text authoring
 
 Every authoring surface uses a Quill-based editor (`components/RichTextEditor`):
