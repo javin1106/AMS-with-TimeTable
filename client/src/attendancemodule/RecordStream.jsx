@@ -294,17 +294,24 @@ useEffect(() => {
     // ── Start / stop ───────────────────────────────────────────────────────
     async function handleStart() {
         if (!selectedCam?.streamUrl) return;
-        const res = await apiFetch(`${REC_API}/start`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ rtspUrl: selectedCam.streamUrl, label, format: recFormat }),
-        });
-        if (res.ok) {
-            const data = await res.json();
-            setActiveRecId(data.recordingId);
-            setSessionRecIds(prev => new Set([...prev, data.recordingId]));
-            showToast('Recording started', 'success');
-            refreshList();
+        try {
+            const res = await apiFetch(`${REC_API}/start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ rtspUrl: selectedCam.streamUrl, label, format: recFormat }),
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setActiveRecId(data.recordingId);
+                setSessionRecIds(prev => new Set([...prev, data.recordingId]));
+                showToast('Recording started', 'success');
+                refreshList();
+            } else {
+                const err = await res.json();
+                showToast(err.error || 'Failed to start recording', 'error');
+            }
+        } catch (err) {
+            showToast('Network error while starting recording', 'error');
         }
     }
 
