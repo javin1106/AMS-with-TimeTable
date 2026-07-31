@@ -240,6 +240,7 @@ export default function ShortPlay() {
   const [draft, setDraft] = useState({ selected: [], text: '', number: null });
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
+  const [expired, setExpired] = useState(false);
   const lastSlideId = useRef(null);
 
   const streamUrl = useMemo(() => lmApi.shortParticipantStreamUrl(sessionId), [sessionId]);
@@ -258,6 +259,21 @@ export default function ShortPlay() {
     setSent(false);
     setDraft({ selected: [], text: '', number: null });
   }, [slide]);
+
+  // Trip `expired` exactly when the countdown runs out. A timer rather than a
+  // comparison on each render, because nothing else would re-render the page at
+  // the moment the clock passes.
+  useEffect(() => {
+    setExpired(false);
+    if (!state?.slideDeadline) return undefined;
+    const remaining = new Date(state.slideDeadline).getTime() - Date.now();
+    if (remaining <= 0) {
+      setExpired(true);
+      return undefined;
+    }
+    const timer = setTimeout(() => setExpired(true), remaining);
+    return () => clearTimeout(timer);
+  }, [state?.slideDeadline]);
 
   // An answer the server already has takes precedence over an empty draft — this
   // is what makes reloading the page mid-slide non-destructive.
@@ -310,7 +326,11 @@ export default function ShortPlay() {
   if (!state) return <Loading label="Joining…" />;
 
   const ended = state.status === 'ended' || connection === 'ended';
-  const open = state.canAnswer && !ended;
+  // `expired` is the local half of the same rule the server applies: the stream
+  // can be up to a tick behind, and Send must stop working the moment the clock
+  // hits zero rather than a second later. The server still has the final say —
+  // this only avoids offering a tap that would come back rejected.
+  const open = state.canAnswer && !ended && !expired;
   const locked = !open || (sent && state.canChange === false);
   // Nothing to answer yet: either the presenter has not opened the current slide
   // (`pending`, and the server has withheld its text) or there is no slide at all.
@@ -364,7 +384,12 @@ export default function ShortPlay() {
             {!open && !ended ? (
               <Alert status="info" borderRadius="md" mb={4} fontSize="sm">
                 <AlertIcon />
-                {STATE_MESSAGE[state.slideState] || 'Hold on.'}
+                {/* The stale frame still says "open" for a moment after the
+                    clock passes, and "wait for the question to open" would be
+                    exactly backwards at that point. */}
+                {expired && state.slideState === 'open'
+                  ? 'Time is up.'
+                  : STATE_MESSAGE[state.slideState] || 'Hold on.'}
               </Alert>
             ) : null}
 
