@@ -628,6 +628,33 @@ that suite until somebody has written down who may call it** — which is the po
 because a missing guard is otherwise silent: the handler works perfectly, it just
 answers the wrong people.
 
+### Who can be a teacher
+
+`loadClass` grants `teacher` standing by exactly three routes:
+
+1. an active membership with role `teacher` or `co-teacher`
+2. being the class owner
+3. **holding a platform admin role** — `admin`, `iams-admin` or `SUPERADMIN`
+
+Route 3 is deliberate: it lets support open a class without being enrolled. It is
+also a standing grant over *every* class in the installation — answer keys,
+gradebooks, student notebooks, quiz attempts — and `requireOwner` honours it too,
+so an admin can delete any class. Worth knowing when deciding who gets
+`iams-admin`.
+
+No teaching role carries it. `FACULTY`, `ITTC`, `TTADMIN` and `iams-dept-admin`
+may *create* a class, which is not the same as being staff inside somebody
+else's. `learningModuleRoles.test.js` pins that split, so adding a role to
+`PLATFORM_ADMIN_ROLES` is a visible edit rather than a one-word diff nobody
+reviews.
+
+There is no self-promotion path. Membership roles are only writable through
+`PATCH /members/:id`, which is `requireTeacher`. Email invites can carry
+`co-teacher` and are claimed by whoever signs in with that address — safe here
+only because account creation is itself admin-only (`POST /auth/register` is
+`checkRole(['admin'])`). If self-registration is ever opened up, that claim path
+becomes an escalation and needs email verification in front of it.
+
 **The client is a courtesy.** `components/RequireTeacher.jsx` wraps the staff
 screens so a student who types a staff URL is sent to the class stream instead of
 meeting a bare 403 where a page should be. It decides from context ClassLayout has
