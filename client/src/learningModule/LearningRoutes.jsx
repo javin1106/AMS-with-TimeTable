@@ -19,6 +19,10 @@ import QuizBrief from './pages/QuizBrief';
 import QuizAttempt from './pages/QuizAttempt';
 import QuizEditor from './pages/QuizEditor';
 import QuizResults from './pages/QuizResults';
+import Notebooks from './pages/Notebooks';
+import NotebookEditor from './pages/NotebookEditor';
+import NotebookPlayer from './pages/NotebookPlayer';
+import NotebookSubmissions from './pages/NotebookSubmissions';
 import Shorts from './pages/Shorts';
 import ShortEditor from './pages/ShortEditor';
 import ShortPresent from './pages/ShortPresent';
@@ -76,6 +80,10 @@ export default function LearningRoutes() {
           <Route path="quiz/:quizId/attempt/:attemptId" element={<QuizAttempt />} />
           <Route path="quiz/:quizId/edit" element={<QuizEditor />} />
           <Route path="quiz/:quizId/results" element={<QuizResults />} />
+          <Route path="notebooks" element={<Notebooks />} />
+          <Route path="notebook/:notebookId" element={<NotebookPlayer />} />
+          <Route path="notebook/:notebookId/edit" element={<NotebookEditor />} />
+          <Route path="notebook/:notebookId/submissions" element={<NotebookSubmissions />} />
           <Route path="shorts" element={<Shorts />} />
           <Route path="short/:shortId/edit" element={<ShortEditor />} />
           <Route path="short/:shortId/present/:sessionId" element={<ShortPresent />} />

@@ -30,13 +30,15 @@ server/src/modules/learningModule/
 ├── models/           lmClass, lmMembership, lmAnnouncement, lmCoursework,
 │                     lmSubmission, lmComment, lmQuiz, lmQuizAttempt,
 │                     lmTutorial, lmTutorialAttempt, lmAudioSession,
-│                     lmNotification, lmShort, lmShortSession, lmShortResponse
+│                     lmNotification, lmShort, lmShortSession, lmShortResponse,
+│                     lmNotebook, lmNotebookAttempt
 ├── middleware/       lmAuth.js — authenticate, loadClass, requireTeacher…
 ├── services/         aiService, recordingService, notifyService, formulaEngine,
-│                     variantGenerator, examEngine, shortsAggregator
+│                     variantGenerator, examEngine, shortsAggregator,
+│                     notebookService
 ├── controllers/      class, member, stream, comment, coursework, submission,
-│                     quiz, tutorial, shorts, audioStudio, notification,
-│                     dashboard, upload
+│                     quiz, tutorial, shorts, notebook, audioStudio,
+│                     notification, dashboard, upload
 ├── routes/index.js   the whole API surface
 └── uploads/          attachment storage (git-ignored)
 ```
@@ -46,9 +48,10 @@ client/src/learningModule/
 ├── api/lmApi.js      one request() helper; every endpoint
 ├── components/       common, Markdown, RichText, RichTextEditor, Attachments,
 │                     CommentThread, LearningLayout, NotificationBell,
-│                     QuizReview, ShortResults
-├── hooks/            useProctoring, useShortStream
-├── pages/            dashboard, class tabs, quiz, tutorial and shorts screens
+│                     QuizReview, ShortResults, NotebookCell
+├── hooks/            useProctoring, useShortStream, usePyodide
+├── pages/            dashboard, class tabs, quiz, tutorial, shorts and
+│                     notebook screens
 └── LearningRoutes.jsx  everything under /learning/*
 ```
 
@@ -110,6 +113,9 @@ per-question difficulty analysis for the teacher.
 **Shorts** — live in-class polling: a deck of instant questions, a six-digit
 join code on the projector, and the room's answers on screen within seconds.
 See below.
+
+**Coding notebooks** — Colab-style Python worksheets that run in the student's
+own browser. See below.
 
 **Parameterised tutorials** — see below.
 
@@ -492,6 +498,122 @@ sends arrow keys and nothing else.
 
 ---
 
+## Coding notebooks
+
+A worksheet of prose and Python cells the student works through in the browser,
+Colab-style: source on top, output underneath, one shared namespace, run in
+order.
+
+### Why not embed Google Colab
+
+Asked for, and not possible. Three separate walls:
+
+* **Colab cannot be iframed.** It sends frame-ancestors headers that permit only
+  Google's own origins. Not a setting anyone can change for us.
+* **There is no Colab API** to create a notebook, run one, or read a result
+  back. Google Classroom's own integration is a shared link and nothing more.
+* **The work would live in the student's Drive**, so there is no submission, no
+  output to look at, no grade — none of what makes this a tutorial rather than a
+  reading.
+
+A link out to `colab.research.google.com/github/<owner>/<repo>/blob/…` remains a
+perfectly good escape hatch for heavy work, and can be dropped into a markdown
+cell. It just cannot be the tab.
+
+### Python in the browser
+
+[Pyodide](https://pyodide.org) — CPython compiled to WebAssembly — running in a
+Web Worker. **Nothing executes on our servers.** That is the load-bearing
+decision: running arbitrary student Python server-side is a remote-code-execution
+surface, and this platform has no container sandboxing to put behind one. It also
+means a run costs nothing and a class of two hundred needs no queue.
+
+A worker rather than the main thread because Python here is blocking:
+`while True: pass` on the main thread would freeze the tab *including the stop
+button*; in a worker it freezes only the kernel, and the page can terminate it.
+
+Consequences worth knowing:
+
+| | |
+| --- | --- |
+| First start | Several MB of WebAssembly, fetched on demand — never on page load. The student presses **Start Python**. |
+| Runtime source | `VITE_PYODIDE_URL`, defaulting to the jsDelivr CDN. Point it at a self-hosted copy for a campus network that blocks it. |
+| Packages | numpy, pandas, matplotlib, scipy, sympy, scikit-learn have prebuilt wheels; pure-Python packages install via micropip. A C extension nobody has built for wasm will not install. |
+| Stopping | A kernel **restart**, not an interrupt. Pyodide's cooperative interrupt needs `SharedArrayBuffer`, which needs cross-origin isolation headers this app does not send. The UI says so rather than pretending. |
+| Plots | `matplotlib.pyplot.show` is redirected to hand back a base64 PNG (Agg backend). Without the shim a student's first plot silently does nothing, which reads as broken code. |
+
+The worker lives at `client/public/pyodide-worker.js` rather than being bundled,
+because it needs `importScripts` to pull the runtime and a module worker cannot
+do that.
+
+### Trust
+
+**An output stored on an attempt is a claim by the client, not a fact the server
+witnessed.** Pyodide runs in the student's tab; anyone willing to open devtools
+can post whatever result they like. So:
+
+* Outputs are stored **only** so the teacher can see what the student saw, and so
+  reopening a notebook is not a blank page.
+* There is **no auto-grading**. Notebooks are marked by hand, and the marking
+  screen says why. The code is the reliable artefact, so the code is what is put
+  in front of the teacher.
+
+Trustworthy marks would need the server to re-run the work in a sandbox — real
+infrastructure this repo does not have. That is a deliberate omission, not an
+oversight.
+
+### Cells
+
+| Flag | Meaning |
+| --- | --- |
+| *(none)* | Ordinary cell: the student edits and runs it. |
+| `locked` | Shown and runnable, not editable. Imports and scaffolding the rest of the sheet depends on. |
+| `hidden` | Runs before the student's cells on every fresh kernel, never shown. Data setup without pasting forty lines into the page. |
+
+Hidden cells are **not** copied into the attempt — they are replayed from the
+authored notebook at kernel start. Note this is tidiness, not secrecy: the code
+has to reach the browser to run at all, so nothing genuinely secret belongs in a
+notebook that executes client-side.
+
+`locked` is enforced server-side in `applyStudentCells`, not just by disabling
+the editor. A quietly rewritten setup cell is exactly the sort of thing nobody
+notices until the marks look strange, and the client is not a security boundary.
+
+### Storage
+
+Each student gets a **copy**, not a diff against the authored cells: the teacher
+will edit the notebook mid-term, and someone an hour into it should not find
+their work re-based onto new prose overnight. `sourceCellId` keeps the link back
+for the side-by-side view and survives the original cell being deleted.
+
+Saves are debounced (2.5s) rather than per keystroke — a notebook is hundreds of
+lines across dozens of cells, and per-character saving would post the whole
+document on every key. A `revision` counter rejects a stale save with `409
+STALE_REVISION`, so a second tab cannot silently overwrite the newer copy.
+
+`services/notebookService.js` clamps everything arriving from a browser: source
+length, outputs per cell, output size (with a far larger allowance for images,
+since a PNG legitimately dwarfs a traceback), and cell count. Truncation says so
+in the text — silently dropping the tail of a traceback is how a student spends
+ten minutes debugging an error they cannot see the end of.
+
+### Screens
+
+```
+/learning/class/:classId/notebooks                        list
+/learning/class/:classId/notebook/:id                     the student's copy — run, edit, submit
+/learning/class/:classId/notebook/:id/edit                authoring, with the same kernel to test against
+/learning/class/:classId/notebook/:id/submissions         reading and marking
+```
+
+Output renders **below** each editor rather than beside it, despite the
+"code one side, output the other" framing this was asked for as. Side-by-side
+halves the width available to both, and Python output is overwhelmingly wide — a
+pandas DataFrame or a traceback wraps into soup at half a screen. Stacked also
+survives a phone.
+
+---
+
 ## Rich text authoring
 
 Every authoring surface uses a Quill-based editor (`components/RichTextEditor`):
@@ -785,6 +907,20 @@ POST   /short-sessions/:id/end           T   stops the code; mirrors marks if gr
 GET    /short-sessions/:id/stream        T   SSE: the presenter view, live
 GET    /short-sessions/:id/report        T   per-slide analysis + leaderboard
 GET    /short-sessions/:id/report.csv    T   every answer, one row per participant
+
+GET    /notebooks                            coding notebooks; students see published only
+POST   /notebooks                        T   create
+GET    /notebooks/:id                    T   the authored notebook, including hidden cells
+PATCH  /notebooks/:id                    T
+DELETE /notebooks/:id                    T   also drops every student's copy
+POST   /notebooks/:id/publish            T   mirrors into Classwork, notifies the class
+GET    /notebooks/:id/attempt                get-or-create the caller's own copy
+GET    /notebooks/:id/attempts           T   who has started, run and submitted
+GET    /notebook-attempts/:id                one copy; own, or any if staff
+POST   /notebook-attempts/:id/save           debounced autosave; 409 on a stale revision
+POST   /notebook-attempts/:id/submit         turns in; no auto-grade, by design
+POST   /notebook-attempts/:id/reopen     T   hand back for another go
+PATCH  /notebook-attempts/:id/grade      T   marked by hand; writes to the gradebook
 
 GET    /studio/status                    T   which providers are configured
 GET    /studio/recordings                T   attendance-module recordings

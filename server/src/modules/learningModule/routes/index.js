@@ -19,6 +19,7 @@ const submissionController = require("../controllers/submissionController");
 const quizController = require("../controllers/quizController");
 const shortsController = require("../controllers/shortsController");
 const tutorialController = require("../controllers/tutorialController");
+const notebookController = require("../controllers/notebookController");
 const audioStudioController = require("../controllers/audioStudioController");
 const notificationController = require("../controllers/notificationController");
 const dashboardController = require("../controllers/dashboardController");
@@ -185,6 +186,21 @@ classRouter.post("/short-sessions/:sessionId/end", requireTeacher, asyncRoute(sh
 classRouter.get("/short-sessions/:sessionId/stream", requireTeacher, asyncRoute(shortsController.streamPresenter));
 classRouter.get("/short-sessions/:sessionId/report", requireTeacher, asyncRoute(shortsController.getSessionReport));
 classRouter.get("/short-sessions/:sessionId/report.csv", requireTeacher, asyncRoute(shortsController.exportSessionCsv));
+
+// coding notebooks — Python cells the student runs in their own browser
+classRouter.get("/notebooks", asyncRoute(notebookController.listNotebooks));
+classRouter.post("/notebooks", requireTeacher, asyncRoute(notebookController.createNotebook));
+classRouter.get("/notebooks/:notebookId", requireTeacher, asyncRoute(notebookController.getNotebook));
+classRouter.patch("/notebooks/:notebookId", requireTeacher, asyncRoute(notebookController.updateNotebook));
+classRouter.delete("/notebooks/:notebookId", requireTeacher, asyncRoute(notebookController.deleteNotebook));
+classRouter.post("/notebooks/:notebookId/publish", requireTeacher, asyncRoute(notebookController.publishNotebook));
+classRouter.get("/notebooks/:notebookId/attempt", asyncRoute(notebookController.getMyAttempt));
+classRouter.get("/notebooks/:notebookId/attempts", requireTeacher, asyncRoute(notebookController.listAttempts));
+classRouter.get("/notebook-attempts/:attemptId", asyncRoute(notebookController.getAttempt));
+classRouter.post("/notebook-attempts/:attemptId/save", asyncRoute(notebookController.saveAttempt));
+classRouter.post("/notebook-attempts/:attemptId/submit", asyncRoute(notebookController.submitAttempt));
+classRouter.post("/notebook-attempts/:attemptId/reopen", requireTeacher, asyncRoute(notebookController.reopenAttempt));
+classRouter.patch("/notebook-attempts/:attemptId/grade", requireTeacher, asyncRoute(notebookController.gradeAttempt));
 
 // parameterised tutorials — every student gets their own numbers
 classRouter.get("/tutorials", asyncRoute(tutorialController.listTutorials));
