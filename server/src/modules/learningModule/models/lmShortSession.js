@@ -41,10 +41,16 @@ const lmShortSessionSchema = new mongoose.Schema({
 
   participants: [
     {
+      // For a guest this is a minted id that refs no user document — it exists
+      // so one phone keeps one identity for the length of the session.
       userId: { type: mongoose.Schema.Types.ObjectId, ref: 'user' },
       name: { type: String, default: '' },
       email: { type: String, default: '' },
       rollNumber: { type: String, default: '' },
+      // Not on the class roll: either a signed-out visitor who typed a name, or
+      // an account that is not enrolled here. Either way their score cannot go
+      // to the gradebook, and the report says so rather than implying a student.
+      isGuest: { type: Boolean, default: false },
       joinedAt: { type: Date, default: Date.now },
       lastSeenAt: { type: Date, default: Date.now },
       _id: false,

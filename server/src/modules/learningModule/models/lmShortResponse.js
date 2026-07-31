@@ -22,6 +22,10 @@ const lmShortResponseSchema = new mongoose.Schema({
   // so aggregation never needs a join.
   participantName: { type: String, default: '' },
   rollNumber: { type: String, default: '' },
+  // Answered without being on the class roll — see lmShortSession. Copied here
+  // as well so a roll-up can tell a guest from a student even for a response
+  // whose participant row went missing.
+  isGuest: { type: Boolean, default: false },
 
   /* ---- the answer, by type ---- */
   // mcq / msq / truefalse / ranking: option indices. For ranking the array

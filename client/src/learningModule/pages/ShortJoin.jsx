@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   Alert,
   AlertIcon,
@@ -13,13 +13,21 @@ import {
 } from '@chakra-ui/react';
 
 import lmApi from '../api/lmApi';
+import { loginPathFor } from '../../authRedirect';
 
 /**
  * Code entry for joining a live Short.
  *
  * Not class-scoped on purpose: someone walking into a lecture has a six-digit
  * code off the projector and nothing else. The server resolves the code to a
- * session and checks class membership there.
+ * session and decides there who may join.
+ *
+ * Whether a sign-in is needed is a property of the deck (`requireLogin`), which
+ * this page cannot know until the code has been sent. So it always tries the
+ * plain join first and lets the answer tell it what else to ask for:
+ * `LOGIN_REQUIRED` sends them to the login page and back, `NAME_REQUIRED`
+ * reveals the name field. That keeps one round trip in the common case instead
+ * of looking the code up twice.
  *
  * When the code is already in the URL — the QR path, or the notification link —
  * this joins straight away and the form is never shown.
@@ -27,13 +35,16 @@ import lmApi from '../api/lmApi';
 export default function ShortJoin() {
   const { code: codeParam } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [code, setCode] = useState(codeParam || '');
+  const [name, setName] = useState('');
+  const [needsName, setNeedsName] = useState(false);
   const [busy, setBusy] = useState(Boolean(codeParam));
   const [error, setError] = useState('');
 
   const join = useCallback(
-    async (value) => {
+    async (value, displayName) => {
       const trimmed = String(value || '').trim();
       if (!trimmed) {
         setError('Enter the code shown on screen.');
@@ -42,14 +53,28 @@ export default function ShortJoin() {
       setBusy(true);
       setError('');
       try {
-        const result = await lmApi.joinShort(trimmed);
+        const result = await lmApi.joinShort(trimmed, { name: displayName });
+        if (result.guestToken) lmApi.shortGuest.save(result.sessionId, result.guestToken);
         navigate(`/learning/short/live/${result.sessionId}`, { replace: true });
       } catch (err) {
-        setError(err.message);
+        const reason = err.payload?.code;
+        if (reason === 'LOGIN_REQUIRED') {
+          // Come back to this exact code once they have signed in.
+          navigate(loginPathFor({ ...location, pathname: `/learning/short/join/${trimmed}` }), {
+            replace: true,
+          });
+          return;
+        }
+        if (reason === 'NAME_REQUIRED') {
+          setNeedsName(true);
+          setError('');
+        } else {
+          setError(err.message);
+        }
         setBusy(false);
       }
     },
-    [navigate],
+    [location, navigate],
   );
 
   useEffect(() => {
@@ -57,6 +82,7 @@ export default function ShortJoin() {
   }, [codeParam, join]);
 
   const cardBg = useColorModeValue('white', 'gray.800');
+  const submit = () => join(code, name.trim());
 
   return (
     <Box maxW="420px" mx="auto" mt={{ base: 6, md: 16 }} bg={cardBg} borderRadius="xl" borderWidth="1px" p={8}>
@@ -65,7 +91,7 @@ export default function ShortJoin() {
           <Text fontSize="3xl">⚡</Text>
           <Heading size="lg">Join a short</Heading>
           <Text fontSize="sm" opacity={0.7} mt={1}>
-            Type the code on the projector.
+            {needsName ? 'One more thing — what should the room call you?' : 'Type the code on the projector.'}
           </Text>
         </Box>
 
@@ -80,7 +106,7 @@ export default function ShortJoin() {
           value={code}
           onChange={(event) => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
           onKeyDown={(event) => {
-            if (event.key === 'Enter') join(code);
+            if (event.key === 'Enter') submit();
           }}
           placeholder="000000"
           textAlign="center"
@@ -91,10 +117,31 @@ export default function ShortJoin() {
           // Brings up the numeric keypad on a phone without rejecting paste.
           inputMode="numeric"
           autoComplete="off"
-          autoFocus
+          autoFocus={!needsName}
         />
 
-        <Button colorScheme="purple" size="lg" onClick={() => join(code)} isLoading={busy}>
+        {needsName ? (
+          <Input
+            value={name}
+            onChange={(event) => setName(event.target.value.slice(0, 60))}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') submit();
+            }}
+            placeholder="Your name"
+            size="lg"
+            textAlign="center"
+            autoComplete="name"
+            autoFocus
+          />
+        ) : null}
+
+        <Button
+          colorScheme="purple"
+          size="lg"
+          onClick={submit}
+          isLoading={busy}
+          isDisabled={needsName && !name.trim()}
+        >
           Join
         </Button>
 

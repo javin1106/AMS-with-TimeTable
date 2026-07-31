@@ -65,6 +65,13 @@ const lmShortSchema = new mongoose.Schema({
   slides: [slideSchema],
 
   settings: {
+    // On (the default, and how every deck behaved before this existed) a
+    // participant must be signed in *and* on the class roll. Off, the six-digit
+    // code is the whole credential: a visitor types a display name and answers.
+    // Faculty decide per deck, because the right answer differs between a
+    // graded warm-up for a registered class and a guest lecture where making
+    // sixty visitors create accounts means the poll simply does not happen.
+    requireLogin: { type: Boolean, default: true },
     // Names are hidden from the projected results. Responses are still tied to
     // an account server-side, so the teacher can see who has not answered and
     // grading remains possible — "anonymous" is about what the room sees.
