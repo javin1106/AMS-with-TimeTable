@@ -132,7 +132,7 @@ export default function QuizBrief() {
 
   return (
     <Box maxW="900px">
-      <Button size="sm" variant="ghost" mb={2} onClick={() => navigate(`/learning/class/${classId}/grades`)}>
+      <Button size="sm" variant="ghost" mb={2} onClick={() => navigate(`/learning/class/${classId}/quizzes`)}>
         ← Back to quizzes
       </Button>
 

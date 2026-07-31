@@ -33,7 +33,7 @@ import {
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import RichTextEditor from '../components/RichTextEditor';
-import { ErrorState, Loading, SectionCard } from '../components/common';
+import { CopyLinkButton, ErrorState, Loading, SectionCard } from '../components/common';
 
 const BLANK_QUESTION = {
   question: '',
@@ -359,7 +359,7 @@ export default function QuizEditor() {
     try {
       await lmApi.publishQuiz(classId, quizId, { publish: true });
       toast({ status: 'success', title: 'Published to the class' });
-      navigate(`/learning/class/${classId}/grades`);
+      navigate(`/learning/class/${classId}/quizzes`);
     } catch (err) {
       toast({ status: 'error', title: err.message, duration: 10000 });
     }
@@ -379,7 +379,7 @@ export default function QuizEditor() {
     <Box>
       <Flex justify="space-between" align="center" mb={4} gap={3} wrap="wrap">
         <Box>
-          <Button size="sm" variant="ghost" onClick={() => navigate(`/learning/class/${classId}/grades`)}>
+          <Button size="sm" variant="ghost" onClick={() => navigate(`/learning/class/${classId}/quizzes`)}>
             ← Back to quizzes
           </Button>
           <Heading size="md" mt={1}>
@@ -392,6 +392,7 @@ export default function QuizEditor() {
           </Text>
         </Box>
         <HStack>
+          {quiz.published && <CopyLinkButton to={`/learning/class/${classId}/quiz/${quizId}`} />}
           <Button size="sm" variant="outline" onClick={save} isLoading={saving}>
             Save
           </Button>

@@ -4,12 +4,15 @@ import {
   AlertIcon,
   Badge,
   Box,
+  Button,
   Center,
   Flex,
+  HStack,
   Heading,
   Spinner,
   Text,
   Tooltip,
+  useClipboard,
 } from '@chakra-ui/react';
 import { formatDateTime, relativeTime } from '../format';
 
@@ -106,6 +109,86 @@ export function StatTile({ label, value, hint, accent = 'blue.500' }) {
           {hint}
         </Text>
       )}
+    </Box>
+  );
+}
+
+/**
+ * Copies an in-app route as a full, shareable URL. The stored value is absolute
+ * because the link is meant to leave the app — pasted into a chat, an email or
+ * a class announcement — where a bare "/learning/…" path is useless.
+ */
+export function CopyLinkButton({ to, label = 'Copy link', copiedLabel = 'Link copied!', ...rest }) {
+  const url = typeof window === 'undefined' ? to : new URL(to, window.location.origin).href;
+  const { onCopy, hasCopied } = useClipboard(url);
+  return (
+    <Tooltip label={hasCopied ? copiedLabel : url} placement="top">
+      <Button size="sm" variant="outline" onClick={onCopy} {...rest}>
+        {hasCopied ? '✓ Copied' : `🔗 ${label}`}
+      </Button>
+    </Tooltip>
+  );
+}
+
+/**
+ * Theme-colour swatches. The selected state is drawn with a ring (box-shadow)
+ * and a tick rather than a border width, so the choice reads at a glance and
+ * does not depend on the global border-style reset.
+ */
+export function ColorPicker({ value, options, onChange, label = 'colour' }) {
+  return (
+    <HStack spacing={3} flexWrap="wrap">
+      {options.map((color) => {
+        const selected = value === color;
+        return (
+          <Box
+            key={color}
+            as="button"
+            type="button"
+            aria-label={`Use ${label} ${color}`}
+            aria-pressed={selected}
+            w="32px"
+            h="32px"
+            borderRadius="full"
+            bg={color}
+            display="flex"
+            alignItems="center"
+            justifyContent="center"
+            color="white"
+            fontSize="sm"
+            fontWeight="700"
+            lineHeight="1"
+            transition="transform 0.12s ease, box-shadow 0.12s ease"
+            transform={selected ? 'scale(1.15)' : 'none'}
+            boxShadow={
+              selected
+                ? `0 0 0 2px #fff, 0 0 0 4px ${color}`
+                : 'inset 0 0 0 1px rgba(0, 0, 0, 0.15)'
+            }
+            _hover={{ transform: selected ? 'scale(1.15)' : 'scale(1.1)' }}
+            _focusVisible={{ outline: '2px solid', outlineColor: 'blue.500', outlineOffset: '2px' }}
+            onClick={() => onChange(color)}
+          >
+            {selected ? '✓' : ''}
+          </Box>
+        );
+      })}
+    </HStack>
+  );
+}
+
+/** Miniature of the dashboard class card, so the theme colour is visible while picking it. */
+export function ClassCardPreview({ color, title, subtitle }) {
+  return (
+    <Box borderWidth="1px" borderColor="gray.200" borderRadius="lg" overflow="hidden">
+      <Box bg={color} px={4} py={3} color="white" transition="background-color 0.15s ease">
+        <Text fontWeight="700" noOfLines={1}>
+          {title}
+        </Text>
+        <Text fontSize="xs" opacity={0.9} noOfLines={1}>
+          {subtitle || ' '}
+        </Text>
+      </Box>
     </Box>
   );
 }

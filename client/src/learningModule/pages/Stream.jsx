@@ -342,8 +342,8 @@ export default function Stream() {
             </Text>
             .
           </Text>
-          <Button as={RouterLink} to={`/learning/class/${classId}/classwork`} size="sm" mt={3} w="100%" variant="outline">
-            View all classwork
+          <Button as={RouterLink} to={`/learning/class/${classId}/material`} size="sm" mt={3} w="100%" variant="outline">
+            View class material
           </Button>
         </Box>
 
@@ -369,7 +369,7 @@ export default function Stream() {
             title="Nothing here yet"
             description={
               isTeacher
-                ? 'Post an announcement or add classwork to get the class started.'
+                ? 'Post an announcement or add material to get the class started.'
                 : 'Your teacher has not posted anything yet.'
             }
           />
