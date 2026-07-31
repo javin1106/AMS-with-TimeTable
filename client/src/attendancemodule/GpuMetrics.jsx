@@ -189,7 +189,7 @@ export default function GpuMetrics() {
     const endMs = customEnd ? new Date(customEnd).getTime() : Number.POSITIVE_INFINITY;
     return samples.filter((sample) => sample.timestamp >= startMs && sample.timestamp <= endMs);
   }, [customEnd, customStart, range, samples]);
-  const chartWidth = Math.max(980, Math.min(chartSamples.length * 6, 6000));
+  const chartWidth = Math.max(980, chartSamples.length * 34);
 
   const vramText = useMemo(() => {
     if (!latest?.memUsedMiB || !latest?.memTotalMiB) return '--';
@@ -292,9 +292,6 @@ export default function GpuMetrics() {
                     <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                     <XAxis
                       dataKey="timestamp"
-                      type="number"
-                      domain={['dataMin', 'dataMax']}
-                      scale="time"
                       height={44}
                       minTickGap={34}
                       tick={<DateTimeTick />}

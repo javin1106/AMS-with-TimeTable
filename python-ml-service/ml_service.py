@@ -56,8 +56,6 @@ LOG_FORMATTER = logging.Formatter()
 
 
 def _append_log(level, name, message, created=None):
-    if "/health" in message or "/metrics/gpu" in message or "/status" in message:
-        return
     timestamp = datetime.fromtimestamp(created or datetime.now().timestamp()).isoformat(timespec="seconds")
     with LOG_LOCK:
         LOG_BUFFER.append({
