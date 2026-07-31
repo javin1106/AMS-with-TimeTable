@@ -2,6 +2,7 @@
 
 const User = require("../../../models/usermanagement/user");
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const jwtSecret = process.env.JWT_SECRET;
 
@@ -173,69 +174,83 @@ exports.verification = async (req, res) => {
   }
 }
 
+/**
+ * A bcrypt hash of a value nobody knows, compared against when the account does
+ * not exist.
+ *
+ * Without it the not-found path skips bcrypt entirely and answers in about a
+ * millisecond, while a wrong password takes the ~100ms bcrypt costs. That gap is
+ * readable over the network, so identical wording would still tell an attacker
+ * which addresses are registered. Doing the same work either way closes it.
+ */
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(crypto.randomBytes(32).toString("hex"), 10);
+
+// One answer for every way of failing. Distinguishing "no such user" from "wrong
+// password" turns the login form into a directory of who holds an account here.
+const INVALID_CREDENTIALS = "Invalid email or password.";
+
+/** Only what the client actually needs; never the document. */
+const sessionUser = (user) => ({
+  id: user._id,
+  name: user.name,
+  email: user.email,
+  role: user.role,
+});
+
 // login
-exports.login = async (req, res, next) => {
+exports.login = async (req, res) => {
   const { email, password } = req.body;
 
-  // Check if username and password are provided
-  if (!email || !password) {
-    return res.status(400).json({
-      message: "Username or Password not present",
-    });
+  // Typed, not merely present. A JSON body can carry `{"email": {"$ne": null}}`,
+  // which reaches findOne as a Mongo operator and matches an arbitrary account.
+  // It is not an authentication bypass — the password still has to verify
+  // against whoever it matched — but it lets an unauthenticated caller pick
+  // which document the server goes and looks at, and there is no reason to
+  // allow it.
+  if (typeof email !== "string" || typeof password !== "string" || !email || !password) {
+    return res.status(400).json({ message: "Email and password are required." });
   }
 
   try {
-    const user = await User.findOne({ email });
+    // `+password` because the field is select:false on the schema — the hash is
+    // pulled deliberately, here, and nowhere else.
+    const user = await User.findOne({ email }).select("+password");
 
-    if (!user) {
-      return res.status(400).json({
-        message: "Login not successful",
-        error: "User not found",
-      });
+    // Compared in both branches so the timing does not differ; see
+    // DUMMY_PASSWORD_HASH.
+    const matches = await bcrypt.compare(password, user?.password || DUMMY_PASSWORD_HASH);
+
+    if (!user || !matches) {
+      return res.status(401).json({ message: INVALID_CREDENTIALS });
     }
 
-    // Compare given password with hashed password
-    bcrypt.compare(password, user.password, (compareErr, result) => {
-      if (compareErr) {
-        return res.status(500).json({
-          message: "Password comparison failed",
-          error: compareErr.message,
-        });
-      }
+    const maxAge = 3 * 60 * 60; // 3 hours in seconds
+    const token = jwt.sign({ id: user._id, email, role: user.role }, jwtSecret, {
+      expiresIn: maxAge,
+    });
 
-      if (result) {
-        const maxAge = 3 * 60 * 60; // 3 hours in seconds
-        const token = jwt.sign(
-          { id: user._id, email, role: user.role },
-          jwtSecret,
-          {
-            expiresIn: maxAge,
-          }
-        );
+    res.cookie("jwt", token, {
+      httpOnly: true,
+      maxAge: maxAge * 1000,
+      secure: true,
+      sameSite: "none",
+    });
 
-        // Set the JWT token as a cookie
-        res.cookie("jwt", token, {
-          httpOnly: true,
-          maxAge: maxAge * 1000,
-          // domain: "nitjtt.netlify.app",
-          secure: true,
-          sameSite: "none",
-        });
-
-        res.status(200).json({
-          message: "User successfully logged in",
-          token,
-          user,
-        });
-      } else {
-        res.status(400).json({ message: "Login not successful" });
-      }
+    return res.status(200).json({
+      message: "User successfully logged in",
+      // Still returned alongside the httpOnly cookie because the client stores
+      // it for the Authorization header. Worth revisiting — a token in
+      // localStorage is readable by any XSS, which is exactly what httpOnly on
+      // the cookie is there to prevent — but removing it is a client-wide change
+      // rather than a login fix.
+      token,
+      user: sessionUser(user),
     });
   } catch (error) {
-    res.status(400).json({
-      message: "An error occurred",
-      error: error.message,
-    });
+    console.error("[usermanagement] login", error.message);
+    // Never echo the underlying error: it has previously carried database
+    // details straight to an unauthenticated caller.
+    return res.status(500).json({ message: "An error occurred while signing in." });
   }
 };
 

@@ -139,7 +139,9 @@ describe("POST /auth/reset-password", () => {
     expect(res.body.success).toBe(true);
 
     // Password really changed…
-    const user = await User.findOne({ email: EMAIL });
+    // `+password` because the field is select:false on the schema — an ordinary
+    // findOne no longer returns the hash, which is the point.
+    const user = await User.findOne({ email: EMAIL }).select("+password");
     expect(await bcrypt.compare("newpass!1", user.password)).toBe(true);
     // …and the OTP is single-use.
     expect(await OTP.countDocuments()).toBe(0);

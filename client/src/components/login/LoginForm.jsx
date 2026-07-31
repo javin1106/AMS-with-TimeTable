@@ -3,7 +3,6 @@ import { useLocation, useNavigate } from "react-router-dom";
 import FormHeader from './FormHeader'
 import getEnvironment from '../../getenvironment'
 import { redirectTargetFrom } from '../../authRedirect'
-import axios from 'axios'
 import {
   Button,
   Input,
@@ -22,10 +21,6 @@ const LoginForm = () => {
   const apiUrl = getEnvironment()
   const navigate = useNavigate();
   const location = useLocation();
-  const [formValues, setFormValues] = useState({
-    email:''
-  });
-
   const handleForgotPassword = () => {
     // Navigate to the current URL with an additional path segment
     navigate(`/forgot-password`);
@@ -34,7 +29,6 @@ const LoginForm = () => {
   const handleSubmit = async (e) => {
     setIsLoading(true)
     e.preventDefault()
-    formValues.email = email;
     const userData = { email, password }
 
     try {
@@ -48,27 +42,10 @@ const LoginForm = () => {
       })
 
       const responseData = await response.json()
-      console.log(responseData);
 
       if (!response.ok) {
         setMessage(`Login failed: ${responseData.message}`);
         return;
-      }
-
-      if (responseData.user && typeof responseData.user.isEmailVerified !== 'undefined') {
-        if (!responseData.user.isEmailVerified && responseData.user.role.includes('PRM')) {
-          localStorage.setItem('formValues', JSON.stringify(formValues));
-          await axios.post(`${apiUrl}/auth/otp`, { email });
-          navigate('/prm/emailverification');
-          return;
-        }
-      }
-
-      if (responseData.user && typeof responseData.user.isFirstLogin !== 'undefined') {
-        if (responseData.user.isFirstLogin && responseData.user.role.includes('PRM')) {
-          navigate('/prm/userdetails');
-          return;
-        }
       }
 
       if (responseData.token) {

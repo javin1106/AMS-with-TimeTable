@@ -13,7 +13,7 @@ const cookieParser = require("cookie-parser");
 
 const axios = require("axios");
 const helmet = require("helmet");
-const rateLimit = require("express-rate-limit");
+const { applyAuthRateLimits } = require("./modules/usermanagement/loginRateLimit");
 // Must load before any route module makes its first request to the ML
 // service — registers the axios interceptor that attaches the shared-secret
 // header (see mlServiceAuth.js).
@@ -39,19 +39,6 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" },
   crossOriginEmbedderPolicy: false,
 }));
-
-// Rate limiting for auth endpoints
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20,
-  message: { message: "Too many requests, please try again later." },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-app.use("/api/v1/users/login", authLimiter);
-app.use("/api/v1/users/register", authLimiter);
-app.use("/users/login", authLimiter);
-app.use("/users/register", authLimiter);
 
 // CORS configuration
 app.use(
@@ -160,6 +147,18 @@ app.use(express.json({
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 // app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+// Throttling for the credential endpoints.
+//
+// Registered here, *after* express.json, and not up with the other top-of-file
+// middleware: the per-account limiter keys on req.body.email, and before the
+// body parser runs that is always undefined — every request would land in one
+// shared bucket and five bad passwords anywhere would lock out the whole
+// installation.
+//
+// See loginRateLimit.js for why the strict limit is keyed on the account rather
+// than the IP, and for the paths the previous limiter was watching by mistake.
+applyAuthRateLimits(app);
+
 app.use(checkDatabaseConnection);
 app.use(express.static(path.join(__dirname + "/../../client/dist")));
 app.use("/uploads",express.static(path.join(__dirname ,"..","uploads")));
