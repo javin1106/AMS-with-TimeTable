@@ -13,6 +13,39 @@ class LmApiError extends Error {
   }
 }
 
+/**
+ * A guest's identity for one live Short — see the `requireLogin` setting. Kept
+ * in sessionStorage rather than localStorage: it belongs to this tab and this
+ * lecture, and should not outlive either. Private windows allow it, which is
+ * rather the point when the whole feature exists for people without accounts.
+ */
+const GUEST_KEY = 'lmShortGuest';
+
+export const shortGuest = {
+  save: (sessionId, token) => {
+    try {
+      sessionStorage.setItem(GUEST_KEY, JSON.stringify({ sessionId: String(sessionId), token }));
+    } catch {
+      // A browser refusing storage is not a reason to fail the join; the
+      // participant simply cannot survive a reload.
+    }
+  },
+  token: () => {
+    try {
+      return JSON.parse(sessionStorage.getItem(GUEST_KEY) || 'null')?.token || null;
+    } catch {
+      return null;
+    }
+  },
+  clear: () => {
+    try {
+      sessionStorage.removeItem(GUEST_KEY);
+    } catch {
+      /* nothing to clear */
+    }
+  },
+};
+
 async function request(path, { method = 'GET', body, raw = false, signal } = {}) {
   const options = {
     method,
@@ -23,6 +56,11 @@ async function request(path, { method = 'GET', body, raw = false, signal } = {})
 
   const token = localStorage.getItem('token');
   if (token) options.headers.Authorization = `Bearer ${token}`;
+
+  // Sent alongside, not instead of: a signed-in user who also holds a guest
+  // token is resolved by their account, and the server ignores the header.
+  const guestToken = shortGuest.token();
+  if (guestToken) options.headers['X-Short-Guest'] = guestToken;
 
   if (body instanceof FormData) {
     // Let the browser set the multipart boundary.
@@ -75,6 +113,11 @@ const lmApi = {
   markNotificationsRead: (ids) => request('/notifications/read', { method: 'POST', body: { ids } }),
   clearReadNotifications: () => request('/notifications/read', { method: 'DELETE' }),
   deleteNotification: (id) => request(`/notifications/${id}`, { method: 'DELETE' }),
+
+  /* timetable-sourced pickers (create class) */
+  ttBranches: () => request('/timetable/branches'),
+  ttSemesters: (code) => request(`/timetable/semesters${qs({ code })}`),
+  ttSubjects: (code, sem) => request(`/timetable/subjects${qs({ code, sem })}`),
 
   /* classes */
   listClasses: (status) => request(`/classes${qs({ status })}`),
@@ -293,7 +336,14 @@ const lmApi = {
 
   // The participant side is not class-scoped: a phone has the join code and
   // nothing else until the server resolves it.
-  joinShort: (code) => request(`/shorts/join/${encodeURIComponent(code)}`, { method: 'POST', body: {} }),
+  // `name` is only read by the server when the deck allows guests and nobody is
+  // signed in; it is what the room and the report will show.
+  joinShort: (code, { name } = {}) =>
+    request(`/shorts/join/${encodeURIComponent(code)}`, {
+      method: 'POST',
+      body: name ? { name } : {},
+    }),
+  shortGuest,
   shortLiveState: (sessionId) => request(`/shorts/live/${sessionId}`),
   answerShort: (sessionId, body) =>
     request(`/shorts/live/${sessionId}/answer`, { method: 'POST', body }),

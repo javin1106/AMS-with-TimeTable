@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Link as RouterLink, NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { Link as RouterLink, NavLink, Outlet } from 'react-router-dom';
 import {
+  Avatar,
   Badge,
   Box,
   Button,
@@ -16,10 +17,19 @@ import {
   Heading,
   Icon,
   IconButton,
+  Menu,
+  MenuButton,
+  MenuDivider,
+  MenuItem,
+  MenuList,
   Text,
   useDisclosure,
 } from '@chakra-ui/react';
+import getEnvironment from '../../getenvironment';
+import { loginPathFor } from '../../authRedirect';
 import lmApi from '../api/lmApi';
+import useStableNavigate from '../hooks/useStableNavigate';
+import { canCreateClass, isStudentOnly } from '../roles';
 import NotificationBell from './NotificationBell';
 
 const NAV_ITEMS = [
@@ -69,7 +79,7 @@ export default function LearningLayout() {
   const [me, setMe] = useState(null);
   const [overview, setOverview] = useState(null);
   const { isOpen, onOpen, onClose } = useDisclosure();
-  const navigate = useNavigate();
+  const navigate = useStableNavigate();
 
   const load = useCallback(async () => {
     try {
@@ -80,7 +90,10 @@ export default function LearningLayout() {
       setMe(profile);
       setOverview(summary);
     } catch (error) {
-      if (error.status === 401) navigate('/login', { replace: true });
+      // `window.location` rather than `useLocation()` so the current page isn't
+      // a dependency of `load` — that would refetch the profile on every hop
+      // inside the module. Under BrowserRouter the two agree.
+      if (error.status === 401) navigate(loginPathFor(window.location), { replace: true });
     }
   }, [navigate]);
 
@@ -88,8 +101,27 @@ export default function LearningLayout() {
     load();
   }, [load]);
 
+  const handleLogout = useCallback(async () => {
+    try {
+      await fetch(`${getEnvironment()}/user/getuser/logout`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+    } catch (error) {
+      // A failed call must not strand the user on a signed-in screen; the
+      // local token still goes and the login page re-checks the session.
+      console.error('Error during logout:', error.message);
+    }
+    localStorage.removeItem('token');
+    navigate('/login', { replace: true });
+  }, [navigate]);
+
+  const mayCreateClass = canCreateClass(me?.roles);
+  // Students have no platform navbar above this header, so it owns the page.
+  const studentOnly = isStudentOnly(me?.roles);
+
   return (
-    <Box minH="calc(100vh - 64px)" bg="gray.50">
+    <Box minH={studentOnly ? '100vh' : 'calc(100vh - 64px)'} bg="gray.50">
       <Box bg="white" borderBottomWidth="1px" borderColor="gray.200" position="sticky" top={0} zIndex={20}>
         <Container maxW="1400px" py={3}>
           <Flex align="center" gap={3}>
@@ -138,9 +170,42 @@ export default function LearningLayout() {
             >
               Join class
             </Button>
-            <Button size="sm" colorScheme="blue" onClick={() => navigate('/learning?create=1')}>
-              Create
-            </Button>
+            {mayCreateClass && (
+              <Button size="sm" colorScheme="blue" onClick={() => navigate('/learning?create=1')}>
+                Create
+              </Button>
+            )}
+
+            {me && (
+              <Menu placement="bottom-end">
+                <MenuButton as={Button} variant="ghost" size="sm" px={2}>
+                  <HStack spacing={2}>
+                    <Avatar size="xs" name={me.name} />
+                    <Text
+                      fontSize="sm"
+                      fontWeight="600"
+                      noOfLines={1}
+                      maxW="140px"
+                      display={{ base: 'none', md: 'block' }}
+                    >
+                      {me.name}
+                    </Text>
+                  </HStack>
+                </MenuButton>
+                <MenuList>
+                  <Box px={3} py={2}>
+                    <Text fontSize="sm" fontWeight="600" noOfLines={1}>
+                      {me.name}
+                    </Text>
+                    <Text fontSize="xs" color="gray.500" noOfLines={1}>
+                      {me.email}
+                    </Text>
+                  </Box>
+                  <MenuDivider />
+                  <MenuItem onClick={handleLogout}>Log out</MenuItem>
+                </MenuList>
+              </Menu>
+            )}
           </Flex>
         </Container>
       </Box>

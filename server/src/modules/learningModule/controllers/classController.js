@@ -32,8 +32,20 @@ const publicClass = (klass, role) => ({
 });
 
 exports.createClass = async (req, res) => {
-  const { name, section, subject, subjectCode, room, description, coverColor, meetLink, academicYear, semester, batch } =
-    req.body;
+  const {
+    name,
+    section,
+    subject,
+    subjectCode,
+    room,
+    description,
+    coverColor,
+    meetLink,
+    academicYear,
+    semester,
+    batch,
+    dept,
+  } = req.body;
 
   if (!name || !String(name).trim()) {
     return res.status(400).json({ message: "Class name is required." });
@@ -52,7 +64,9 @@ exports.createClass = async (req, res) => {
     academicYear: academicYear || "",
     semester: semester || "",
     batch: batch || "",
-    dept: req.lmUser.department || "",
+    // The branch picked in the create form wins — faculty routinely teach a
+    // class outside their own department.
+    dept: dept || req.lmUser.department || "",
     code,
     ownerId: req.lmUser.id,
     ownerName: req.lmUser.name,

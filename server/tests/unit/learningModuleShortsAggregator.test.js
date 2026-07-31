@@ -8,6 +8,59 @@ const agg = require('../../src/modules/learningModule/services/shortsAggregator'
 
 const response = (overrides) => ({ selected: [], text: '', number: null, correct: null, ...overrides });
 
+describe('learningModule shortsAggregator — effectiveSlideState', () => {
+  const T0 = new Date('2026-01-01T10:00:00Z').getTime();
+  const autoReveal = { settings: { autoRevealOnClose: true } };
+  const noAutoReveal = { settings: { autoRevealOnClose: false } };
+  const openAt = (deadlineMs) => ({
+    slideState: 'open',
+    slideDeadline: deadlineMs === null ? null : new Date(deadlineMs),
+  });
+
+  it('leaves a slide open while the countdown is still running', () => {
+    expect(agg.effectiveSlideState(openAt(T0 + 5000), autoReveal, T0)).toBe('open');
+  });
+
+  it('leaves a slide with no countdown open indefinitely', () => {
+    // timeLimitSec 0 means the teacher closes it by hand; it must never time out
+    // on its own.
+    expect(agg.effectiveSlideState(openAt(null), autoReveal, T0 + 60 * 60 * 1000)).toBe('open');
+  });
+
+  it('reveals a slide once the countdown has passed', () => {
+    // This is the whole point: the answer appears when time is up, without the
+    // teacher having to press anything.
+    expect(agg.effectiveSlideState(openAt(T0 + 5000), autoReveal, T0 + 5001)).toBe('revealed');
+  });
+
+  it('only locks, not reveals, when the deck turns auto-reveal off', () => {
+    expect(agg.effectiveSlideState(openAt(T0 + 5000), noAutoReveal, T0 + 5001)).toBe('locked');
+  });
+
+  it('treats the exact deadline instant as still open', () => {
+    // The boundary matches submitResponse, which rejects strictly after the
+    // deadline — otherwise an answer could be accepted by one and refused by the
+    // other in the same millisecond.
+    expect(agg.effectiveSlideState(openAt(T0 + 5000), autoReveal, T0 + 5000)).toBe('open');
+  });
+
+  it('never resurrects a slide the teacher already closed', () => {
+    // A locked slide with a stale deadline must not jump to revealed, and a
+    // waiting slide must not become anything at all.
+    expect(agg.effectiveSlideState({ slideState: 'locked', slideDeadline: new Date(T0) }, autoReveal, T0 + 9999)).toBe('locked');
+    expect(agg.effectiveSlideState({ slideState: 'waiting', slideDeadline: null }, autoReveal, T0)).toBe('waiting');
+    expect(agg.effectiveSlideState({ slideState: 'revealed', slideDeadline: null }, autoReveal, T0)).toBe('revealed');
+  });
+
+  it('accepts a Date as well as a timestamp for now', () => {
+    expect(agg.effectiveSlideState(openAt(T0 + 5000), autoReveal, new Date(T0 + 6000))).toBe('revealed');
+  });
+
+  it('defaults to waiting when there is no session', () => {
+    expect(agg.effectiveSlideState(null, autoReveal, T0)).toBe('waiting');
+  });
+});
+
 describe('learningModule shortsAggregator — gradability', () => {
   it('treats a choice slide with a key as gradable', () => {
     expect(agg.slideIsGradable({ type: 'mcq', correctAnswers: ['0'] })).toBe(true);

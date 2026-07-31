@@ -635,17 +635,27 @@ export default function ShortEditor() {
 
           <SimpleGrid columns={{ base: 1, md: 2 }} spacingY={3} spacingX={6}>
             {[
+              // The fourth field is the default for a deck saved before the
+              // setting existed: those must read as on, not as off.
+              [
+                'requireLogin',
+                'Require sign-in to join',
+                'On, only signed-in members of this class can answer. Off, anyone with the code types a name and joins — guests are left out of the gradebook.',
+                true,
+              ],
               ['anonymous', 'Hide names in results', 'Answers are still tied to accounts server-side.'],
               ['showResultsToStudents', 'Mirror results to phones', 'Otherwise results stay on the projector.'],
               ['allowChangeAnswer', 'Allow changing an answer', 'While the slide is still open.'],
               ['allowLateJoin', 'Allow joining mid-deck', 'Off means only slide 1 accepts new joiners.'],
               ['autoRevealOnClose', 'Reveal the answer when I close a slide', ''],
               ['graded', 'Send scores to the gradebook', 'Creates classwork when the session ends.'],
-            ].map(([key, label, hint]) => (
+            ].map(([key, label, hint, defaultOn]) => (
               <FormControl key={key} display="flex" alignItems="flex-start" gap={3}>
                 <Switch
                   mt={1}
-                  isChecked={Boolean(short.settings?.[key])}
+                  isChecked={
+                    defaultOn ? short.settings?.[key] !== false : Boolean(short.settings?.[key])
+                  }
                   onChange={(event) => setSetting(key, event.target.checked)}
                 />
                 <Box>

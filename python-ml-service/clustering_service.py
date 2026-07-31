@@ -112,11 +112,7 @@ IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 # FIX-E — UI mask regions (CP IP Cam + RecForth, calibrated to 1080 p)
 # Format: (y1, y2, x1, x2)  in 1080 p reference pixels
 # ─────────────────────────────────────────────────────────────────────────────
-UI_MASK_REGIONS_1080P = [
-    (   0,  65,  870, 1920),   # timestamp banner  (top-right)
-    ( 610, 730,    0,  290),   # RecForth logo     (bottom-left)
-    (1000, 1080,   0, 1920),   # taskbar / progress bar (bottom strip)
-]
+UI_MASK_REGIONS_1080P = []
 
 
 def _build_ui_mask(H: int, W: int) -> np.ndarray:

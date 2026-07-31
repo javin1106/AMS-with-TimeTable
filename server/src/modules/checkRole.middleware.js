@@ -1,10 +1,11 @@
 const jwt = require("jsonwebtoken");
 const jwtSecret = process.env.JWT_SECRET;
 const addEvent = require("../models/certificateModule/addevent");
+const readAuthToken = require("./readAuthToken");
 
 const checkRole = (requiredRoles, checkEvent = false) => {
   return async (req, res, next) => {
-    const token = req.cookies.jwt;
+    const token = readAuthToken(req);
     if (!token) {
       return res.status(401).json({ message: "Unauthorized" });
     }

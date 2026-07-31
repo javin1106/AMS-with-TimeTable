@@ -4,7 +4,6 @@ import {
   Badge,
   Box,
   Button,
-  Checkbox,
   Divider,
   Flex,
   FormControl,
@@ -24,37 +23,29 @@ import {
   ModalFooter,
   ModalHeader,
   ModalOverlay,
-  NumberInput,
-  NumberInputField,
   Select,
-  SimpleGrid,
   Text,
-  Textarea,
   useDisclosure,
   useToast,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import { AttachmentPicker } from '../components/Attachments';
 import RichTextEditor from '../components/RichTextEditor';
-import { DueBadge, EmptyState, ErrorState, Loading, StateBadge } from '../components/common';
-import { WORK_TYPE_META, formatDate } from '../format';
+import { EmptyState, ErrorState, Loading } from '../components/common';
+import { formatDate } from '../format';
 
+// This tab is reading material and nothing else. Assessed work lives on its own
+// tabs — Quizzes, Shorts, Tutorials — each of which owns its own editor, so
+// there is no work-type picker here and nothing to grade.
 const BLANK = {
-  workType: 'assignment',
   title: '',
   instructions: '',
-  points: 100,
-  dueDate: '',
   topicId: '',
-  allowLateSubmission: true,
-  graded: true,
-  answerType: 'short',
-  choices: '',
   draft: false,
   scheduledFor: '',
 };
 
-function CourseworkModal({ isOpen, onClose, classId, topics, onSaved, initial }) {
+function MaterialModal({ isOpen, onClose, classId, topics, onSaved, initial }) {
   const [form, setForm] = useState(BLANK);
   const [attachments, setAttachments] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -63,14 +54,7 @@ function CourseworkModal({ isOpen, onClose, classId, topics, onSaved, initial })
   useEffect(() => {
     if (!isOpen) return;
     if (initial) {
-      setForm({
-        ...BLANK,
-        ...initial,
-        dueDate: initial.dueDate ? new Date(initial.dueDate).toISOString().slice(0, 16) : '',
-        topicId: initial.topicId || '',
-        choices: (initial.questionConfig?.choices || []).join('\n'),
-        answerType: initial.questionConfig?.answerType || 'short',
-      });
+      setForm({ ...BLANK, ...initial, topicId: initial.topicId || '' });
       setAttachments(initial.attachments || []);
     } else {
       setForm(BLANK);
@@ -80,20 +64,22 @@ function CourseworkModal({ isOpen, onClose, classId, topics, onSaved, initial })
 
   const set = (field, value) => setForm((prev) => ({ ...prev, [field]: value }));
 
-  const submit = async () => {
+  const save = async (asDraft) => {
     if (!form.title.trim()) return;
     setSaving(true);
     try {
       const payload = {
-        ...form,
+        workType: 'material',
+        title: form.title,
+        instructions: form.instructions,
         attachments,
-        dueDate: form.dueDate || null,
         topicId: form.topicId || null,
         scheduledFor: form.scheduledFor || undefined,
-        choices: form.choices
-          .split('\n')
-          .map((c) => c.trim())
-          .filter(Boolean),
+        draft: asDraft,
+        // Material is never assessed, so it carries no points and no deadline.
+        graded: false,
+        points: 0,
+        dueDate: null,
       };
       if (initial) await lmApi.updateCoursework(classId, initial._id, payload);
       else await lmApi.createCoursework(classId, payload);
@@ -106,102 +92,41 @@ function CourseworkModal({ isOpen, onClose, classId, topics, onSaved, initial })
     }
   };
 
-  const isMaterial = form.workType === 'material';
-
   return (
     <Modal isOpen={isOpen} onClose={onClose} size="2xl" scrollBehavior="inside">
       <ModalOverlay />
       <ModalContent>
-        <ModalHeader>{initial ? 'Edit item' : 'New classwork'}</ModalHeader>
+        <ModalHeader>{initial ? 'Edit material' : 'New material'}</ModalHeader>
         <ModalCloseButton />
         <ModalBody>
-          {!initial && (
-            <FormControl mb={4}>
-              <FormLabel fontSize="sm">Type</FormLabel>
-              <Select value={form.workType} onChange={(e) => set('workType', e.target.value)}>
-                <option value="assignment">📄 Assignment</option>
-                <option value="question">❓ Question</option>
-                <option value="material">📚 Material</option>
-              </Select>
-              <Text fontSize="xs" color="gray.500" mt={1}>
-                Quizzes are created from the Grades → Quizzes tab or the AI Studio.
-              </Text>
-            </FormControl>
-          )}
-
           <FormControl isRequired mb={4}>
             <FormLabel fontSize="sm">Title</FormLabel>
             <Input value={form.title} onChange={(e) => set('title', e.target.value)} autoFocus />
           </FormControl>
 
           <FormControl mb={4}>
-            <FormLabel fontSize="sm">{isMaterial ? 'Content' : 'Instructions'}</FormLabel>
+            <FormLabel fontSize="sm">Content</FormLabel>
             <RichTextEditor
               value={form.instructions}
               onChange={(html) => set('instructions', html)}
-              minH={isMaterial ? '260px' : '150px'}
-              placeholder={isMaterial ? 'Reading material, notes, links…' : 'What should students do?'}
+              minH="260px"
+              placeholder="Reading material, notes, links…"
             />
           </FormControl>
 
-          {form.workType === 'question' && (
-            <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4} mb={4}>
-              <FormControl>
-                <FormLabel fontSize="sm">Answer type</FormLabel>
-                <Select value={form.answerType} onChange={(e) => set('answerType', e.target.value)}>
-                  <option value="short">Short answer</option>
-                  <option value="mcq">Multiple choice</option>
-                </Select>
-              </FormControl>
-              {form.answerType === 'mcq' && (
-                <FormControl>
-                  <FormLabel fontSize="sm">Choices (one per line)</FormLabel>
-                  <Textarea rows={4} value={form.choices} onChange={(e) => set('choices', e.target.value)} />
-                </FormControl>
-              )}
-            </SimpleGrid>
-          )}
-
-          <SimpleGrid columns={{ base: 1, md: 3 }} spacing={4} mb={4}>
-            {!isMaterial && (
-              <FormControl>
-                <FormLabel fontSize="sm">Points</FormLabel>
-                <NumberInput min={0} value={form.points} onChange={(_, value) => set('points', Number.isNaN(value) ? 0 : value)}>
-                  <NumberInputField />
-                </NumberInput>
-              </FormControl>
-            )}
-            {!isMaterial && (
-              <FormControl>
-                <FormLabel fontSize="sm">Due date</FormLabel>
-                <Input type="datetime-local" value={form.dueDate} onChange={(e) => set('dueDate', e.target.value)} />
-              </FormControl>
-            )}
-            <FormControl>
-              <FormLabel fontSize="sm">Topic</FormLabel>
-              <Select value={form.topicId} onChange={(e) => set('topicId', e.target.value)}>
-                <option value="">No topic</option>
-                {topics.map((topic) => (
-                  <option key={topic._id} value={topic._id}>
-                    {topic.name}
-                  </option>
-                ))}
-              </Select>
-            </FormControl>
-          </SimpleGrid>
+          <FormControl mb={4} maxW="320px">
+            <FormLabel fontSize="sm">Topic</FormLabel>
+            <Select value={form.topicId} onChange={(e) => set('topicId', e.target.value)}>
+              <option value="">No topic</option>
+              {topics.map((topic) => (
+                <option key={topic._id} value={topic._id}>
+                  {topic.name}
+                </option>
+              ))}
+            </Select>
+          </FormControl>
 
           <AttachmentPicker attachments={attachments} onChange={setAttachments} disabled={saving} />
-
-          {!isMaterial && (
-            <Checkbox
-              mt={4}
-              size="sm"
-              isChecked={form.allowLateSubmission}
-              onChange={(e) => set('allowLateSubmission', e.target.checked)}
-            >
-              Accept work after the due date (flagged as late)
-            </Checkbox>
-          )}
 
           {!initial && (
             <FormControl mt={4}>
@@ -220,19 +145,17 @@ function CourseworkModal({ isOpen, onClose, classId, topics, onSaved, initial })
             Cancel
           </Button>
           {!initial && (
-            <Button
-              variant="outline"
-              onClick={() => {
-                set('draft', true);
-                setTimeout(submit, 0);
-              }}
-              isDisabled={!form.title.trim() || saving}
-            >
+            <Button variant="outline" onClick={() => save(true)} isDisabled={!form.title.trim() || saving}>
               Save draft
             </Button>
           )}
-          <Button colorScheme="blue" onClick={submit} isLoading={saving} isDisabled={!form.title.trim()}>
-            {initial ? 'Save changes' : form.scheduledFor ? 'Schedule' : 'Assign'}
+          <Button
+            colorScheme="blue"
+            onClick={() => save(false)}
+            isLoading={saving}
+            isDisabled={!form.title.trim()}
+          >
+            {initial ? 'Save changes' : form.scheduledFor ? 'Schedule' : 'Post'}
           </Button>
         </ModalFooter>
       </ModalContent>
@@ -271,7 +194,7 @@ function TopicManager({ classId, topics, onChanged }) {
       </Heading>
       {topics.length === 0 && (
         <Text fontSize="sm" color="gray.500" mb={3}>
-          Group classwork into units, chapters or weeks.
+          Group material into units, chapters or weeks.
         </Text>
       )}
       {topics.map((topic) => (
@@ -302,13 +225,12 @@ function TopicManager({ classId, topics, onChanged }) {
   );
 }
 
-function CourseworkRow({ item, classId, isTeacher, onChanged, onEdit }) {
-  const meta = WORK_TYPE_META[item.workType] || WORK_TYPE_META.assignment;
+function MaterialRow({ item, classId, isTeacher, onChanged, onEdit }) {
   const toast = useToast();
 
   const remove = async () => {
     // eslint-disable-next-line no-alert
-    if (!window.confirm(`Delete "${item.title}"? All submissions and grades for it are removed.`)) return;
+    if (!window.confirm(`Delete "${item.title}"?`)) return;
     try {
       await lmApi.deleteCoursework(classId, item._id);
       onChanged();
@@ -329,16 +251,8 @@ function CourseworkRow({ item, classId, isTeacher, onChanged, onEdit }) {
       gap={4}
       _hover={{ borderColor: 'blue.300' }}
     >
-      <Flex
-        w="40px"
-        h="40px"
-        borderRadius="full"
-        bg={`${meta.colorScheme}.50`}
-        align="center"
-        justify="center"
-        flexShrink={0}
-      >
-        {meta.icon}
+      <Flex w="40px" h="40px" borderRadius="full" bg="green.50" align="center" justify="center" flexShrink={0}>
+        📚
       </Flex>
       <Box
         as={RouterLink}
@@ -351,41 +265,27 @@ function CourseworkRow({ item, classId, isTeacher, onChanged, onEdit }) {
           <Heading size="sm" color="gray.800" noOfLines={1}>
             {item.title}
           </Heading>
-          {item.status !== 'published' && <Badge colorScheme={item.status === 'draft' ? 'gray' : 'purple'}>{item.status}</Badge>}
+          {item.status !== 'published' && (
+            <Badge colorScheme={item.status === 'draft' ? 'gray' : 'purple'}>{item.status}</Badge>
+          )}
           {item.aiSourceSessionId && <Badge colorScheme="purple">✨ AI</Badge>}
         </Flex>
         <HStack spacing={3} mt={1} wrap="wrap">
           <Text fontSize="xs" color="gray.500">
             Posted {formatDate(item.publishedAt)}
           </Text>
-          {item.workType !== 'material' && <DueBadge dueDate={item.dueDate} />}
-          {item.points > 0 && (
+          {item.attachments?.length > 0 && (
             <Text fontSize="xs" color="gray.500">
-              {item.points} pts
+              📎 {item.attachments.length}
             </Text>
           )}
-          {item.mySubmission && <StateBadge state={item.mySubmission.state} late={item.mySubmission.late} />}
         </HStack>
       </Box>
 
-      {isTeacher && item.submissionStats && (
-        <Box textAlign="right" display={{ base: 'none', md: 'block' }}>
-          <Text fontSize="lg" fontWeight="700" color="gray.700" lineHeight="1">
-            {item.submissionStats.turnedIn}
-          </Text>
-          <Text fontSize="xs" color="gray.500">
-            of {item.submissionStats.total} in
-          </Text>
-        </Box>
-      )}
-
       {isTeacher && (
         <Menu>
-          <MenuButton as={IconButton} size="sm" variant="ghost" icon={<span>⋮</span>} aria-label="Item actions" />
+          <MenuButton as={IconButton} size="sm" variant="ghost" icon={<span>⋮</span>} aria-label="Material actions" />
           <MenuList>
-            <MenuItem as={RouterLink} to={`/learning/class/${classId}/work/${item._id}/grade`}>
-              Review student work
-            </MenuItem>
             <MenuItem onClick={() => onEdit(item)}>Edit</MenuItem>
             <MenuItem color="red.600" onClick={remove}>
               Delete
@@ -397,12 +297,11 @@ function CourseworkRow({ item, classId, isTeacher, onChanged, onEdit }) {
   );
 }
 
-export default function Classwork() {
+export default function Material() {
   const { classId, klass, isTeacher, reloadClass } = useOutletContext();
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [filter, setFilter] = useState('');
   const [editing, setEditing] = useState(null);
   const { isOpen, onOpen, onClose } = useDisclosure();
 
@@ -411,13 +310,13 @@ export default function Classwork() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      setItems(await lmApi.listCoursework(classId, { workType: filter || undefined }));
+      setItems(await lmApi.listCoursework(classId, { workType: 'material' }));
     } catch (err) {
       setError(err);
     } finally {
       setLoading(false);
     }
-  }, [classId, filter]);
+  }, [classId]);
 
   useEffect(() => {
     load();
@@ -441,24 +340,21 @@ export default function Classwork() {
     .filter((group) => group.items.length);
   const untopiced = items.filter((i) => !i.topicId);
 
-  if (loading) return <Loading label="Loading classwork…" />;
+  if (loading) return <Loading label="Loading material…" />;
 
   return (
     <Flex gap={6} align="flex-start" direction={{ base: 'column', lg: 'row' }}>
       <Box flex="1" minW={0} order={{ base: 2, lg: 1 }} w="100%">
         <Flex justify="space-between" align="center" mb={4} gap={3} wrap="wrap">
-          <HStack>
-            <Select size="sm" maxW="180px" value={filter} onChange={(e) => setFilter(e.target.value)}>
-              <option value="">All work</option>
-              <option value="assignment">Assignments</option>
-              <option value="quiz">Quizzes</option>
-              <option value="question">Questions</option>
-              <option value="material">Materials</option>
-            </Select>
-          </HStack>
+          <Box>
+            <Heading size="md">Material</Heading>
+            <Text fontSize="sm" color="gray.500">
+              Reading material, notes and files for this class.
+            </Text>
+          </Box>
           {isTeacher && (
             <Button colorScheme="blue" size="sm" onClick={openNew}>
-              + Create
+              + Add material
             </Button>
           )}
         </Flex>
@@ -468,13 +364,19 @@ export default function Classwork() {
         {items.length === 0 ? (
           <EmptyState
             icon="📚"
-            title="No classwork yet"
+            title="No material yet"
             description={
               isTeacher
-                ? 'Assign work, post a question, or share reading material.'
-                : 'Nothing has been assigned yet.'
+                ? 'Share reading material, notes or files with the class.'
+                : 'Your teacher has not shared any material yet.'
             }
-            action={isTeacher ? <Button size="sm" colorScheme="blue" onClick={openNew}>Create classwork</Button> : null}
+            action={
+              isTeacher ? (
+                <Button size="sm" colorScheme="blue" onClick={openNew}>
+                  Add material
+                </Button>
+              ) : null
+            }
           />
         ) : (
           <>
@@ -485,7 +387,7 @@ export default function Classwork() {
                 </Heading>
                 <Divider mb={3} />
                 {group.items.map((item) => (
-                  <CourseworkRow
+                  <MaterialRow
                     key={item._id}
                     item={item}
                     classId={classId}
@@ -507,7 +409,7 @@ export default function Classwork() {
                   </>
                 )}
                 {untopiced.map((item) => (
-                  <CourseworkRow
+                  <MaterialRow
                     key={item._id}
                     item={item}
                     classId={classId}
@@ -528,7 +430,7 @@ export default function Classwork() {
         </Box>
       )}
 
-      <CourseworkModal
+      <MaterialModal
         isOpen={isOpen}
         onClose={onClose}
         classId={classId}

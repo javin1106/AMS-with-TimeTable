@@ -33,7 +33,7 @@ import {
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import RichTextEditor from '../components/RichTextEditor';
-import { ErrorState, Loading, SectionCard } from '../components/common';
+import { CopyLinkButton, ErrorState, Loading, SectionCard } from '../components/common';
 
 const BLANK_QUESTION = {
   question: '',
@@ -45,7 +45,10 @@ const BLANK_QUESTION = {
   negativeMarks: null,
   difficulty: 'medium',
   topic: '',
-  timeLimitSec: 60,
+  // Filled in from the quiz's own default when the question is added, and left
+  // at 0 on a paper that runs one clock — a stray 60 there reads as a live
+  // per-question timer that never actually fires.
+  timeLimitSec: 0,
   sectionId: null,
   tolerancePercent: 0,
   toleranceAbs: 0,
@@ -159,15 +162,24 @@ function QuestionCard({ question, index, sections, onChange, onRemove, onDuplica
             ))}
           </Select>
         </FormControl>
-        <FormControl isInvalid={perQuestionTiming && !question.timeLimitSec}>
+        {/* Disabled rather than hidden while the paper runs on one clock: the
+            box would otherwise look like an omission, and a teacher who wants
+            it needs to know where the switch is. */}
+        <FormControl isInvalid={perQuestionTiming && !question.timeLimitSec} isDisabled={!perQuestionTiming}>
           <FormLabel fontSize="xs">Time (seconds)</FormLabel>
           <Input
             size="sm"
             type="number"
             min={0}
-            value={question.timeLimitSec}
+            value={perQuestionTiming ? question.timeLimitSec : ''}
+            placeholder={perQuestionTiming ? '' : 'Whole-paper timer'}
             onChange={(e) => set('timeLimitSec', Number(e.target.value) || 0)}
           />
+          {!perQuestionTiming && (
+            // A disabled input swallows hover, so the reason goes underneath
+            // rather than into a tooltip nobody can trigger.
+            <FormHelperText fontSize="xs">One timer covers the paper — see Delivery &amp; timing</FormHelperText>
+          )}
           {perQuestionTiming && !question.timeLimitSec && (
             <FormHelperText fontSize="xs" color="red.500">
               Required while per-question timing is on
@@ -359,7 +371,7 @@ export default function QuizEditor() {
     try {
       await lmApi.publishQuiz(classId, quizId, { publish: true });
       toast({ status: 'success', title: 'Published to the class' });
-      navigate(`/learning/class/${classId}/grades`);
+      navigate(`/learning/class/${classId}/quizzes`);
     } catch (err) {
       toast({ status: 'error', title: err.message, duration: 10000 });
     }
@@ -371,7 +383,48 @@ export default function QuizEditor() {
 
   const set = (changes) => setQuiz((prev) => ({ ...prev, ...changes }));
   const setSetting = (key, value) => set({ settings: { ...quiz.settings, [key]: value } });
+  const setSettings = (changes) => set({ settings: { ...quiz.settings, ...changes } });
   const settings = quiz.settings;
+  const timingMode = settings.perQuestionTiming ? 'per_question' : 'overall';
+
+  const addQuestion = () =>
+    set({
+      questions: [
+        ...quiz.questions,
+        {
+          ...JSON.parse(JSON.stringify(BLANK_QUESTION)),
+          timeLimitSec: settings.perQuestionTiming ? settings.defaultQuestionSec || 60 : 0,
+        },
+      ],
+    });
+
+  /**
+   * The two clocks are exclusive, so switching between them puts the other one
+   * away rather than leaving both set. Going per-question also settles the
+   * delivery mode: the all-at-once page has no way to enforce a question's own
+   * timer, and the server clears the flag for it anyway.
+   */
+  const setTimingMode = (mode) => {
+    if (mode === 'per_question') {
+      setSettings({
+        perQuestionTiming: true,
+        deliveryMode: 'one_at_a_time',
+        // A revisited question would restart its own countdown, so going back
+        // cannot be offered alongside per-question timers.
+        allowBacktracking: false,
+        timeLimitMinutes: 0,
+        defaultQuestionSec: settings.defaultQuestionSec || 60,
+      });
+    } else {
+      setSettings({ perQuestionTiming: false });
+    }
+  };
+
+  // Questions still carrying 0 seconds block publishing while per-question
+  // timing is on, so the count is worth showing before they try.
+  const untimedCount = settings.perQuestionTiming
+    ? quiz.questions.filter((question) => !question.timeLimitSec).length
+    : 0;
 
   const totalMarks = quiz.questions.reduce((sum, q) => sum + (Number(q.marks) || 0), 0);
 
@@ -379,7 +432,7 @@ export default function QuizEditor() {
     <Box>
       <Flex justify="space-between" align="center" mb={4} gap={3} wrap="wrap">
         <Box>
-          <Button size="sm" variant="ghost" onClick={() => navigate(`/learning/class/${classId}/grades`)}>
+          <Button size="sm" variant="ghost" onClick={() => navigate(`/learning/class/${classId}/quizzes`)}>
             ← Back to quizzes
           </Button>
           <Heading size="md" mt={1}>
@@ -392,6 +445,7 @@ export default function QuizEditor() {
           </Text>
         </Box>
         <HStack>
+          {quiz.published && <CopyLinkButton to={`/learning/class/${classId}/quiz/${quizId}`} />}
           <Button size="sm" variant="outline" onClick={save} isLoading={saving}>
             Save
           </Button>
@@ -435,10 +489,7 @@ export default function QuizEditor() {
                 }}
               />
             ))}
-            <Button
-              variant="outline"
-              onClick={() => set({ questions: [...quiz.questions, JSON.parse(JSON.stringify(BLANK_QUESTION))] })}
-            >
+            <Button variant="outline" onClick={addQuestion}>
               + Add question
             </Button>
           </TabPanel>
@@ -517,7 +568,20 @@ export default function QuizEditor() {
           {/* ---------- delivery & timing ---------- */}
           <TabPanel px={0}>
             <SectionCard title="How questions are delivered" mb={4}>
-              <RadioGroup value={settings.deliveryMode} onChange={(value) => setSetting('deliveryMode', value)}>
+              {/* Dropping back to one page takes per-question timing with it —
+                  that page runs a single paper clock and cannot enforce a
+                  question's own time, so leaving the flag on would promise a
+                  countdown that never fires. */}
+              <RadioGroup
+                value={settings.deliveryMode}
+                onChange={(value) =>
+                  setSettings(
+                    value === 'all_at_once'
+                      ? { deliveryMode: value, perQuestionTiming: false }
+                      : { deliveryMode: value },
+                  )
+                }
+              >
                 <Stack spacing={3}>
                   <Radio value="all_at_once">
                     <Box>
@@ -543,45 +607,98 @@ export default function QuizEditor() {
                 </Stack>
               </RadioGroup>
 
-              {settings.deliveryMode === 'one_at_a_time' && (
-                <Checkbox
-                  mt={4}
-                  size="sm"
-                  isChecked={settings.allowBacktracking}
-                  onChange={(e) => setSetting('allowBacktracking', e.target.checked)}
-                >
-                  Let students go back to earlier questions
-                </Checkbox>
-              )}
+              {/* Only a real choice under the whole-paper clock: a question
+                  revisited under its own timer would start a fresh countdown,
+                  so the two together have no coherent meaning. */}
+              {settings.deliveryMode === 'one_at_a_time' &&
+                (settings.perQuestionTiming ? (
+                  <Alert status="info" borderRadius="md" mt={4} fontSize="xs">
+                    <AlertIcon />
+                    Going back is off while each question has its own timer — a revisited question would
+                    start its countdown again. Switch to one timer for the whole paper below to offer it.
+                  </Alert>
+                ) : (
+                  <Checkbox
+                    mt={4}
+                    size="sm"
+                    isChecked={settings.allowBacktracking}
+                    onChange={(e) => setSetting('allowBacktracking', e.target.checked)}
+                  >
+                    <Text fontSize="sm">Let students go back to earlier questions</Text>
+                    <Text fontSize="xs" color="gray.500">
+                      Off is placement-test behaviour: once a question is answered, it is closed.
+                    </Text>
+                  </Checkbox>
+                ))}
             </SectionCard>
 
-            <SectionCard title="Timing" mb={4}>
-              <Checkbox
-                size="sm"
-                isChecked={settings.perQuestionTiming}
-                onChange={(e) => setSetting('perQuestionTiming', e.target.checked)}
-              >
-                Give each question its own timer (auto-submits when it expires)
-              </Checkbox>
+            <SectionCard
+              title="Timing"
+              subtitle="One clock or one per question — never both. The other method's boxes are switched off so there is no doubt about which countdown a student is watching."
+              mb={4}
+            >
+              <RadioGroup value={timingMode} onChange={setTimingMode}>
+                <Stack spacing={3}>
+                  <Radio value="overall">
+                    <Box>
+                      <Text fontSize="sm" fontWeight="600">
+                        One timer for the whole paper
+                      </Text>
+                      <Text fontSize="xs" color="gray.500">
+                        A single countdown from the moment a student starts. The per-question time boxes
+                        stay disabled.
+                      </Text>
+                    </Box>
+                  </Radio>
+                  <Radio value="per_question">
+                    <Box>
+                      <Text fontSize="sm" fontWeight="600">
+                        A timer on each question
+                      </Text>
+                      <Text fontSize="xs" color="gray.500">
+                        Each question auto-advances when its own time runs out. Needs one-question-at-a-time
+                        delivery, and switches to it.
+                      </Text>
+                    </Box>
+                  </Radio>
+                </Stack>
+              </RadioGroup>
+
               {settings.perQuestionTiming && (
-                <Alert status="info" borderRadius="md" mt={3} fontSize="xs">
+                <Alert status={untimedCount ? 'warning' : 'info'} borderRadius="md" mt={3} fontSize="xs">
                   <AlertIcon />
-                  Set a time on every question in the Questions tab, or an overall limit below as a fallback —
-                  publishing is blocked otherwise.
+                  {untimedCount
+                    ? `${untimedCount} question(s) still have no time set — publishing is blocked until every question has one.`
+                    : 'Every question carries its own time, set in the Questions tab.'}
                 </Alert>
               )}
 
               <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4} mt={4}>
-                <FormControl>
-                  <FormLabel fontSize="xs">Overall time limit (minutes, 0 = none)</FormLabel>
-                  <Input
-                    size="sm"
-                    type="number"
-                    min={0}
-                    value={settings.timeLimitMinutes}
-                    onChange={(e) => setSetting('timeLimitMinutes', Number(e.target.value) || 0)}
-                  />
-                </FormControl>
+                {settings.perQuestionTiming ? (
+                  <FormControl>
+                    <Tooltip label="Stamped on each question you add from now on. Existing questions keep their own time.">
+                      <FormLabel fontSize="xs">Default time for new questions (seconds)</FormLabel>
+                    </Tooltip>
+                    <Input
+                      size="sm"
+                      type="number"
+                      min={0}
+                      value={settings.defaultQuestionSec ?? 60}
+                      onChange={(e) => setSetting('defaultQuestionSec', Number(e.target.value) || 0)}
+                    />
+                  </FormControl>
+                ) : (
+                  <FormControl>
+                    <FormLabel fontSize="xs">Overall time limit (minutes, 0 = none)</FormLabel>
+                    <Input
+                      size="sm"
+                      type="number"
+                      min={0}
+                      value={settings.timeLimitMinutes}
+                      onChange={(e) => setSetting('timeLimitMinutes', Number(e.target.value) || 0)}
+                    />
+                  </FormControl>
+                )}
                 <FormControl>
                   <Tooltip label="Students may still be sitting the test after this, but nobody new can begin">
                     <FormLabel fontSize="xs">Late-entry window (minutes after opening)</FormLabel>

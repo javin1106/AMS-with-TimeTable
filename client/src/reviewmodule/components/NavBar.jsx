@@ -5,6 +5,7 @@ import { useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import getEnvironment from '../../getenvironment';
 import { Text, Button, Flex, Spinner } from '@chakra-ui/react';
+import { loginPathFor } from '../../authRedirect';
 
 function NavBar() {
   const [navbarOpen, setNavbarOpen] = useState(false);
@@ -62,9 +63,9 @@ function NavBar() {
     );
 
     if (!isLoading && !isAuthenticated && !isExcludedLogin && location.pathname !== '/login') {
-      navigate('/login');
+      navigate(loginPathFor(location), { replace: true });
     }
-  }, [isLoading, isAuthenticated, navigate, location.pathname, excludedRoutesLogin]);
+  }, [isLoading, isAuthenticated, navigate, location, excludedRoutesLogin]);
 
   const handleLogout = async () => {
     try {

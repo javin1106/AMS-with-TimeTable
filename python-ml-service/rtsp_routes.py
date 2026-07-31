@@ -182,8 +182,8 @@ def _make_preview_cb(job: dict):
             color = colors[idx % len(colors)]
             cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
             cv2.putText(vis, f"Z{idx + 1}", (x1 + 5, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-        prev = cv2.resize(vis, (960, 540))
-        _, buf = cv2.imencode('.jpg', prev, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        prev = cv2.resize(vis, (1280, 720))
+        _, buf = cv2.imencode('.jpg', prev, [cv2.IMWRITE_JPEG_QUALITY, 90])
         with job["lock"]:
             job["frame"] = buf.tobytes()
             job["frame_seq"] = job.get("frame_seq", 0) + 1

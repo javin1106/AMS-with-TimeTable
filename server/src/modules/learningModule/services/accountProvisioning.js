@@ -35,6 +35,17 @@ const isValidEmail = (email) => EMAIL_PATTERN.test(String(email || '').trim());
 /** A password no one knows, so the account is unusable until claimed. */
 const unguessablePassword = () => crypto.randomBytes(32).toString('base64url');
 
+// The class name, section and the inviter's name are user-supplied and land in
+// email markup, so they are escaped first — same reasoning as notifyService.
+const esc = (value) =>
+  String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[ch]));
+
 /**
  * @param {object} options
  * @param {string[]} options.emails       lowercase addresses to provision
@@ -114,13 +125,20 @@ async function provisionAccounts({
       sendWelcomeEmail({
         email,
         frontendBase,
+        // Matches the banner on the invite mail (notifyService), so both routes
+        // into a class are topped identically.
+        banner: 'Welcome to XCEED Learning!',
         heading: `You have been added to ${klass?.name || 'a class'}`,
-        intro: `<p>${invitedByName} added you to the class
-                  <strong>${klass?.name || ''}</strong>${klass?.section ? ` (${klass.section})` : ''}
+        // No class code here on purpose: this account was created for this
+        // exact address and enrolled as active in the same request, so there is
+        // nothing left to join manually. Offering a code only prompts "do I
+        // need to enter this?".
+        intro: `<p>${esc(invitedByName)} added you to the class
+                  <strong>${esc(klass?.name || '')}</strong>${klass?.section ? ` (${esc(klass.section)})` : ''}
                   on the XCEED platform (NIT Jalandhar), and created an account for you with the
                   role <strong>${platformRole}</strong>.</p>
-                <p>Once you have set your password, open the <strong>Learning</strong> module to see
-                  the class${klass?.code ? `, or join it manually with the class code <strong>${klass.code}</strong>` : ''}.</p>`,
+                <p>Once you have set your password, open the <strong>Learning</strong> module —
+                  the class is already on your dashboard.</p>`,
         accountCreated: true,
       });
 
