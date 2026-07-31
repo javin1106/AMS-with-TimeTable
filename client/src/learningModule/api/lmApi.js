@@ -309,6 +309,30 @@ const lmApi = {
   publishQuizDraft: (classId, sessionId, body) =>
     request(`/classes/${classId}/studio/sessions/${sessionId}/publish/quiz`, { method: 'POST', body: body || {} }),
 
+  /* coding notebooks — Python that runs in the student's browser */
+  listNotebooks: (classId) => request(`/classes/${classId}/notebooks`),
+  createNotebook: (classId, body) => request(`/classes/${classId}/notebooks`, { method: 'POST', body }),
+  getNotebook: (classId, notebookId) => request(`/classes/${classId}/notebooks/${notebookId}`),
+  updateNotebook: (classId, notebookId, body) =>
+    request(`/classes/${classId}/notebooks/${notebookId}`, { method: 'PATCH', body }),
+  deleteNotebook: (classId, notebookId) =>
+    request(`/classes/${classId}/notebooks/${notebookId}`, { method: 'DELETE' }),
+  publishNotebook: (classId, notebookId, body) =>
+    request(`/classes/${classId}/notebooks/${notebookId}/publish`, { method: 'POST', body: body || {} }),
+  notebookAttempt: (classId, notebookId) =>
+    request(`/classes/${classId}/notebooks/${notebookId}/attempt`),
+  listNotebookAttempts: (classId, notebookId) =>
+    request(`/classes/${classId}/notebooks/${notebookId}/attempts`),
+  getNotebookAttempt: (classId, attemptId) => request(`/classes/${classId}/notebook-attempts/${attemptId}`),
+  saveNotebookAttempt: (classId, attemptId, body) =>
+    request(`/classes/${classId}/notebook-attempts/${attemptId}/save`, { method: 'POST', body }),
+  submitNotebookAttempt: (classId, attemptId, body) =>
+    request(`/classes/${classId}/notebook-attempts/${attemptId}/submit`, { method: 'POST', body: body || {} }),
+  reopenNotebookAttempt: (classId, attemptId) =>
+    request(`/classes/${classId}/notebook-attempts/${attemptId}/reopen`, { method: 'POST', body: {} }),
+  gradeNotebookAttempt: (classId, attemptId, body) =>
+    request(`/classes/${classId}/notebook-attempts/${attemptId}/grade`, { method: 'PATCH', body }),
+
   /* shorts — instant in-class polls */
   listShorts: (classId) => request(`/classes/${classId}/shorts`),
   createShort: (classId, body) => request(`/classes/${classId}/shorts`, { method: 'POST', body }),

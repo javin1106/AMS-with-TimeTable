@@ -57,6 +57,11 @@ import threading as _threading
 import requests as _requests
 
 NODE_SERVER_URL = os.environ.get("NODE_SERVER_URL", "http://localhost:8010")
+# The Node side guards /liveness-rejected with requireAttendanceWriteAccess, the
+# same shared-secret check every other machine-posted attendance endpoint uses.
+# Read at call time rather than captured here so a restart is not needed to pick
+# up a rotated secret.
+_ML_SERVICE_SECRET_ENV = "ML_SERVICE_SECRET"
 
 _reject_upload_q: "_queue.Queue" = _queue.Queue(maxsize=500)
 
@@ -65,9 +70,11 @@ def _reject_uploader():
     while True:
         payload = _reject_upload_q.get()
         try:
+            secret = os.environ.get(_ML_SERVICE_SECRET_ENV, "")
             _requests.post(
                 f"{NODE_SERVER_URL}/api/v1/attendancemodule/liveness-rejected",
                 json=payload, timeout=5,
+                headers={"X-ML-Service-Key": secret} if secret else None,
             )
         except Exception:
             pass  # best-effort; never disturb the capture pipeline

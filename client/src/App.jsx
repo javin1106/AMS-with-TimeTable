@@ -104,50 +104,11 @@ import Template01 from './certificatemodule/pages/certificatetemplates/akleem';
 // import ViewCertificate from './certificatemodule/pages/participantCerti';
 import Template03 from './certificatemodule/pages/certificatetemplates/03_sarthak';
 
-// Review Module Imports
-import PRMEventRegistration from './reviewmodule/pages/eventregistration';
-import PRMDashboard from './reviewmodule/pages/prmdashboard';
-import ReviewLogin from './reviewmodule/pages/ReviewLogin';
-import CreateUser from './reviewmodule/pages/CreateUser';
-import AddReviewer from './reviewmodule/pages/AddReviewer';
-import Review from './reviewmodule/pages/Review.jsx';
-import PaperSummary from './reviewmodule/pages/PaperSummary.jsx';
-import Forms from './reviewmodule/pages/Forms.jsx';
-import FormAnswers from './reviewmodule/pages/FormAnswers.jsx';
-import ReviewerQuestion from './reviewmodule/pages/ReviewQuestion';
-import DefaultQuestion from './reviewmodule/pages/DefaultQuestion.jsx';
-import ReviewerQuestionHome from './reviewmodule/pages/ReviewQuestionHome';
-import StartSubmission from './reviewmodule/pages/StartSubmission.jsx';
-import DefaultQuestionHome from './reviewmodule/pages/DefaultQuestionHome.jsx';
-import UpdateReviewerStatus from './reviewmodule/pages/UpdateReviewerStatus';
-import UserRegistration from './reviewmodule/pages/userRegistration';
-import OTPverification from './reviewmodule/pages/OTPverification.jsx';
-import UserDetails from './reviewmodule/pages/UserDetails.jsx';
-
-// import HomePage from './reviewmodule/pages/Main';
-
-import PrmEditorDashboard from './reviewmodule/pages/PrmEditorDashboard';
-
-// import ConferenceDetails from './reviewmodule/pages/EditorConferencePage';
-import AllPaper from './reviewmodule/pages/allpapers';
-import EventForm from './reviewmodule/pages/editorevent';
-import MultiEditorEvent from './reviewmodule/pages/addeditor';
-import PaperDetails from './reviewmodule/components/PaperDetails';
-
-import ReviewerAcceptance from './reviewmodule/pages/ReviewerAcceptance';
-
 import SponsorshipRate from './conferencemodule/Tabs/SponsorshipRates';
 import Event from './conferencemodule/Tabs/Events';
 import Souvenir from './conferencemodule/Tabs/Souvenir';
-import MultiStepForm from './reviewmodule/pages/MultiStepForm';
-import HomePage from './reviewmodule/pages/Main';
-import AddTrack from './reviewmodule/pages/addTracks';
-import AddTemplate from './reviewmodule/pages/addTemplate';
-import EditTemplate from './reviewmodule/pages/EditTemplate';
 
-import EditDefaultTemplate from './reviewmodule/pages/EditDefaultTemplate.jsx';
 import NirfRanking from './nirf/rankings';
-import AddPaper from './reviewmodule/pages/addpaper';
 
 // imports for Quiz Module
 import CreateQuiz from './quizModule/creator/createQuiz/CreateQuiz';
@@ -155,7 +116,6 @@ import AddQuestionHome from './quizModule/creator/addQuestion/AddQuestionHome';
 import AddInstruction from './quizModule/creator/addQuestion/AddInstruction';
 import PreviewInstructions from './quizModule/creator/addQuestion/PreviewInstructions';
 import Settings from './quizModule/creator/addQuestion/settings';
-import PrmEdDashboard from './reviewmodule/pages/PrmEdDashboard';
 import Quizzing from './quizModule/student/quizzing/Quizzing';
 // import Instructions from './quizModule/student/Instructions';
 import QuizFeedback from './quizModule/student/quizFeedback/QuizFeedback';
@@ -168,28 +128,6 @@ import PlatformDashboard from './platform/PlatformDashboard.jsx';
 import PlatformConfig from './platform/PlatformConfig.jsx';
 import PlatformModules from './platform/PlatformModules.jsx';
 import PlatformData from './platform/PlatformData.jsx';
-import AllForms from './reviewmodule/pages/AllForms.jsx';
-import Reviews from './reviewmodule/pages/Reviews.jsx';
-
-//import diabetic modules
-import HospitalForm from './diabeticsModule/components/HospitalForm.jsx';
-import PatientForm from './diabeticsModule/components/PatientForm.jsx';
-import DailyDosageForm from './diabeticsModule/components/DailyDosageForm.jsx';
-import SickDayForm from './diabeticsModule/components/SickDayForm.jsx';
-import GamificationForm from './diabeticsModule/components/GamificationForm.jsx';
-import DoctorForm from './diabeticsModule/components/DoctorForm.jsx';
-
-// Diabetics Module Dashboards
-import AdminDashboard from './diabeticsModule/pages/AdminDashboard';
-import PatientDashboard from './diabeticsModule/pages/PatientDashboard';
-import PatientHistory from './diabeticsModule/pages/PatientHistory';
-import DoctorDashboard from './diabeticsModule/pages/DoctorDashboard';
-import PatientDetailView from './diabeticsModule/pages/PatientDetailView';
-import LoginPage from './diabeticsModule/pages/LoginPage';
-
-// Detail View Routes for Admin
-import DoctorDetailView from './diabeticsModule/pages/DoctorDetailView';
-import HospitalDetailView from './diabeticsModule/pages/HospitalDetailView';
 
 // import fileUpload
 import FileUpload from './fileUpload/fileUploads.jsx';
@@ -240,7 +178,6 @@ import AMSManual from './attendancemodule/manual';
 import TTManual from './timetableadmin/TTManual';
 import CertManual from './certificatemodule/CertManual';
 import ConfManual from './conferencemodule/ConfManual';
-
 
 // ─── Department Admin Module Imports ────────────────────────────
 import DeptAdminLayout from './deptadmin/DeptAdminLayout';
@@ -416,123 +353,6 @@ function App() {
         />
         <Route path="/payment-portal" element={<PaymentPortal />} />
 
-        {/* Review management routes*/}
-        <Route path="/prm/login" element={<ReviewLogin />} />
-        <Route path="/prm/signup" element={<CreateUser />} />
-        <Route path="/prm/assigneditor" element={<PRMEventRegistration />} />
-        <Route path="/prm/dashboard" element={<PRMDashboard />} />
-        <Route path="/prm/emailverification" element={<OTPverification />} />
-        <Route path="/prm/userdetails" element={<UserDetails />} />
-        {/* <Route path="/prm/papersubmission" element={<MultiStepForm/>}/> */}
-        <Route
-          path="/prm/:eventId/editor/confdetails"
-          element={<EventForm />}
-        />
-        <Route
-          path="/prm/:eventId/editor/addEditor"
-          element={<MultiEditorEvent />}
-        />
-        <Route
-          path="/prm/:eventId/editor/addreviewer"
-          element={<AddReviewer />}
-        />
-        <Route
-          path="/prm/:eventId/:paperId/:userId/Review"
-          element={<Review />}
-        />
-        <Route
-          path="/prm/:eventId/:paperId/summary"
-          element={<PaperSummary />}
-        />
-        <Route path="/prm/:eventId/:paperId/reviews" element={<Reviews />} />
-        <Route path="/prm/:eventId/Forms" element={<Forms />} />
-        <Route
-          path="/prm/:eventId/:formId/FormAnswers"
-          element={<FormAnswers />}
-        />
-        <Route
-          path="/prm/:eventId/ReviewQuestion"
-          element={<ReviewerQuestion />}
-        />
-        <Route
-          path="/prm/:eventId/ReviewQuestionHome"
-          element={<ReviewerQuestionHome />}
-        />
-        <Route path="/prm/DefaultQuestion" element={<DefaultQuestion />} />
-        <Route
-          path="/prm/DefaultQuestionHome"
-          element={<DefaultQuestionHome />}
-        />
-        <Route
-          path="/prm/:eventId/reviewer/:reviewerId"
-          element={<UpdateReviewerStatus />}
-        />
-        <Route path="/prm/:eventId/editor/addtrack" element={<AddTrack />} />
-        <Route
-          path="/prm/:eventId/editor/edittemplate"
-          element={<EditTemplate />}
-        />
-        <Route
-          path="/prm/editdefaulttemplate"
-          element={<EditDefaultTemplate />}
-        />
-        <Route path="/prm/:eventId/editor/papers" element={<AllPaper />} />
-        <Route
-          path="/prm/:eventId/editor/papers/addpaper"
-          element={<AddPaper />}
-        />
-        <Route
-          path="/prm/:eventId/editor/startSubmission"
-          element={<StartSubmission />}
-        />
-        <Route path="/prm/:eventId/editor/forms" element={<AllForms />} />
-        <Route path="/prm/:eventId/paper" element={<PaperDetails />} />
-        <Route path="/prm/:eventId/editor" element={<PrmEditorDashboard />} />
-        <Route path="/prm/:eventId/ed" element={<PrmEdDashboard />} />
-
-        <Route
-          path="/prm/:eventId/author/newpaper"
-          element={<MultiStepForm />}
-        />
-        <Route
-          path="/prm/reviewerAcceptance"
-          element={<ReviewerAcceptance />}
-        />
-        <Route path="/prm/home" element={<HomePage />} />
-        <Route path="/prm/register" element={<UserRegistration />} />
-        <Route
-          path="/prm/end"
-          element={
-            <ErrorPage
-              message="Paper Submission for this event has ended..."
-              destination="/prm/home"
-              destinationName="Paper Review Manager Home"
-              animation={
-                <Lottie
-                  animationData={animation404}
-                  style={{ opacity: '15%' }}
-                />
-              }
-            />
-          }
-        ></Route>
-        <Route
-          path="/prm/*"
-          element={
-            <ErrorPage
-              message="The page you are looking for does not exist..."
-              destination="/prm/home"
-              destinationName="Paper Review Manager Home"
-              animation={
-                <Lottie
-                  animationData={animation404}
-                  style={{ opacity: '15%' }}
-                />
-              }
-            />
-          }
-        ></Route>
-
         {/* Conference Module Admin-Panel */}
         <Route path="/cf/dashboard" element={<EODashboard />} />
         <Route path="/cf/addconf" element={<ConferencePage />} />
@@ -639,38 +459,6 @@ function App() {
           <Route path="modules" element={<PlatformModules />} />
           <Route path="data" element={<PlatformData />} />
         </Route>
-
-        {/* Routes for Diabetics Module */}
-        {/* Authentication */}
-        <Route path="/dm/login" element={<LoginPage />} />
-
-        {/* Admin Routes */}
-        <Route path="/dm/admin/dashboard" element={<AdminDashboard />} />
-
-        {/* Patient Routes */}
-        <Route path="/dm/patient/dashboard" element={<PatientDashboard />} />
-
-        {/* Doctor Routes */}
-        <Route path="/dm/doctor/dashboard" element={<DoctorDashboard />} />
-        <Route path="/dm/patient/:patientId" element={<PatientDetailView />} />
-        <Route
-          path="/dm/patient/:patientId/history"
-          element={<PatientHistory />}
-        />
-
-        {/* Detail View Routes for Admin */}
-        <Route path="/dm/doctor/:doctorId" element={<DoctorDetailView />} />
-        <Route
-          path="/dm/hospital/:hospitalId"
-          element={<HospitalDetailView />}
-        />
-
-        {/* Data Entry Forms */}
-        <Route path="/dm/addHospital" element={<HospitalForm />} />
-        <Route path="/dm/addPatient" element={<PatientForm />} />
-        <Route path="/dm/addDoctor" element={<DoctorForm />} />
-        <Route path="/dm/addDailyDosage" element={<DailyDosageForm />} />
-        <Route path="/dm/addSickDay" element={<SickDayForm />} />
 
         <Route path="/ml/t1" element={<LinearRegression />} />
         <Route path="/ml" element={<MLDashboard />} />

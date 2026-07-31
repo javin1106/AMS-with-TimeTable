@@ -5,8 +5,6 @@ import { useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import getEnvironment from '../../getenvironment';
 import { Text, Button, Flex } from '@chakra-ui/react';
-import NavBar from '../../reviewmodule/components/NavBar';
-import DMNavbar from '../../diabeticsModule/components/DMNavbar';
 import { isStudentOnly } from '../../learningModule/roles';
 import { loginPathFor } from '../../authRedirect';
 
@@ -89,8 +87,6 @@ export default function Navbar() {
     '/timetable',
     '/tt/masterdata',
     '/tt/commonslot',
-    '/prm/register',
-    '/prm/emailverification',
     '/404',
     '/ml/t1',
   ];
@@ -130,20 +126,6 @@ export default function Navbar() {
   // cannot use, so they never see it — on any route, not just /learning.
   if (isStudentOnly(userDetails?.user?.role)) {
     return null;
-  }
-
-  // Check if we're in the diabetics module
-  const isDMPath = location.pathname.startsWith('/dm');
-  const isPRMPath = location.pathname.startsWith('/prm');
-
-  // If we're in the diabetics module, render the DMNavbar
-  if (isDMPath) {
-    return <DMNavbar />;
-  }
-
-  // If we're in the PRM module, render the PRM Navbar
-  if (isPRMPath) {
-    return <NavBar />;
   }
 
   return (

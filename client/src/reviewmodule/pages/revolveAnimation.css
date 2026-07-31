@@ -1,9 +1,0 @@
-.revolveAnimation {
-    animation: revolveAnim 3s linear infinite;
-}
-
-@keyframes revolveAnim {
-    100% {
-        transform: rotate(360deg);
-    }
-}

@@ -2,6 +2,7 @@ import React from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 
 import LearningLayout from './components/LearningLayout';
+import RequireTeacher from './components/RequireTeacher';
 import ClassLayout from './pages/ClassLayout';
 import Dashboard from './pages/Dashboard';
 import Stream from './pages/Stream';
@@ -19,6 +20,10 @@ import QuizBrief from './pages/QuizBrief';
 import QuizAttempt from './pages/QuizAttempt';
 import QuizEditor from './pages/QuizEditor';
 import QuizResults from './pages/QuizResults';
+import Notebooks from './pages/Notebooks';
+import NotebookEditor from './pages/NotebookEditor';
+import NotebookPlayer from './pages/NotebookPlayer';
+import NotebookSubmissions from './pages/NotebookSubmissions';
 import Shorts from './pages/Shorts';
 import ShortEditor from './pages/ShortEditor';
 import ShortPresent from './pages/ShortPresent';
@@ -64,27 +69,37 @@ export default function LearningRoutes() {
               old links land on the tab that inherited its reading material. */}
           <Route path="classwork" element={<Navigate to="../material" replace />} />
           <Route path="work/:courseworkId" element={<CourseworkDetail />} />
-          <Route path="work/:courseworkId/grade" element={<GradeWork />} />
           <Route path="people" element={<People />} />
           <Route path="grades" element={<Grades />} />
           <Route path="studio" element={<AiStudio />} />
           <Route path="playground" element={<AiPlayground />} />
-          <Route path="insights" element={<Insights />} />
-          <Route path="settings" element={<ClassSettings />} />
           <Route path="quizzes" element={<Quizzes />} />
           <Route path="quiz/:quizId" element={<QuizBrief />} />
           <Route path="quiz/:quizId/attempt/:attemptId" element={<QuizAttempt />} />
-          <Route path="quiz/:quizId/edit" element={<QuizEditor />} />
-          <Route path="quiz/:quizId/results" element={<QuizResults />} />
+          <Route path="notebooks" element={<Notebooks />} />
+          <Route path="notebook/:notebookId" element={<NotebookPlayer />} />
           <Route path="shorts" element={<Shorts />} />
-          <Route path="short/:shortId/edit" element={<ShortEditor />} />
-          <Route path="short/:shortId/present/:sessionId" element={<ShortPresent />} />
-          <Route path="short/:shortId/sessions" element={<ShortSessions />} />
-          <Route path="short/:shortId/report/:sessionId" element={<ShortReport />} />
           <Route path="tutorials" element={<Tutorials />} />
+
+          {/* Staff screens. The server guards the data; this keeps a student
+              who typed the URL from meeting a bare 403 where a page should be. */}
+          <Route element={<RequireTeacher />}>
+            <Route path="work/:courseworkId/grade" element={<GradeWork />} />
+            <Route path="insights" element={<Insights />} />
+            <Route path="settings" element={<ClassSettings />} />
+            <Route path="quiz/:quizId/edit" element={<QuizEditor />} />
+            <Route path="quiz/:quizId/results" element={<QuizResults />} />
+            <Route path="notebook/:notebookId/edit" element={<NotebookEditor />} />
+            <Route path="notebook/:notebookId/submissions" element={<NotebookSubmissions />} />
+            <Route path="short/:shortId/edit" element={<ShortEditor />} />
+            <Route path="short/:shortId/present/:sessionId" element={<ShortPresent />} />
+            <Route path="short/:shortId/sessions" element={<ShortSessions />} />
+            <Route path="short/:shortId/report/:sessionId" element={<ShortReport />} />
+            <Route path="tutorial/:tutorialId/edit" element={<TutorialEditor />} />
+            <Route path="tutorial/:tutorialId/results" element={<TutorialResults />} />
+          </Route>
+
           <Route path="tutorial/:tutorialId" element={<TutorialPlayer />} />
-          <Route path="tutorial/:tutorialId/edit" element={<TutorialEditor />} />
-          <Route path="tutorial/:tutorialId/results" element={<TutorialResults />} />
         </Route>
 
         <Route path="*" element={<Navigate to="/learning" replace />} />

@@ -86,6 +86,25 @@ exports.previewByCode = async (req, res) => {
   return res.json(klass);
 };
 
+/**
+ * A student's view of another member.
+ *
+ * A roster is a list of names, not a contact export. Handing a student the full
+ * membership row gave them every classmate's email address — a class of two
+ * hundred is two hundred addresses to anyone enrolled — plus `invitedBy`,
+ * `lastSeenAt` and `muted`, which are staff bookkeeping and nobody else's
+ * business. Their own row keeps its email, since that is their own.
+ */
+const memberForStudent = (member, viewerId) => ({
+  _id: member._id,
+  userId: member.userId,
+  name: member.name,
+  role: member.role,
+  status: member.status,
+  rollNumber: member.rollNumber,
+  email: String(member.userId) === String(viewerId) ? member.email : undefined,
+});
+
 exports.listMembers = async (req, res) => {
   const members = await LmMembership.find({
     classId: req.lmClass._id,
@@ -95,13 +114,19 @@ exports.listMembers = async (req, res) => {
     .lean();
 
   // Students see a roster; they must not see pending requests or invites.
-  const visible = req.lmIsTeacher ? members : members.filter((m) => m.status === "active");
+  const visible = req.lmIsTeacher
+    ? members
+    : members
+        .filter((m) => m.status === "active")
+        .map((m) => memberForStudent(m, req.lmUser.id));
 
   return res.json({
     teachers: visible.filter((m) => m.role === "teacher" || m.role === "co-teacher"),
     students: visible.filter((m) => m.role === "student"),
   });
 };
+
+exports.memberForStudent = memberForStudent;
 
 /**
  * Teacher-side add by email.
