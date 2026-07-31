@@ -32,42 +32,84 @@ async function mintJoinCode() {
 
 const slideOf = (short, index) => (short.slides || [])[index] || null;
 
+/**
+ * Closes a slide whose countdown has run out.
+ *
+ * The views derive the closed state themselves (see `effectiveSlideState`), so
+ * this is not what makes the room correct — it is what stops the stored state
+ * drifting away from what everybody can already see, so a later `reopen`, a
+ * report or a restart all work from the same facts.
+ *
+ * The write is conditional on the row still being open, because the presenter's
+ * stream and forty phones will all notice the same expiry within the same
+ * second and only one of them should bump `revision`.
+ */
+async function settleExpiredSlide(session, short) {
+  if (!session || session.status !== 'live') return session;
+  if (session.slideState !== 'open' || !session.slideDeadline) return session;
+
+  const next = agg.effectiveSlideState(session, short);
+  if (next === 'open') return session;
+
+  await LmShortSession.updateOne(
+    { _id: session._id, slideState: 'open', slideDeadline: { $ne: null } },
+    {
+      $set: { slideState: next, slideDeadline: null, updated_at: new Date() },
+      $inc: { revision: 1 },
+    },
+  );
+
+  // Keep the in-memory document in step so the caller can render the new state
+  // without a second read.
+  session.slideState = next;
+  session.slideDeadline = null;
+  session.revision += 1;
+  return session;
+}
+
 /** What the presenter's screen needs. */
-const presenterView = (short, session, slideResults, responseCount) => ({
-  sessionId: session._id,
-  shortId: short._id,
-  title: short.title,
-  joinCode: session.joinCode,
-  status: session.status,
-  revision: session.revision,
-  slideIndex: session.currentSlideIndex,
-  slideCount: short.slides.length,
-  slideState: session.slideState,
-  slideDeadline: session.slideDeadline,
-  slide: (() => {
-    const slide = slideOf(short, session.currentSlideIndex);
-    if (!slide) return null;
-    return {
-      _id: slide._id,
-      type: slide.type,
-      question: slide.question,
-      options: slide.options,
-      timeLimitSec: slide.timeLimitSec,
-      marks: slide.marks,
-      scaleMin: slide.scaleMin,
-      scaleMax: slide.scaleMax,
-      scaleMinLabel: slide.scaleMinLabel,
-      scaleMaxLabel: slide.scaleMaxLabel,
-      maxWords: slide.maxWords,
-      maxLength: slide.maxLength,
-      gradable: agg.slideIsGradable(slide),
-    };
-  })(),
-  results: slideResults,
-  participantCount: (session.participants || []).length,
-  responseCount,
-  settings: short.settings,
-});
+const presenterView = (short, session, slideResults, responseCount) => {
+  // Derived rather than read straight off the row: a slide whose countdown has
+  // passed is closed even if nothing has written that yet. Evaluated once, so
+  // a deadline falling between two calls cannot produce a payload that says
+  // "open" while withholding the deadline, or the reverse.
+  const slideState = agg.effectiveSlideState(session, short);
+  const slide = slideOf(short, session.currentSlideIndex);
+
+  return {
+    sessionId: session._id,
+    shortId: short._id,
+    title: short.title,
+    joinCode: session.joinCode,
+    status: session.status,
+    revision: session.revision,
+    slideIndex: session.currentSlideIndex,
+    slideCount: short.slides.length,
+    slideState,
+    slideDeadline: slideState === 'open' ? session.slideDeadline : null,
+    slide: slide
+      ? {
+          _id: slide._id,
+          type: slide.type,
+          question: slide.question,
+          options: slide.options,
+          timeLimitSec: slide.timeLimitSec,
+          marks: slide.marks,
+          scaleMin: slide.scaleMin,
+          scaleMax: slide.scaleMax,
+          scaleMinLabel: slide.scaleMinLabel,
+          scaleMaxLabel: slide.scaleMaxLabel,
+          maxWords: slide.maxWords,
+          maxLength: slide.maxLength,
+          gradable: agg.slideIsGradable(slide),
+        }
+      : null,
+    results: slideResults,
+    participantCount: (session.participants || []).length,
+    responseCount,
+    settings: short.settings,
+  };
+};
 
 /**
  * What a participant's phone needs. Deliberately narrower than the presenter
@@ -76,7 +118,10 @@ const presenterView = (short, session, slideResults, responseCount) => ({
  */
 const participantView = (short, session, slideResults, myResponse) => {
   const slide = slideOf(short, session.currentSlideIndex);
-  const revealed = session.slideState === 'revealed';
+  // Derived, so a phone stops offering an answer — and starts showing the key —
+  // the moment the countdown passes, without waiting on the presenter.
+  const slideState = agg.effectiveSlideState(session, short);
+  const revealed = slideState === 'revealed';
 
   return {
     sessionId: session._id,
@@ -85,8 +130,8 @@ const participantView = (short, session, slideResults, myResponse) => {
     revision: session.revision,
     slideIndex: session.currentSlideIndex,
     slideCount: short.slides.length,
-    slideState: session.slideState,
-    slideDeadline: session.slideDeadline,
+    slideState,
+    slideDeadline: slideState === 'open' ? session.slideDeadline : null,
     slide: slide
       ? {
           _id: slide._id,
@@ -114,7 +159,7 @@ const participantView = (short, session, slideResults, myResponse) => {
           awarded: revealed ? myResponse.awarded : 0,
         }
       : null,
-    canAnswer: session.status === 'live' && session.slideState === 'open',
+    canAnswer: session.status === 'live' && slideState === 'open',
     canChange: short.settings?.allowChangeAnswer !== false,
   };
 };
@@ -129,7 +174,7 @@ async function currentResults(short, session) {
   }).lean();
 
   return agg.aggregateSlide(slide, responses, {
-    reveal: session.slideState === 'revealed',
+    reveal: agg.effectiveSlideState(session, short) === 'revealed',
     anonymous: short.settings?.anonymous !== false,
   });
 }
@@ -308,6 +353,9 @@ exports.startSession = async (req, res) => {
   // class would split the room's answers.
   const existing = await LmShortSession.findOne({ shortId: short._id, status: 'live' });
   if (existing) {
+    // Resuming after the laptop slept: the countdown almost certainly ran out
+    // while nobody was connected.
+    await settleExpiredSlide(existing, short);
     const results = await currentResults(short, existing);
     const responseCount = await LmShortResponse.countDocuments({ sessionId: existing._id });
     return res.json({ session: presenterView(short, existing, results, responseCount), resumed: true });
@@ -363,6 +411,7 @@ exports.getPresenterState = async (req, res) => {
   const { session, short, error } = await loadSessionForPresenter(req);
   if (error) return res.status(error.status).json({ message: error.message });
 
+  await settleExpiredSlide(session, short);
   const [results, responseCount] = await Promise.all([
     currentResults(short, session),
     LmShortResponse.countDocuments({ sessionId: session._id }),
@@ -381,6 +430,11 @@ exports.controlSession = async (req, res) => {
   if (session.status !== 'live') {
     return res.status(400).json({ message: 'This session has ended.' });
   }
+
+  // Bank an expired countdown before applying the teacher's action, so the two
+  // cannot fight: pressing "reopen" on a slide that has just timed out reopens
+  // it rather than being overwritten by the expiry a moment later.
+  await settleExpiredSlide(session, short);
 
   const action = req.body.action;
   const now = new Date();
@@ -591,6 +645,7 @@ exports.getParticipantState = async (req, res) => {
   const { session, short, error } = await loadSessionForParticipant(req);
   if (error) return res.status(error.status).json({ message: error.message });
 
+  await settleExpiredSlide(session, short);
   const slide = slideOf(short, session.currentSlideIndex);
   const [results, mine] = await Promise.all([
     currentResults(short, session),
@@ -622,8 +677,11 @@ exports.submitResponse = async (req, res) => {
   }
 
   // The server's own deadline is authoritative; a phone with a slow clock or a
-  // paused tab must not be able to answer after time.
+  // paused tab must not be able to answer after time. Closing the slide here as
+  // well means a room where nobody is watching the stream still gets the answer
+  // revealed, off the back of whoever tapped last.
   if (session.slideDeadline && new Date() > new Date(session.slideDeadline)) {
+    await settleExpiredSlide(session, short);
     return res.status(400).json({ message: 'Time is up for this slide.', code: 'EXPIRED' });
   }
 
@@ -767,6 +825,10 @@ exports.streamPresenter = async (req, res) => {
     const short = await LmShort.findById(session.shortId);
     if (!short) return null;
 
+    // The tick is what turns a countdown reaching zero into a visible state
+    // change for the whole room — nothing else is watching the clock.
+    await settleExpiredSlide(session, short);
+
     const [results, responseCount] = await Promise.all([
       currentResults(short, session),
       LmShortResponse.countDocuments({ sessionId: session._id }),
@@ -790,6 +852,8 @@ exports.streamParticipant = async (req, res) => {
     if (!live) return null;
     const deck = await LmShort.findById(shortId);
     if (!deck) return null;
+
+    await settleExpiredSlide(live, deck);
 
     const slide = slideOf(deck, live.currentSlideIndex);
     const [results, mine] = await Promise.all([

@@ -7,6 +7,37 @@
  * mis-ranked list is visible to sixty people at once.
  */
 
+/* ──────────────────────────── slide timing ────────────────────────────── */
+
+/**
+ * The state the room should actually be in right now.
+ *
+ * `slideState` is only written when the presenter acts, so a slide whose
+ * countdown has run out is still stored as `open`. Nothing watches the clock,
+ * and nothing should: a timer on the server would have to survive a restart,
+ * and a timer in the presenter's browser stops when the laptop sleeps. Instead
+ * every read derives the truth from `slideDeadline`, which is a stored
+ * timestamp and is therefore right regardless of who happens to be awake.
+ *
+ * Deriving it here — rather than only persisting it — is what makes a student's
+ * phone stop offering an answer the instant the clock passes, rather than
+ * whenever the next write happens to land.
+ *
+ * @param {Date|number} [now] injectable for tests
+ */
+function effectiveSlideState(session, short, now = Date.now()) {
+  if (!session) return 'waiting';
+  if (session.slideState !== 'open') return session.slideState;
+  if (!session.slideDeadline) return 'open';
+
+  const at = now instanceof Date ? now.getTime() : now;
+  if (at <= new Date(session.slideDeadline).getTime()) return 'open';
+
+  // Same rule the presenter's own "close answering" uses, so a slide that times
+  // out and one the teacher closes by hand land in the same place.
+  return short?.settings?.autoRevealOnClose ? 'revealed' : 'locked';
+}
+
 /* ─────────────────────────────── marking ──────────────────────────────── */
 
 const sameSet = (a, b) => {
@@ -464,6 +495,7 @@ function normaliseAnswer(slide, body) {
 }
 
 module.exports = {
+  effectiveSlideState,
   slideIsGradable,
   markResponse,
   normaliseWords,

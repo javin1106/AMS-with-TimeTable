@@ -339,6 +339,31 @@ waiting ──open──▶ open ──lock──▶ locked ──reveal──�
 
 `autoRevealOnClose` (default on) makes `lock` land straight on `revealed`.
 
+**A slide with a countdown closes itself.** When `slideDeadline` passes, the
+slide moves to `revealed` (or `locked` if the deck turned auto-reveal off)
+without the teacher pressing anything — so a 30-second question shows its answer
+at zero, which is what the countdown implies.
+
+Nothing polls a timer to make this happen. `services/shortsAggregator.js`
+exposes `effectiveSlideState(session, short, now)`, and **every read derives the
+state from the stored deadline**: a server-side timer would have to survive a
+restart, and a timer in the presenter's browser stops when the laptop sleeps,
+whereas a stored timestamp is right regardless of who is awake. Deriving it on
+read is also what makes a student's phone stop offering an answer at the instant
+the clock passes rather than whenever the next write lands.
+
+`settleExpiredSlide` then persists the transition so the stored state does not
+drift from what the room can already see. It is called from every path that
+loads a live session, including each SSE tick — which is what pushes the reveal
+out to the room. The write is conditional on the row still being `open`, so when
+the presenter's stream and forty phones all notice the same expiry within the
+same second, exactly one of them bumps `revision`.
+
+The client applies the same rule locally (`ShortPlay` trips an `expired` flag on
+a timer) because the stream can be up to a tick behind, and offering a Send
+button that is going to come back rejected is worse than disabling it early. The
+server still has the final say.
+
 ### Join codes
 
 Six digits, because the code is read off a projector at the back of a lecture
@@ -363,7 +388,9 @@ and the phones can never disagree about the numbers.
 
 - The deadline is stored on the session (`slideDeadline`) and checked
   server-side. A phone with a slow clock, a paused tab or a patched countdown
-  cannot answer after time.
+  cannot answer after time. The boundary is *strictly after*, matching
+  `effectiveSlideState`, so an answer landing on the exact deadline millisecond
+  cannot be accepted by one check and refused by the other.
 - `responseMs` is measured from the server's `slideOpenedAt`, not sent by the
   client, so "who buzzed in first" is not something a fast script can win.
 - Answering a slide the presenter has already left returns `409 STALE_SLIDE`
