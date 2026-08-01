@@ -38,12 +38,21 @@ const kernel = {
   status: 'idle',
   detail: '',
   busyCellId: null,
+  kernelPackages: null,
   start: vi.fn(),
   restart: vi.fn(),
   runCell: vi.fn(),
   stop: vi.fn(),
 };
-vi.mock('../hooks/usePyodide', () => ({ default: () => kernel }));
+// The argument matters as much as the return: what the editor hands the hook is
+// what a started kernel installs.
+let requestedPackages = [];
+vi.mock('../hooks/usePyodide', () => ({
+  default: (packages) => {
+    requestedPackages = packages;
+    return kernel;
+  },
+}));
 
 const deferred = () => {
   let resolve;
@@ -71,7 +80,10 @@ describe('learningModule <NotebookEditor /> saving', () => {
   beforeEach(() => {
     kernel.status = 'idle';
     kernel.busyCellId = null;
+    kernel.kernelPackages = null;
+    requestedPackages = [];
     kernel.runCell.mockReset();
+    kernel.restart.mockReset();
     lmApi.getNotebook.mockReset().mockResolvedValue(notebook());
     lmApi.updateNotebook.mockReset().mockResolvedValue({});
     lmApi.publishNotebook.mockReset().mockResolvedValue({ published: true });
@@ -263,6 +275,44 @@ describe('learningModule <NotebookEditor /> saving', () => {
     expect(lmApi.updateNotebook.mock.calls[0][2].packages).toEqual(
       expect.arrayContaining(['pandas', 'seaborn']),
     );
+  });
+
+  it('starts the kernel with the packages an import just added, before any save', async () => {
+    await open();
+
+    const doc = JSON.stringify({
+      nbformat: 4,
+      metadata: {},
+      cells: [{ cell_type: 'code', source: ['import pandas as pd\n', 'pd.DataFrame()\n'] }],
+    });
+    pick(new File([doc], 'lab.ipynb', { type: 'application/x-ipynb+json' }));
+
+    // Reading these off the saved notebook instead is what made every imported
+    // cell raise ModuleNotFoundError until the teacher saved *and* restarted.
+    await waitFor(() => expect(requestedPackages).toContain('pandas'));
+  });
+
+  it('offers a restart when a package arrives after the kernel started', async () => {
+    kernel.status = 'ready';
+    // Started before the import, so it has nothing installed.
+    kernel.kernelPackages = [];
+    await open();
+
+    expect(screen.queryByText(/Restart it to install/)).not.toBeInTheDocument();
+
+    const doc = JSON.stringify({
+      nbformat: 4,
+      metadata: {},
+      cells: [{ cell_type: 'code', source: ['import pandas as pd\n'] }],
+    });
+    pick(new File([doc], 'lab.ipynb', { type: 'application/x-ipynb+json' }));
+
+    // Installs happen at startup only, so the running kernel cannot import it
+    // however many times the cell is run — say so rather than let it fail.
+    expect(await screen.findByText(/Python is already running without pandas/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restart & install' }));
+    expect(kernel.restart).toHaveBeenCalled();
   });
 
   it('explains an .ipynb it cannot read instead of importing nothing', async () => {

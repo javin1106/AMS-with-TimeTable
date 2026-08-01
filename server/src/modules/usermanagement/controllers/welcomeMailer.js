@@ -1,6 +1,8 @@
 // Welcome email sent to a person whose account was just created (or who was
-// granted a notable role). Fire-and-forget — a mail failure must never fail
-// the request that triggered it.
+// granted a notable role). Never throws — a mail failure must not fail the
+// request that triggered it — but it now resolves to whether the mail left, so
+// a caller that has somewhere to report that (the class invite screen) can.
+// Callers that ignore the promise keep the old fire-and-forget behaviour.
 //
 // Visual frame mirrors the forgot-password OTP email (otpbody.ejs) exactly:
 // same 480px card, teal "XCEED — NIT Jalandhar" banner, "Dear User,"
@@ -32,13 +34,14 @@ const escapeHtml = (value) =>
   }[ch]));
 
 /**
+ * @returns {Promise<boolean>} whether the mail was accepted by the SMTP server
  * @param {string} [banner]
  *        Text in the teal bar at the top. Defaults to the platform wordmark the
  *        admin-created-account mails use; the Learning module overrides it so a
  *        provisioned student's welcome mail is topped the same way as the invite
  *        mail they might otherwise have received.
  */
-function sendWelcomeEmail({
+async function sendWelcomeEmail({
   email,
   frontendBase,
   heading,
@@ -83,9 +86,13 @@ function sendWelcomeEmail({
 </div>`;
 
   const subject = `${heading} — XCEED NITJ`;
-  Promise.resolve(mailSender(email, subject, html)).catch((err) =>
-    console.error("[welcomeMailer] Failed to send email:", err.message),
-  );
+  try {
+    // mailSender resolves to undefined rather than throwing when the send fails.
+    return Boolean(await mailSender(email, subject, html));
+  } catch (err) {
+    console.error("[welcomeMailer] Failed to send email:", err.message);
+    return false;
+  }
 }
 
 module.exports = { sendWelcomeEmail, resolveFrontendBase };

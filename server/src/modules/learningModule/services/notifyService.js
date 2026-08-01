@@ -4,8 +4,9 @@ const LmNotification = require("../models/lmNotification");
 // Reuses the platform's existing nodemailer transport rather than configuring
 // a second one — same SMTP credentials, same "from" identity.
 let sendMail = null;
+let sendBulkMail = null;
 try {
-  ({ sendMail } = require("../../mailerModule/mailer"));
+  ({ sendMail, sendBulkMail } = require("../../mailerModule/mailer"));
 } catch (err) {
   console.warn("[LearningModule] mailer unavailable, notifications will be in-app only");
 }
@@ -140,30 +141,26 @@ async function notifyClass(opts) {
   } = opts;
 
   try {
-    let recipients = userIds;
-    let emailAddresses = [];
+    // One query, one filter, for both halves. These used to be derived
+    // separately: the targeted branch skipped `status`/`muted` entirely, so a
+    // removed or muted member still got the mail, and the actor was dropped
+    // from the in-app list but not the mail list — so the teacher who posted
+    // was emailed about their own post.
+    const members = await LmMembership.find({
+      classId: klass._id,
+      status: "active",
+      muted: false,
+      ...(userIds ? { userId: { $in: userIds } } : {}),
+    })
+      .select("userId email")
+      .lean();
 
-    if (!recipients) {
-      const members = await LmMembership.find({
-        classId: klass._id,
-        status: "active",
-        muted: false,
-      })
-        .select("userId email")
-        .lean();
-      recipients = members.map((m) => m.userId).filter(Boolean);
-      emailAddresses = members.map((m) => m.email).filter(Boolean);
-    } else {
-      const members = await LmMembership.find({
-        classId: klass._id,
-        userId: { $in: recipients },
-      })
-        .select("userId email")
-        .lean();
-      emailAddresses = members.map((m) => m.email).filter(Boolean);
-    }
+    const audience = members.filter(
+      (member) => member.userId && String(member.userId) !== String(excludeUserId),
+    );
 
-    const finalRecipients = recipients.filter((id) => String(id) !== String(excludeUserId));
+    const finalRecipients = audience.map((member) => member.userId);
+    const emailAddresses = audience.map((member) => member.email).filter(Boolean);
     if (!finalRecipients.length) return;
 
     const plainBody = toPlainExcerpt(body);
@@ -181,12 +178,15 @@ async function notifyClass(opts) {
       })),
     );
 
-    if (email && sendMail && klass.settings?.emailNotifications && emailAddresses.length) {
-      // Digest-style single send rather than one mail per member — the SMTP
-      // pool in mailer.js is shared with the rest of the platform.
+    if (email && sendBulkMail && klass.settings?.emailNotifications && emailAddresses.length) {
+      // One message per batch, addresses in bcc — see sendBulkMail. This used
+      // to be a single send with every address joined into `to:`, which showed
+      // the whole class each other's addresses and, past the provider's
+      // recipient cap, was rejected outright: a large class quietly received
+      // nothing at all.
       const href = absoluteLink(link);
-      await sendMail(
-        emailAddresses.join(","),
+      const { failed } = await sendBulkMail(
+        emailAddresses,
         `[${klass.name}] ${title}`,
         emailShell({
           heading: title,
@@ -195,9 +195,12 @@ async function notifyClass(opts) {
           ctaHref: href,
           footnote: `Posted in <strong>${escapeHtml(klass.name)}</strong>. You can turn these emails off in the class settings.`,
         }),
-      ).catch(
-        (err) => console.error("[LearningModule] notification mail failed:", err.message),
       );
+      if (failed) {
+        console.error(
+          `[LearningModule] notification mail: ${failed}/${emailAddresses.length} recipients not reached in ${klass.name}`,
+        );
+      }
     }
   } catch (error) {
     // Notifications are best-effort: never fail the originating request.

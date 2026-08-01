@@ -13,6 +13,7 @@ import {
 } from '@chakra-ui/react';
 
 import lmApi from '../api/lmApi';
+import StageBar from '../components/StageBar';
 import { loginPathFor } from '../../authRedirect';
 
 /**
@@ -82,73 +83,88 @@ export default function ShortJoin() {
   }, [codeParam, join]);
 
   const cardBg = useColorModeValue('white', 'gray.800');
+  const pageBg = useColorModeValue('gray.50', 'gray.900');
   const submit = () => join(code, name.trim());
 
   return (
-    <Box maxW="420px" mx="auto" mt={{ base: 6, md: 16 }} bg={cardBg} borderRadius="xl" borderWidth="1px" p={8}>
-      <VStack align="stretch" spacing={5}>
-        <Box textAlign="center">
-          <Text fontSize="3xl">⚡</Text>
-          <Heading size="lg">Join a short</Heading>
-          <Text fontSize="sm" opacity={0.7} mt={1}>
-            {needsName ? 'One more thing — what should the room call you?' : 'Type the code on the projector.'}
-          </Text>
-        </Box>
+    <Box minH="100vh" bg={pageBg}>
+      {/* The same bar the quiz and the short itself carry. This is the first
+          screen a scanned QR reaches, often for someone with no account, and it
+          had nothing on it saying whose platform they had just landed on. */}
+      <StageBar label="Live Short" />
+      <Box
+        maxW="420px"
+        mx="auto"
+        mt={{ base: 6, md: 16 }}
+        bg={cardBg}
+        borderRadius="xl"
+        borderWidth="1px"
+        p={8}
+      >
+        <VStack align="stretch" spacing={5}>
+          <Box textAlign="center">
+            <Text fontSize="3xl">⚡</Text>
+            <Heading size="lg">Join a short</Heading>
+            <Text fontSize="sm" opacity={0.7} mt={1}>
+              {needsName ? 'One more thing — what should the room call you?' : 'Type the code on the projector.'}
+            </Text>
+          </Box>
 
-        {error ? (
-          <Alert status="error" borderRadius="md" fontSize="sm">
-            <AlertIcon />
-            {error}
-          </Alert>
-        ) : null}
+          {error ? (
+            <Alert status="error" borderRadius="md" fontSize="sm">
+              <AlertIcon />
+              {error}
+            </Alert>
+          ) : null}
 
-        <Input
-          value={code}
-          onChange={(event) => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') submit();
-          }}
-          placeholder="000000"
-          textAlign="center"
-          fontSize="4xl"
-          fontWeight="800"
-          letterSpacing="0.3em"
-          h="72px"
-          // Brings up the numeric keypad on a phone without rejecting paste.
-          inputMode="numeric"
-          autoComplete="off"
-          autoFocus={!needsName}
-        />
-
-        {needsName ? (
           <Input
-            value={name}
-            onChange={(event) => setName(event.target.value.slice(0, 60))}
+            value={code}
+            onChange={(event) => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
             onKeyDown={(event) => {
               if (event.key === 'Enter') submit();
             }}
-            placeholder="Your name"
-            size="lg"
+            placeholder="000000"
             textAlign="center"
-            autoComplete="name"
-            autoFocus
+            fontSize="4xl"
+            fontWeight="800"
+            letterSpacing="0.3em"
+            h="72px"
+            // Brings up the numeric keypad on a phone without rejecting paste.
+            inputMode="numeric"
+            autoComplete="off"
+            autoFocus={!needsName}
           />
-        ) : null}
 
-        <Button
-          colorScheme="purple"
-          size="lg"
-          onClick={submit}
-          isLoading={busy}
-          isDisabled={needsName && !name.trim()}
-        >
-          Join
-        </Button>
+          {needsName ? (
+            <Input
+              value={name}
+              onChange={(event) => setName(event.target.value.slice(0, 60))}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') submit();
+              }}
+              placeholder="Your name"
+              size="lg"
+              textAlign="center"
+              autoComplete="name"
+              autoFocus
+            />
+          ) : null}
 
-        <Button variant="ghost" size="sm" onClick={() => navigate('/learning')}>
-          Back to my classes
-        </Button>
-      </VStack>
+          <Button
+            colorScheme="purple"
+            size="lg"
+            onClick={submit}
+            isLoading={busy}
+            isDisabled={needsName && !name.trim()}
+          >
+            Join
+          </Button>
+
+          <Button variant="ghost" size="sm" onClick={() => navigate('/learning')}>
+            Back to my classes
+          </Button>
+        </VStack>
+      </Box>
     </Box>
   );
 }
