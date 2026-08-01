@@ -24,11 +24,26 @@ import {
   Stack,
   Text,
   Textarea,
+  Tooltip,
   useDisclosure,
   useToast,
 } from '@chakra-ui/react';
+// From emotion, not from '@chakra-ui/react' — Chakra v2 does not re-export
+// `keyframes` from its root, and importing a name a module does not export
+// fails the whole module, which is a blank page rather than a missing
+// animation. Emotion is a declared dependency and Chakra's own styling engine.
+import { keyframes } from '@emotion/react';
 import lmApi from '../api/lmApi';
 import { CopyLinkButton, EmptyState, ErrorState, Loading, SectionCard } from '../components/common';
+import PublishQuizModal from '../components/PublishQuizModal';
+import { formatDateTime, relativeTime } from '../format';
+
+// Slow enough to read as "running" rather than "alarm" — this sits in a list a
+// teacher scans, not on a monitoring dashboard.
+const livePulse = keyframes`
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+`;
 
 // Two starting points over the same model. "Quiz" is the low-stakes default —
 // one page, free navigation, answers shown straight after. "Exam" switches on
@@ -46,7 +61,6 @@ const PRESETS = {
       showAnswersAfterSubmit: true,
       showScoreImmediately: true,
       allowReviewBeforeSubmit: true,
-      attemptsAllowed: 1,
     },
   },
   exam: {
@@ -60,7 +74,6 @@ const PRESETS = {
       showAnswersAfterSubmit: false,
       showScoreImmediately: false,
       allowReviewBeforeSubmit: false,
-      attemptsAllowed: 1,
       shuffleQuestions: true,
       shuffleOptions: true,
       allowTabChange: false,
@@ -307,18 +320,61 @@ function CreateQuizModal({ isOpen, onClose, classId }) {
 // that carries questionCount instead of questions, and `window` rather than any
 // single "can I start this" flag.
 function startState(quiz) {
-  const attemptsAllowed = quiz.settings?.attemptsAllowed || 1;
-  if (quiz.attemptsUsed >= attemptsAllowed) return { can: false, why: 'No attempts left' };
+  // One sitting per student — a submitted paper cannot be taken again.
+  if (quiz.attemptsUsed) return { can: false, why: 'Already attempted' };
   if (quiz.window?.notYetOpen) return { can: false, why: 'Not open yet' };
   if (quiz.window?.closed) return { can: false, why: 'Closed' };
   if (quiz.window?.lateToStart) return { can: false, why: 'Start window has passed' };
   return { can: true, why: null };
 }
 
-function QuizRow({ quiz, classId, isTeacher, dueDate, onDueDateChange, onTogglePublish, onDelete }) {
+/**
+ * Whether a card should say the test is running, and what "finished" means on it.
+ *
+ * Deliberately different for the two audiences, because "is this live" is a
+ * different question depending on who asks:
+ *
+ *  - a **teacher** wants to know whether anyone is sitting it *right now* — an
+ *    open window with nobody in it is not a live test, and it is the middle of a
+ *    sitting they may need to intervene in. So `sittingNow` leads, and the open
+ *    window is the weaker second answer.
+ *  - a **student** wants to know whether it is open to them and whether their
+ *    own paper is still going.
+ *
+ * "Completed" likewise: the cohort's last submission for staff, the student's
+ * own submission for them.
+ */
+function liveState(quiz, isTeacher) {
+  const open = quiz.window?.open && (isTeacher ? quiz.published : true);
+
+  if (isTeacher) {
+    const sitting = quiz.sittingNow || 0;
+    return {
+      live: sitting > 0,
+      label: sitting > 0 ? `🔴 Live · ${sitting} sitting now` : null,
+      open: Boolean(open && !sitting),
+      completedAt: quiz.stats?.lastSubmittedAt || null,
+      completedLabel: 'Last submission',
+    };
+  }
+
+  return {
+    live: Boolean(quiz.inProgress),
+    label: quiz.inProgress ? '🔴 Your test is in progress' : null,
+    open: Boolean(open && !quiz.inProgress),
+    completedAt: quiz.completedAt || null,
+    completedLabel: 'You completed this',
+  };
+}
+
+function QuizRow({ quiz, classId, isTeacher, onPublish, onUnpublish, onDelete }) {
   const isExam = quiz.settings?.deliveryMode === 'one_at_a_time';
   const questionCount = quiz.questionCount ?? quiz.questions?.length ?? 0;
   const start = isTeacher ? { can: true, why: null } : startState(quiz);
+  const scheduled = quiz.publish?.scheduled;
+  const opensAt = quiz.settings?.availableFrom;
+  const entryCloses = quiz.window?.startDeadline;
+  const state = liveState(quiz, isTeacher);
   return (
     <Flex
       bg="white"
@@ -337,15 +393,62 @@ function QuizRow({ quiz, classId, isTeacher, dueDate, onDueDateChange, onToggleP
           <Badge colorScheme={isExam ? 'red' : 'blue'}>{isExam ? '🎓 Exam' : '📝 Quiz'}</Badge>
           {quiz.source === 'ai' && <Badge colorScheme="purple">✨ AI</Badge>}
           {isTeacher && (
-            <Badge colorScheme={quiz.published ? 'green' : 'gray'}>
-              {quiz.published ? 'Published' : 'Draft'}
+            <Badge colorScheme={scheduled ? 'orange' : quiz.published ? 'green' : 'gray'}>
+              {scheduled ? 'Scheduled' : quiz.published ? 'Published' : 'Draft'}
+            </Badge>
+          )}
+          {/* The pulse is the point: a static red dot reads as an error badge,
+              and this one has to be findable while scanning a list of twenty. */}
+          {state.live && (
+            <Badge
+              colorScheme="red"
+              variant="solid"
+              borderRadius="full"
+              px={2}
+              sx={{ animation: `${livePulse} 1.8s ease-in-out infinite` }}
+            >
+              {state.label}
+            </Badge>
+          )}
+          {state.open && (
+            <Badge colorScheme="green" variant="subtle" borderRadius="full" px={2}>
+              🟢 Open now
             </Badge>
           )}
         </HStack>
+        {isTeacher && (scheduled || opensAt || entryCloses) && (
+          <Text fontSize="xs" color="gray.600" mt={1}>
+            {[
+              scheduled && `🔗 Link goes live ${formatDateTime(quiz.publish.publishAt)}`,
+              opensAt && `▶️ Starts ${formatDateTime(opensAt)}`,
+              entryCloses && `🚪 Entry closes ${formatDateTime(entryCloses)}`,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+          </Text>
+        )}
         <Text fontSize="xs" color="gray.500" mt={1}>
           {questionCount} questions · {quiz.totalMarks} marks
           {quiz.settings?.timeLimitMinutes ? ` · ${quiz.settings.timeLimitMinutes} min` : ''}
         </Text>
+
+        {/* Shown to students and staff alike. For a student it answers "did my
+            submission actually register?", which is the question they otherwise
+            ask a teacher; for staff it is when the cohort finished, which a
+            scheduled window does not tell them. */}
+        {state.completedAt && (
+          <Tooltip label={formatDateTime(state.completedAt)}>
+            <Text fontSize="xs" color="green.700" mt={1} fontWeight="500" display="inline-block">
+              ✅ {state.completedLabel} {relativeTime(state.completedAt)} ·{' '}
+              {formatDateTime(state.completedAt)}
+            </Text>
+          </Tooltip>
+        )}
+        {!state.completedAt && !state.live && quiz.window?.closed && (
+          <Text fontSize="xs" color="gray.500" mt={1}>
+            🔒 Closed {relativeTime(quiz.window.closesAt)} · {formatDateTime(quiz.window.closesAt)}
+          </Text>
+        )}
         {isTeacher && quiz.stats && (
           <Text fontSize="xs" color="gray.500">
             {quiz.stats.attempts} attempt(s)
@@ -374,16 +477,6 @@ function QuizRow({ quiz, classId, isTeacher, dueDate, onDueDateChange, onToggleP
       <HStack>
         {isTeacher ? (
           <>
-            {!quiz.published && (
-              <Input
-                size="sm"
-                type="datetime-local"
-                maxW="200px"
-                value={dueDate || ''}
-                onChange={(event) => onDueDateChange(event.target.value)}
-                placeholder="Due date"
-              />
-            )}
             <Button as={RouterLink} to={`/learning/class/${classId}/quiz/${quiz._id}/edit`} size="sm" variant="outline">
               Edit
             </Button>
@@ -393,9 +486,20 @@ function QuizRow({ quiz, classId, isTeacher, dueDate, onDueDateChange, onToggleP
             {/* Only once published: the link resolves to the student brief, which
                 a draft quiz will not serve to anyone but its author. */}
             {quiz.published && <CopyLinkButton to={`/learning/class/${classId}/quiz/${quiz._id}`} />}
-            <Button size="sm" colorScheme={quiz.published ? 'gray' : 'green'} onClick={onTogglePublish}>
-              {quiz.published ? 'Unpublish' : 'Publish'}
-            </Button>
+            {quiz.published ? (
+              <>
+                <Button size="sm" variant="outline" onClick={onPublish}>
+                  🗓 Schedule
+                </Button>
+                <Button size="sm" colorScheme="gray" onClick={onUnpublish}>
+                  Unpublish
+                </Button>
+              </>
+            ) : (
+              <Button size="sm" colorScheme="green" onClick={onPublish}>
+                Publish
+              </Button>
+            )}
             <Button size="sm" variant="ghost" colorScheme="red" onClick={onDelete} aria-label="Delete quiz">
               ✕
             </Button>
@@ -406,11 +510,12 @@ function QuizRow({ quiz, classId, isTeacher, dueDate, onDueDateChange, onToggleP
             to={`/learning/class/${classId}/quiz/${quiz._id}`}
             size="sm"
             colorScheme="purple"
-            // A finished attempt stays openable so the student can read their
-            // result back; only an unstartable fresh attempt is blocked.
-            isDisabled={!start.can && !quiz.attemptsUsed}
           >
-            {quiz.attemptsUsed > 0 ? 'Review / retake' : `Start ${isExam ? 'exam' : 'quiz'}`}
+            {/* The card always opens. A paper that has not opened yet still has
+                instructions, timings and a countdown worth reading beforehand,
+                and a finished one still has a result to read back — the brief
+                page is what refuses to hand out questions, not this link. */}
+            {quiz.attemptsUsed > 0 ? 'Review' : start.can ? `Start ${isExam ? 'exam' : 'quiz'}` : 'View instructions'}
           </Button>
         )}
       </HStack>
@@ -428,8 +533,9 @@ export default function Quizzes() {
   const [quizzes, setQuizzes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [dueDates, setDueDates] = useState({});
+  const [publishing, setPublishing] = useState(null);
   const { isOpen, onOpen, onClose } = useDisclosure();
+  const publishDialog = useDisclosure();
   const toast = useToast();
 
   const load = useCallback(async () => {
@@ -447,13 +553,17 @@ export default function Quizzes() {
     load();
   }, [load]);
 
-  const togglePublish = async (quiz) => {
+  // Publishing goes through the dialog — it is where the two clocks are set and
+  // where the link comes back. Unpublishing needs neither, so it stays direct.
+  const openPublish = (quiz) => {
+    setPublishing(quiz);
+    publishDialog.onOpen();
+  };
+
+  const unpublish = async (quiz) => {
     try {
-      await lmApi.publishQuiz(classId, quiz._id, {
-        publish: !quiz.published,
-        dueDate: dueDates[quiz._id] || undefined,
-      });
-      toast({ status: 'success', title: quiz.published ? 'Quiz unpublished' : 'Quiz published to the class' });
+      await lmApi.publishQuiz(classId, quiz._id, { publish: false });
+      toast({ status: 'success', title: 'Quiz unpublished' });
       await load();
     } catch (err) {
       toast({ status: 'error', title: err.message });
@@ -525,9 +635,8 @@ export default function Quizzes() {
               quiz={quiz}
               classId={classId}
               isTeacher={isTeacher}
-              dueDate={dueDates[quiz._id]}
-              onDueDateChange={(value) => setDueDates((prev) => ({ ...prev, [quiz._id]: value }))}
-              onTogglePublish={() => togglePublish(quiz)}
+              onPublish={() => openPublish(quiz)}
+              onUnpublish={() => unpublish(quiz)}
               onDelete={() => remove(quiz)}
             />
           ))
@@ -535,6 +644,13 @@ export default function Quizzes() {
       </SectionCard>
 
       <CreateQuizModal isOpen={isOpen} onClose={onClose} classId={classId} />
+      <PublishQuizModal
+        isOpen={publishDialog.isOpen}
+        onClose={publishDialog.onClose}
+        quiz={publishing}
+        classId={classId}
+        onPublished={load}
+      />
     </Box>
   );
 }

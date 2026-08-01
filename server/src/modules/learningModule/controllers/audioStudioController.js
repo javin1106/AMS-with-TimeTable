@@ -4,6 +4,7 @@ const LmQuiz = require("../models/lmQuiz");
 const LmClass = require("../models/lmClass");
 const ai = require("../services/aiService");
 const recordings = require("../services/recordingService");
+const { duplicateOptionMessage } = require("../services/questionRules");
 const { notifyClass } = require("../services/notifyService");
 
 const log = (session, step, message, level = "info") => {
@@ -476,6 +477,9 @@ exports.createQuizFromDraft = async (req, res) => {
   if (!questions?.length) {
     return res.status(400).json({ message: "There are no draft questions to turn into a quiz." });
   }
+
+  const duplicates = duplicateOptionMessage(questions);
+  if (duplicates) return res.status(400).json({ message: duplicates });
 
   const quiz = new LmQuiz({
     classId: req.lmClass._id,

@@ -12,12 +12,9 @@ import {
   useColorModeValue,
 } from '@chakra-ui/react';
 import {
-  FiActivity,
   FiAward,
   FiBookOpen,
   FiCalendar,
-  FiFileText,
-  FiHeart,
   FiMic,
   FiShield,
   FiUser,
@@ -63,47 +60,12 @@ const ROLE_META = {
     icon: FiMic,
     accent: 'purple',
   },
-  editor: {
-    name: 'Paper Review Management',
-    link: '/prm/dashboard',
-    description: 'Manage paper reviews',
-    icon: FiFileText,
-    accent: 'orange',
-  },
-  PRM: {
-    name: 'PRM',
-    link: '/prm/home',
-    description: 'Paper Review Management',
-    icon: FiFileText,
-    accent: 'orange',
-  },
   FACULTY: {
     name: 'Faculty',
-    link: '/prm/home',
-    description: 'Faculty dashboard',
+    link: '/learning',
+    description: 'Your classes and coursework',
     icon: FiUser,
     accent: 'orange',
-  },
-  doctor: {
-    name: 'Diabetics Module Doctor',
-    link: '/dm/doctor/dashboard',
-    description: 'Patient management',
-    icon: FiHeart,
-    accent: 'pink',
-  },
-  patient: {
-    name: 'Diabetics Module Patient',
-    link: '/dm/patient/dashboard',
-    description: 'Track your health',
-    icon: FiHeart,
-    accent: 'pink',
-  },
-  'dm-admin': {
-    name: 'Diabetics Module Admin',
-    link: '/dm/admin/dashboard',
-    description: 'Manage diabetics module',
-    icon: FiActivity,
-    accent: 'pink',
   },
   'iams-admin': {
     name: 'iLEED Admin',
@@ -154,10 +116,8 @@ const roleMeta = (role) =>
     accent: 'gray',
   };
 
-// Roles that map to 'editor' historically appear with either casing.
 const singleRoleTarget = (role, user) => {
   if (user?.name?.toLowerCase() === 'coe@nitj.ac.in') return '/tt/coe/facultyload';
-  if (role === 'Editor') return ROLE_META.editor.link;
   return roleMeta(role).link;
 };
 
@@ -259,9 +219,21 @@ const AllocatedRolesPage = () => {
         });
         if (!response.ok) throw new Error('Failed to fetch allocated roles');
         const userdetails = await response.json();
-        const excludedRoles = ['Reviewer', 'Author'];
+        // The paper-review and diabetics modules are gone, but the roles they
+        // issued still sit on existing user records — hide them rather than
+        // offering a card that leads to a route that no longer exists.
+        // Matched case-insensitively: 'editor' was stored with either casing.
+        const excludedRoles = [
+          'reviewer',
+          'author',
+          'editor',
+          'prm',
+          'doctor',
+          'patient',
+          'dm-admin',
+        ];
         const platformRoles = (userdetails.user.role || []).filter(
-          (role) => !excludedRoles.includes(role),
+          (role) => !excludedRoles.includes(String(role).toLowerCase()),
         );
         setAllocatedRoles(platformRoles);
         setUser(userdetails.user);

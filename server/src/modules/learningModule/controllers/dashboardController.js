@@ -19,7 +19,9 @@ const myActiveClassIds = async (userId) => {
     _id: { $in: memberships.map((m) => m.classId) },
     status: "active",
   })
-    .select("name coverColor section subject")
+    // subjectCode rides along so the calendar can label a chip with the subject
+    // short name instead of only the class colour.
+    .select("name coverColor section subject subjectCode")
     .lean();
 
   const roleByClass = new Map(memberships.map((m) => [String(m.classId), m.role]));

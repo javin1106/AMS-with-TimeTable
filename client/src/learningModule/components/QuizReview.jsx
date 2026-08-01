@@ -91,7 +91,7 @@ export default function QuizReview({ review, title = 'Question review' }) {
               </Stack>
             )}
 
-            {(entry.type === 'short' || entry.type === 'numerical') && (
+            {entry.type === 'numerical' && (
               <Text fontSize="sm" mt={2} color="gray.600">
                 Your answer: <b>{answer?.text || '—'}</b> · Expected:{' '}
                 <b>{(entry.correctAnswers || []).join(', ')}</b>

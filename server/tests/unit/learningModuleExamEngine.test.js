@@ -132,12 +132,6 @@ describe('learningModule examEngine — markAnswer', () => {
     expect(engine.markAnswer(question, { text: '0.001' }, 0).correct).toBe(false);
   });
 
-  it('marks short answers case-insensitively', () => {
-    const question = { type: 'short', correctAnswers: ['Ohm'], marks: 1 };
-    expect(engine.markAnswer(question, { text: ' ohm ' }, 0).correct).toBe(true);
-    expect(engine.markAnswer(question, { text: 'volt' }, 0).correct).toBe(false);
-  });
-
   it('never penalises an unattempted question', () => {
     expect(engine.markAnswer(QUIZ.questions[0], { selected: [] }, 5)).toEqual({
       correct: false,

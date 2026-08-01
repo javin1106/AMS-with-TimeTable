@@ -93,6 +93,8 @@ export function AttachmentPicker({ attachments = [], onChange, disabled }) {
     }
   };
 
+  // Committed on Enter, on the Add button and on blur — a URL left sitting in
+  // the box used to be thrown away when the composer was saved.
   const addLink = () => {
     const url = linkUrl.trim();
     if (!url) return;
@@ -118,11 +120,12 @@ export function AttachmentPicker({ attachments = [], onChange, disabled }) {
         </Button>
         <Input
           size="sm"
-          placeholder="Paste a link and press Enter"
+          placeholder="Paste a link"
           value={linkUrl}
           maxW="280px"
           isDisabled={disabled}
           onChange={(event) => setLinkUrl(event.target.value)}
+          onBlur={addLink}
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
               event.preventDefault();
@@ -130,6 +133,9 @@ export function AttachmentPicker({ attachments = [], onChange, disabled }) {
             }
           }}
         />
+        <Button size="sm" variant="outline" onClick={addLink} isDisabled={disabled || !linkUrl.trim()}>
+          Add link
+        </Button>
       </HStack>
       <input
         ref={fileInput}

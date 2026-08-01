@@ -167,6 +167,26 @@ describe("GET /calendar", () => {
     expect(new Date(res.body.quizzes[0].conductedAt)).toEqual(inMarch(3));
   });
 
+  it("carries the class subject code so a chip can be labelled with it", async () => {
+    const { user, cookie } = await seedFaculty();
+    const klass = await seedClass(user, { subject: "Digital Signal Processing", subjectCode: "EC8553" });
+    await LmQuiz.create({
+      classId: klass._id,
+      title: "Unit test 1",
+      published: true,
+      createdBy: user._id,
+      settings: { availableFrom: inMarch(18, 10) },
+    });
+
+    const res = await getCalendar(cookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.quizzes[0].class).toMatchObject({
+      subject: "Digital Signal Processing",
+      subjectCode: "EC8553",
+    });
+  });
+
   it("lists Short sessions on the day they were presented", async () => {
     const { user, cookie } = await seedFaculty();
     const klass = await seedClass(user);

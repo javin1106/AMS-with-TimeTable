@@ -17,6 +17,9 @@ const lmNotificationSchema = new mongoose.Schema({
       "join_request",
       "quiz",
       "material",
+      // Carries no actorName, unlike every other type here — see
+      // feedbackController.createFeedback.
+      "feedback",
     ],
     required: true,
   },

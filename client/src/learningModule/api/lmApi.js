@@ -179,6 +179,15 @@ const lmApi = {
     }),
   deleteComment: (classId, commentId) => request(`/classes/${classId}/comments/${commentId}`, { method: 'DELETE' }),
 
+  /* anonymous feedback — the response shape depends on who is asking, see
+     feedbackController.listFeedback: `view` is 'student' | 'teacher' | 'admin' */
+  listFeedback: (classId) => request(`/classes/${classId}/feedback`),
+  sendFeedback: (classId, body) => request(`/classes/${classId}/feedback`, { method: 'POST', body }),
+  updateFeedback: (classId, feedbackId, body) =>
+    request(`/classes/${classId}/feedback/${feedbackId}`, { method: 'PATCH', body }),
+  deleteFeedback: (classId, feedbackId) =>
+    request(`/classes/${classId}/feedback/${feedbackId}`, { method: 'DELETE' }),
+
   /* classwork */
   listCoursework: (classId, params) => request(`/classes/${classId}/coursework${qs(params)}`),
   createCoursework: (classId, body) => request(`/classes/${classId}/coursework`, { method: 'POST', body }),
@@ -239,6 +248,13 @@ const lmApi = {
       body: { answers, expired },
     }),
   getAttempt: (classId, attemptId) => request(`/classes/${classId}/attempts/${attemptId}`),
+
+  /* staff putting one student's sitting right — see quizController.reopenAttempt.
+     `mode` is 'continue' (keep their answers) or 'restart' (fresh paper). */
+  reopenQuizAttempt: (classId, attemptId, body) =>
+    request(`/classes/${classId}/attempts/${attemptId}/reopen`, { method: 'POST', body }),
+  deleteQuizAttempt: (classId, attemptId) =>
+    request(`/classes/${classId}/attempts/${attemptId}`, { method: 'DELETE' }),
 
   /* parameterised tutorials */
   listTutorials: (classId) => request(`/classes/${classId}/tutorials`),

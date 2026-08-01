@@ -143,8 +143,22 @@ exports.deleteComment = async (req, res) => {
   if (String(comment.authorId) !== req.lmUser.id && !req.lmIsTeacher) {
     return res.status(403).json({ message: "Forbidden" });
   }
+  const alreadyDeleted = comment.deleted;
   comment.deleted = true;
   comment.deletedAt = new Date();
   await comment.save();
+
+  // The counter is what the stream badge reads, so it has to come back down
+  // with the comment. Guarded against a double delete driving it negative.
+  if (!alreadyDeleted) {
+    const Model = TARGET_MODELS[comment.targetType];
+    if (Model && comment.targetType !== "submission") {
+      await Model.updateOne(
+        { _id: comment.targetId, commentCount: { $gt: 0 } },
+        { $inc: { commentCount: -1 } },
+      );
+    }
+  }
+
   return res.json({ deleted: true });
 };

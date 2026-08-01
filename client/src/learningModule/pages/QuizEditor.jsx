@@ -29,11 +29,14 @@ import {
   Text,
   Textarea,
   Tooltip,
+  useDisclosure,
   useToast,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
+import PublishQuizModal from '../components/PublishQuizModal';
 import RichTextEditor from '../components/RichTextEditor';
 import { CopyLinkButton, ErrorState, Loading, SectionCard } from '../components/common';
+import { duplicateOptionIndexes, questionsWithDuplicateOptions } from '../questionRules';
 
 const BLANK_QUESTION = {
   question: '',
@@ -59,7 +62,6 @@ const TYPE_LABELS = {
   msq: 'Multiple correct',
   truefalse: 'True / False',
   numerical: 'Numerical / integer',
-  short: 'Short answer',
 };
 
 const toLocalInput = (value) =>
@@ -68,11 +70,14 @@ const toLocalInput = (value) =>
 function QuestionCard({ question, index, sections, onChange, onRemove, onDuplicate, perQuestionTiming }) {
   const set = (field, value) => onChange({ ...question, [field]: value });
   const isChoice = ['mcq', 'msq', 'truefalse'].includes(question.type);
+  // Flagged as it is typed rather than at save: by the time a toast says
+  // "question 14 repeats an option", the teacher has to go and find which one.
+  const duplicates = isChoice ? duplicateOptionIndexes(question.options) : new Set();
 
   const setType = (type) => {
     if (type === 'truefalse') {
       onChange({ ...question, type, options: ['True', 'False'], correctAnswers: [] });
-    } else if (type === 'short' || type === 'numerical') {
+    } else if (type === 'numerical') {
       onChange({ ...question, type, options: [], correctAnswers: [''] });
     } else {
       onChange({
@@ -103,15 +108,10 @@ function QuestionCard({ question, index, sections, onChange, onRemove, onDuplica
         </HStack>
       </Flex>
 
-      <Box mb={3}>
-        <RichTextEditor
-          value={question.question}
-          onChange={(html) => set('question', html)}
-          placeholder="Question text — formatting, sub/superscripts and images are supported"
-          minH="110px"
-        />
-      </Box>
-
+      {/* Settings before the text, and Type first among them: the choice of
+          type decides what the answer section below even looks like, so making
+          it after writing the question is the wrong way round — and a teacher
+          who picks it last has already typed into a layout that then changes. */}
       <SimpleGrid columns={{ base: 2, md: 4 }} spacing={3} mb={3}>
         <FormControl>
           <FormLabel fontSize="xs">Type</FormLabel>
@@ -192,6 +192,15 @@ function QuestionCard({ question, index, sections, onChange, onRemove, onDuplica
         </FormControl>
       </SimpleGrid>
 
+      <Box mb={3}>
+        <RichTextEditor
+          value={question.question}
+          onChange={(html) => set('question', html)}
+          placeholder="Question text — formatting, sub/superscripts and images are supported"
+          minH="110px"
+        />
+      </Box>
+
       {isChoice && (
         <Stack spacing={2} mb={3}>
           <Text fontSize="xs" color="gray.500">
@@ -219,7 +228,12 @@ function QuestionCard({ question, index, sections, onChange, onRemove, onDuplica
               {question.type === 'truefalse' ? (
                 <Input size="sm" value={option} isReadOnly />
               ) : (
-                <Box flex="1">
+                <Box
+                  flex="1"
+                  borderWidth={duplicates.has(optionIndex) ? '1px' : 0}
+                  borderColor="red.400"
+                  borderRadius="md"
+                >
                   <RichTextEditor
                     compact
                     minH="46px"
@@ -231,6 +245,11 @@ function QuestionCard({ question, index, sections, onChange, onRemove, onDuplica
                     }}
                     placeholder={`Option ${optionIndex + 1}`}
                   />
+                  {duplicates.has(optionIndex) && (
+                    <Text fontSize="xs" color="red.600" px={2} pb={1}>
+                      Same as an option above — a student could be right and wrong at once.
+                    </Text>
+                  )}
                 </Box>
               )}
               {question.type !== 'truefalse' && question.options.length > 2 && (
@@ -295,16 +314,6 @@ function QuestionCard({ question, index, sections, onChange, onRemove, onDuplica
         </SimpleGrid>
       )}
 
-      {question.type === 'short' && (
-        <Input
-          size="sm"
-          mb={3}
-          placeholder="Expected answer (case-insensitive exact match auto-grades)"
-          value={(question.correctAnswers || [])[0] || ''}
-          onChange={(e) => set('correctAnswers', [e.target.value])}
-        />
-      )}
-
       <RichTextEditor
         compact
         value={question.explanation || ''}
@@ -326,6 +335,8 @@ export default function QuizEditor() {
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [collaboratorEmails, setCollaboratorEmails] = useState('');
+  const publishDialog = useDisclosure();
+  const [wentLive, setWentLive] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -345,6 +356,21 @@ export default function QuizEditor() {
   }, [load]);
 
   const save = async () => {
+    // The server rejects this too; catching it here names the questions while
+    // the teacher is still on the page that can fix them.
+    const repeated = questionsWithDuplicateOptions(quiz.questions);
+    if (repeated.length) {
+      toast({
+        status: 'error',
+        duration: 8000,
+        title: `Question${repeated.length > 1 ? 's' : ''} ${repeated.join(', ')} repeat${
+          repeated.length > 1 ? '' : 's'
+        } an option`,
+        description: 'Every choice in a question must be distinct. The repeats are outlined in red.',
+      });
+      return false;
+    }
+
     setSaving(true);
     try {
       await lmApi.updateQuiz(classId, quizId, {
@@ -366,15 +392,19 @@ export default function QuizEditor() {
     }
   };
 
+  // Save first — the dialog publishes what is on the server, not what is on
+  // screen — then hand over to it for the two clocks and the link.
   const publish = async () => {
     if (!(await save())) return;
-    try {
-      await lmApi.publishQuiz(classId, quizId, { publish: true });
-      toast({ status: 'success', title: 'Published to the class' });
-      navigate(`/learning/class/${classId}/quizzes`);
-    } catch (err) {
-      toast({ status: 'error', title: err.message, duration: 10000 });
-    }
+    setWentLive(false);
+    publishDialog.onOpen();
+  };
+
+  // Back to the list once it is actually out, which is where the link, the
+  // schedule and the results live. A cancelled dialog leaves the editor alone.
+  const closePublish = () => {
+    publishDialog.onClose();
+    if (wentLive) navigate(`/learning/class/${classId}/quizzes`);
   };
 
   if (loading) return <Loading />;
@@ -492,6 +522,18 @@ export default function QuizEditor() {
             <Button variant="outline" onClick={addQuestion}>
               + Add question
             </Button>
+
+            {/* The same two actions as the header. A long paper puts the header
+                pair a few screens up, and scrolling back to save is exactly the
+                moment a teacher loses the work they just typed. */}
+            <Flex justify="flex-end" gap={2} mt={6} pt={4} borderTopWidth="1px" borderColor="gray.200">
+              <Button size="sm" variant="outline" onClick={save} isLoading={saving}>
+                Save
+              </Button>
+              <Button size="sm" colorScheme="green" onClick={publish} isDisabled={!quiz.questions.length}>
+                Save &amp; publish
+              </Button>
+            </Flex>
           </TabPanel>
 
           {/* ---------- sections ---------- */}
@@ -774,16 +816,6 @@ export default function QuizEditor() {
                   />
                 </FormControl>
                 <FormControl>
-                  <FormLabel fontSize="xs">Attempts allowed</FormLabel>
-                  <Input
-                    size="sm"
-                    type="number"
-                    min={1}
-                    value={settings.attemptsAllowed}
-                    onChange={(e) => setSetting('attemptsAllowed', Number(e.target.value) || 1)}
-                  />
-                </FormControl>
-                <FormControl>
                   <Tooltip label="Draw this many questions at random from the bank for each student. 0 = serve every question.">
                     <FormLabel fontSize="xs">Questions per student</FormLabel>
                   </Tooltip>
@@ -899,6 +931,21 @@ export default function QuizEditor() {
                 >
                   Disable right-click
                 </Checkbox>
+
+                <Divider />
+                {/* An allowance rather than a deterrent, but it belongs next to
+                    them: it is the same decision about what a student may have
+                    on screen during the sitting. */}
+                <Checkbox
+                  size="sm"
+                  isChecked={settings.allowCalculator !== false}
+                  onChange={(e) => setSetting('allowCalculator', e.target.checked)}
+                >
+                  Offer an on-screen scientific calculator
+                </Checkbox>
+                <Text fontSize="xs" color="gray.500" pl={6} mt={-1}>
+                  Turn this off for a paper where the arithmetic is the point.
+                </Text>
               </Stack>
             </SectionCard>
           </TabPanel>
@@ -1019,6 +1066,17 @@ export default function QuizEditor() {
           </TabPanel>
         </TabPanels>
       </Tabs>
+
+      <PublishQuizModal
+        isOpen={publishDialog.isOpen}
+        onClose={closePublish}
+        quiz={quiz}
+        classId={classId}
+        onPublished={async () => {
+          setWentLive(true);
+          await load();
+        }}
+      />
     </Box>
   );
 }
