@@ -1,6 +1,24 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
-import { Badge, Box, Button, Flex, Grid, HStack, Heading, Text, Wrap, WrapItem } from '@chakra-ui/react';
+import {
+  Badge,
+  Box,
+  Button,
+  Flex,
+  Grid,
+  HStack,
+  Heading,
+  Modal,
+  ModalBody,
+  ModalCloseButton,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+  ModalOverlay,
+  Text,
+  Wrap,
+  WrapItem,
+} from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import { EmptyState, ErrorState, Loading, SectionCard } from '../components/common';
 import { WORK_TYPE_META, formatDate, formatDateTime } from '../format';
@@ -38,8 +56,26 @@ const LEGEND = [
   { color: 'red.200', label: 'Non-working day' },
 ];
 
+/** How many chips a day cell shows before it collapses the rest into "+N more". */
+const CHIPS_PER_CELL = 3;
+
+/**
+ * The subject short name a chip is labelled with. The subject code is what a
+ * timetable calls a subject ("CS301"), so it wins; a class without one falls
+ * back to its subject, then its name, clipped so a chip stays one line. The
+ * untruncated value always survives in the chip's tooltip.
+ */
+const subjectShort = (klass) => {
+  const raw = String(klass?.subjectCode || klass?.subject || klass?.name || '').trim();
+  return raw.length > 14 ? `${raw.slice(0, 13)}…` : raw;
+};
+
+/** Clock time, for the entries where the hour actually means something. */
+const formatTime = (value) =>
+  new Date(value).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+
 /** A single chip inside a day cell, rendered as a link only when there is one. */
-function DayChip({ to, bg, label, title }) {
+function DayChip({ to, bg, subject, label, title }) {
   return (
     <Box
       {...(to ? { as: RouterLink, to } : {})}
@@ -54,9 +90,92 @@ function DayChip({ to, bg, label, title }) {
       noOfLines={1}
       _hover={to ? { opacity: 0.85, textDecoration: 'none' } : undefined}
       title={title || label}
+      // The cell behind the chip opens the day's list; a chip that navigates
+      // somewhere of its own should not do both.
+      onClick={to ? (event) => event.stopPropagation() : undefined}
     >
+      {subject && (
+        <Text as="span" fontWeight="700" mr={1}>
+          {subject}
+        </Text>
+      )}
       {label}
     </Box>
+  );
+}
+
+/** Everything happening on one day, for when a cell has more than it can show. */
+function DayDetailModal({ date, items, holiday, onClose }) {
+  return (
+    <Modal isOpen={!!date} onClose={onClose} size="lg" scrollBehavior="inside" isCentered>
+      <ModalOverlay />
+      <ModalContent>
+        <ModalHeader fontSize="md">
+          {date && formatDate(date)}
+          <Text fontSize="xs" color="gray.500" fontWeight="400">
+            {items.length} {items.length === 1 ? 'activity' : 'activities'}
+          </Text>
+        </ModalHeader>
+        <ModalCloseButton />
+        <ModalBody pb={4}>
+          {holiday && (
+            <Flex align="center" gap={3} py={2.5} borderBottomWidth="1px" borderColor="gray.100">
+              <Text>🏖️</Text>
+              <Box flex="1" minW={0}>
+                <Text fontSize="sm" fontWeight="500">
+                  {holiday.remark}
+                </Text>
+                <Text fontSize="xs" color="gray.500">
+                  Non-working day{holiday.session ? ` · ${holiday.session}` : ''}
+                </Text>
+              </Box>
+              <Badge colorScheme="red">Off</Badge>
+            </Flex>
+          )}
+          {items.length === 0 && !holiday ? (
+            <EmptyState icon="📅" title="Nothing scheduled on this day" />
+          ) : (
+            items.map((item) => (
+              <Flex
+                key={item.key}
+                {...(item.to ? { as: RouterLink, to: item.to, onClick: onClose } : {})}
+                align="center"
+                gap={3}
+                py={2.5}
+                borderBottomWidth="1px"
+                borderColor="gray.100"
+                _hover={item.to ? { bg: 'gray.50', textDecoration: 'none' } : undefined}
+              >
+                <Text>{item.icon}</Text>
+                <Box flex="1" minW={0}>
+                  <Flex align="center" gap={2} minW={0}>
+                    {item.subject && (
+                      <Badge bg={item.bg} color="white" fontSize="0.6rem">
+                        {item.subject}
+                      </Badge>
+                    )}
+                    <Text fontSize="sm" fontWeight="500" noOfLines={1}>
+                      {item.title}
+                    </Text>
+                  </Flex>
+                  <Text fontSize="xs" color="gray.500" noOfLines={1}>
+                    {item.kindLabel}
+                    {item.showTime ? ` · ${formatTime(item.at)}` : ''}
+                    {item.className ? ` · ${item.className}` : ''}
+                  </Text>
+                </Box>
+                {item.badge}
+              </Flex>
+            ))
+          )}
+        </ModalBody>
+        <ModalFooter pt={0}>
+          <Button size="sm" onClick={onClose}>
+            Close
+          </Button>
+        </ModalFooter>
+      </ModalContent>
+    </Modal>
   );
 }
 
@@ -65,10 +184,14 @@ export default function Calendar() {
   const [data, setData] = useState(EMPTY);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // The day whose full activity list is open, or null.
+  const [selectedDay, setSelectedDay] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    // The open day belongs to the month being left behind.
+    setSelectedDay(null);
     try {
       const result = await lmApi.calendar({
         from: startOfMonth(cursor).toISOString(),
@@ -110,38 +233,85 @@ export default function Calendar() {
 
     data.coursework.forEach((item) => {
       const meta = WORK_TYPE_META[item.workType] || WORK_TYPE_META.assignment;
-      push(item.calendarDate || item.dueDate, {
+      const subject = subjectShort(item.class);
+      const kindLabel = `${meta.label} ${item.dateKind === 'posted' ? 'posted' : 'due'}`;
+      const at = item.calendarDate || item.dueDate;
+      push(at, {
         key: `cw-${item._id}`,
+        at,
+        showTime: false,
         bg: item.class?.coverColor || 'gray.500',
+        icon: meta.icon,
+        subject,
+        title: item.title,
+        kindLabel,
+        className: item.class?.name || '',
         label: `${meta.icon} ${item.title}`,
-        title: `${meta.label} ${item.dateKind === 'posted' ? 'posted' : 'due'} — ${item.title}`,
+        tooltip: `${item.class?.subject || item.class?.name || ''} — ${kindLabel}: ${item.title}`,
         to: `/learning/class/${item.classId}/work/${item._id}`,
+        badge: item.mySubmissionState ? (
+          <Badge colorScheme={item.mySubmissionState === 'assigned' ? 'orange' : 'green'}>
+            {item.mySubmissionState === 'assigned' ? 'Not done' : item.mySubmissionState}
+          </Badge>
+        ) : null,
       });
     });
 
     data.quizzes.forEach((quiz) => {
+      const subject = subjectShort(quiz.class);
       push(quiz.conductedAt, {
         key: `qz-${quiz._id}`,
+        at: quiz.conductedAt,
+        showTime: true,
         bg: 'purple.500',
+        icon: '🧠',
+        subject,
+        title: quiz.title,
+        kindLabel: quiz.timeLimitMinutes ? `Quiz · ${quiz.timeLimitMinutes} min` : 'Quiz',
+        className: quiz.class?.name || '',
         label: `🧠 ${quiz.title}`,
-        title: `Quiz — ${quiz.title}`,
+        tooltip: `${quiz.class?.subject || quiz.class?.name || ''} — Quiz: ${quiz.title}`,
         to: `/learning/class/${quiz.classId}/quiz/${quiz._id}`,
+        badge:
+          quiz.myAttemptStatus === 'submitted' ? (
+            <Badge colorScheme="green">
+              {quiz.myPercent === null ? 'Submitted' : `${quiz.myPercent}%`}
+            </Badge>
+          ) : quiz.myAttemptStatus ? (
+            <Badge colorScheme="orange">{quiz.myAttemptStatus.replace('_', ' ')}</Badge>
+          ) : null,
       });
     });
 
     data.shorts.forEach((short) => {
+      const subject = subjectShort(short.class);
       push(short.startedAt, {
         key: `sh-${short._id}`,
+        at: short.startedAt,
+        showTime: true,
         bg: 'teal.500',
+        icon: '⚡',
+        subject,
+        title: short.title,
+        kindLabel: 'Short presented',
+        className: short.class?.name || '',
         label: `⚡ ${short.title}`,
-        title: `Short presented — ${short.title}`,
+        tooltip: `${short.class?.subject || short.class?.name || ''} — Short: ${short.title}`,
         // Only a teacher has somewhere to go: a finished session's report.
         to: isTeacher(short.myRole)
           ? `/learning/class/${short.classId}/short/${short.shortId}/report/${short._id}`
           : null,
+        badge: (
+          <Badge colorScheme={short.status === 'live' ? 'red' : 'gray'}>
+            {short.status === 'live' ? 'Live' : `${short.participantCount} joined`}
+          </Badge>
+        ),
       });
     });
 
+    // Chips are pushed feed by feed, so a day holds coursework, then quizzes,
+    // then Shorts; ordering by time is what a reader expects instead.
+    map.forEach((entries) => entries.sort((a, b) => new Date(a.at) - new Date(b.at)));
     return map;
   }, [data]);
 
@@ -159,7 +329,8 @@ export default function Calendar() {
         <Box>
           <Heading size="lg">Calendar</Heading>
           <Text color="gray.500" fontSize="sm">
-            Coursework due dates, quizzes, Shorts and institute holidays.
+            Coursework due dates, quizzes, Shorts and institute holidays. Click a day to see
+            everything on it.
           </Text>
         </Box>
         <HStack>
@@ -222,6 +393,9 @@ export default function Calendar() {
                   bg = holiday ? 'red.50' : 'blue.50';
                 }
 
+                const openable = dayItems.length > 0 || !!holiday;
+                const open = () => openable && setSelectedDay(date);
+
                 return (
                   <Box
                     key={date.toISOString()}
@@ -231,6 +405,24 @@ export default function Calendar() {
                     bg={bg}
                     borderRadius="md"
                     p={1.5}
+                    // Any day with something on it opens the full list — the
+                    // cell only ever has room for the first few chips.
+                    {...(openable
+                      ? {
+                          role: 'button',
+                          tabIndex: 0,
+                          cursor: 'pointer',
+                          onClick: open,
+                          onKeyDown: (event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              open();
+                            }
+                          },
+                          'aria-label': `${formatDate(date)} — ${dayItems.length} activities`,
+                          _hover: { borderColor: 'blue.300' },
+                        }
+                      : {})}
                   >
                     <Flex align="center" justify="space-between" gap={1}>
                       <Text
@@ -251,12 +443,25 @@ export default function Calendar() {
                         {holiday.remark}
                       </Text>
                     )}
-                    {dayItems.slice(0, 3).map((chip) => (
-                      <DayChip key={chip.key} to={chip.to} bg={chip.bg} label={chip.label} title={chip.title} />
+                    {dayItems.slice(0, CHIPS_PER_CELL).map((chip) => (
+                      <DayChip
+                        key={chip.key}
+                        to={chip.to}
+                        bg={chip.bg}
+                        subject={chip.subject}
+                        label={chip.label}
+                        title={chip.tooltip}
+                      />
                     ))}
-                    {dayItems.length > 3 && (
-                      <Text fontSize="0.6rem" color="gray.500" mt={0.5}>
-                        +{dayItems.length - 3} more
+                    {dayItems.length > CHIPS_PER_CELL && (
+                      <Text
+                        fontSize="0.6rem"
+                        color="blue.600"
+                        fontWeight="600"
+                        mt={0.5}
+                        _hover={{ textDecoration: 'underline' }}
+                      >
+                        +{dayItems.length - CHIPS_PER_CELL} more
                       </Text>
                     )}
                   </Box>
@@ -285,9 +490,16 @@ export default function Calendar() {
                   >
                     <Text>{meta.icon}</Text>
                     <Box flex="1" minW={0}>
-                      <Text fontSize="sm" fontWeight="500" noOfLines={1}>
-                        {item.title}
-                      </Text>
+                      <Flex align="center" gap={2} minW={0}>
+                        {subjectShort(item.class) && (
+                          <Badge bg={item.class?.coverColor || 'gray.500'} color="white" fontSize="0.6rem">
+                            {subjectShort(item.class)}
+                          </Badge>
+                        )}
+                        <Text fontSize="sm" fontWeight="500" noOfLines={1}>
+                          {item.title}
+                        </Text>
+                      </Flex>
                       <Text fontSize="xs" color="gray.500">
                         {item.class?.name} · {item.dateKind === 'posted' ? 'Posted' : 'Due'}{' '}
                         {formatDate(item.calendarDate || item.dueDate)}
@@ -323,9 +535,16 @@ export default function Calendar() {
                   >
                     <Text>🧠</Text>
                     <Box flex="1" minW={0}>
-                      <Text fontSize="sm" fontWeight="500" noOfLines={1}>
-                        {quiz.title}
-                      </Text>
+                      <Flex align="center" gap={2} minW={0}>
+                        {subjectShort(quiz.class) && (
+                          <Badge bg="purple.500" color="white" fontSize="0.6rem">
+                            {subjectShort(quiz.class)}
+                          </Badge>
+                        )}
+                        <Text fontSize="sm" fontWeight="500" noOfLines={1}>
+                          {quiz.title}
+                        </Text>
+                      </Flex>
                       <Text fontSize="xs" color="gray.500">
                         {quiz.class?.name} · {formatDateTime(quiz.conductedAt)}
                         {quiz.timeLimitMinutes ? ` · ${quiz.timeLimitMinutes} min` : ''}
@@ -366,9 +585,16 @@ export default function Calendar() {
                     >
                       <Text>⚡</Text>
                       <Box flex="1" minW={0}>
-                        <Text fontSize="sm" fontWeight="500" noOfLines={1}>
-                          {short.title}
-                        </Text>
+                        <Flex align="center" gap={2} minW={0}>
+                          {subjectShort(short.class) && (
+                            <Badge bg="teal.500" color="white" fontSize="0.6rem">
+                              {subjectShort(short.class)}
+                            </Badge>
+                          )}
+                          <Text fontSize="sm" fontWeight="500" noOfLines={1}>
+                            {short.title}
+                          </Text>
+                        </Flex>
                         <Text fontSize="xs" color="gray.500">
                           {short.class?.name} · {formatDateTime(short.startedAt)}
                           {short.presentedByName ? ` · ${short.presentedByName}` : ''}
@@ -410,6 +636,13 @@ export default function Calendar() {
               )}
             </SectionCard>
           </Box>
+
+          <DayDetailModal
+            date={selectedDay}
+            items={selectedDay ? byDay.get(dayKey(selectedDay)) || [] : []}
+            holiday={selectedDay ? holidayByDay.get(dayKey(selectedDay)) : null}
+            onClose={() => setSelectedDay(null)}
+          />
         </>
       )}
     </Box>

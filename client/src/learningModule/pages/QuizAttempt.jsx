@@ -17,13 +17,15 @@ import {
   RadioGroup,
   Stack,
   Text,
-  useToast,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import RichText from '../components/RichText';
 import { ErrorState, Loading, SectionCard, StatTile } from '../components/common';
 import useProctoring from '../hooks/useProctoring';
 import QuizReview from '../components/QuizReview';
+import QuizStage from '../components/QuizStage';
+import QuizCalculator from '../components/QuizCalculator';
+import { requestQuizFullscreen, scrollStageToTop } from '../quizStage';
 
 const clock = (seconds) => {
   const safe = Math.max(0, Math.round(seconds || 0));
@@ -31,6 +33,23 @@ const clock = (seconds) => {
   const secs = safe % 60;
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 };
+
+/**
+ * What leaving the test screen costs, in the student's own terms.
+ *
+ * Spelled out at the moment they leave rather than only in the brief they read
+ * ten minutes ago: a student who has just pressed Escape is the one person who
+ * needs the number, and "this is recorded" on its own never tells them that a
+ * submit is coming. Returns null when the paper does not police leaving.
+ */
+function leavingCost(settings, tabSwitches = 0) {
+  if (!settings || settings.allowTabChange) return null;
+  const budget = settings.maxTabSwitches || 0;
+  const left = Math.max(0, budget - tabSwitches);
+  return settings.autoSubmitOnTabLimit
+    ? `Leaving fullscreen, or switching to another window or tab, is recorded. You may do so ${budget} time(s) in all — ${left} left — and after that your test is submitted automatically.`
+    : `Leaving fullscreen, or switching to another window or tab, is recorded and shown to your teacher. You have done so ${tabSwitches} time(s).`;
+}
 
 /** Answer widget shared by both delivery modes. */
 function AnswerInput({ question, value, onChange, isDisabled }) {
@@ -41,16 +60,6 @@ function AnswerInput({ question, value, onChange, isDisabled }) {
         inputMode="decimal"
         maxW="260px"
         placeholder="Enter a number"
-        value={value.text || ''}
-        isDisabled={isDisabled}
-        onChange={(event) => onChange({ selected: [], text: event.target.value })}
-      />
-    );
-  }
-  if (question.type === 'short') {
-    return (
-      <Input
-        placeholder="Your answer"
         value={value.text || ''}
         isDisabled={isDisabled}
         onChange={(event) => onChange({ selected: [], text: event.target.value })}
@@ -109,12 +118,15 @@ function AnswerInput({ question, value, onChange, isDisabled }) {
  *                   cursor, so a refresh resumes rather than restarts
  */
 export default function QuizAttempt() {
-  const { classId } = useOutletContext();
+  const { classId, klass } = useOutletContext();
   const { quizId, attemptId } = useParams();
   const navigate = useNavigate();
-  const toast = useToast();
 
   const [settings, setSettings] = useState(null);
+  // Title, subject and faculty for the banner, taken from the quiz itself:
+  // the sitting is the one screen that has to identify itself without leaning
+  // on the class page around it.
+  const [banner, setBanner] = useState({ title: '', subject: '', facultyName: '' });
   const [attempt, setAttempt] = useState(null);
   const [paper, setPaper] = useState(null);        // all_at_once
   const [current, setCurrent] = useState(null);    // one_at_a_time
@@ -130,7 +142,6 @@ export default function QuizAttempt() {
   // document.body and would be invisible behind a fullscreened paper.
   const [confirmSubmit, setConfirmSubmit] = useState(false);
   const finishedRef = useRef(false);
-  const shellRef = useRef(null);
   const noticeTimer = useRef(null);
   // Question card nodes, so the navigator can jump straight to one.
   const questionRefs = useRef({});
@@ -139,21 +150,15 @@ export default function QuizAttempt() {
 
   /**
    * Chakra toasts render into a portal on `document.body`, which sits outside
-   * the fullscreened quiz element and so would be invisible mid-test. While
-   * fullscreen, the same message goes inline above the paper instead.
+   * the quiz stage and so is invisible the moment the stage is fullscreened.
+   * Every message therefore goes inline above the paper instead — one path, so
+   * nothing can go missing depending on whether fullscreen was granted.
    */
-  const notify = useCallback(
-    (options) => {
-      if (!document.fullscreenElement) {
-        toast(options);
-        return;
-      }
-      setNotice(options);
-      clearTimeout(noticeTimer.current);
-      noticeTimer.current = setTimeout(() => setNotice(null), 4000);
-    },
-    [toast],
-  );
+  const notify = useCallback((options) => {
+    setNotice(options);
+    clearTimeout(noticeTimer.current);
+    noticeTimer.current = setTimeout(() => setNotice(null), 4000);
+  }, []);
 
   useEffect(() => () => clearTimeout(noticeTimer.current), []);
 
@@ -177,6 +182,7 @@ export default function QuizAttempt() {
     try {
       const quiz = await lmApi.getQuiz(classId, quizId);
       setSettings(quiz.settings);
+      setBanner({ title: quiz.title, subject: quiz.subject, facultyName: quiz.facultyName });
 
       if (quiz.settings.deliveryMode === 'one_at_a_time') {
         const done = await loadSequential();
@@ -295,8 +301,7 @@ export default function QuizAttempt() {
             ? { [next.question._id]: { selected: next.saved.selected || [], text: next.saved.text || '' } }
             : {},
         );
-        shellRef.current?.scrollTo(0, 0);
-        window.scrollTo(0, 0);
+        scrollStageToTop();
       } catch (err) {
         notify({ status: 'error', title: err.message });
       } finally {
@@ -363,13 +368,11 @@ export default function QuizAttempt() {
 
   const inFullscreen = proctoring.isFullscreen;
   const finished = Boolean(result) && Boolean(attempt) && attempt.status !== 'in_progress';
+  const leftFullscreenCost = leavingCost(settings, proctoring.tabSwitches);
 
-  // Hand the screen back once the sitting is over: the result belongs in the
-  // app, with its header and tabs, not on a bare fullscreen canvas.
-  const { exitFullscreen } = proctoring;
-  useEffect(() => {
-    if (finished) exitFullscreen();
-  }, [finished, exitFullscreen]);
+  // The screen is handed back by leaving, not by submitting: the stage drops
+  // fullscreen when it unmounts, so the result is read on the same canvas the
+  // paper was written on and nothing jumps at the moment of submitting.
 
   const pending = attempt?.resultsPending;
 
@@ -455,13 +458,25 @@ export default function QuizAttempt() {
       </Box>
     );
   } else if (settings?.requireFullscreen && !inFullscreen) {
-    /* ---- fullscreen gate ---- */
+    /* ---- fullscreen gate ----
+       Normally never seen: the stage takes fullscreen on the brief and holds it
+       through to here. It is what is left when the browser refused — a cold tab
+       with no user gesture behind it, or a student who pressed Escape. */
     content = (
       <SectionCard title="Fullscreen required">
+        {leftFullscreenCost && (
+          <Alert status="error" borderRadius="md" mb={4}>
+            <AlertIcon />
+            <Box>
+              <Text fontWeight="600">You have left fullscreen</Text>
+              <Text fontSize="sm">{leftFullscreenCost}</Text>
+            </Box>
+          </Alert>
+        )}
         <Text fontSize="sm" color="gray.600" mb={4}>
-          This test must be taken in fullscreen. Leaving fullscreen during the test is recorded.
+          This test must be taken in fullscreen. Your clock is still running — go back in to carry on.
         </Text>
-        <Button colorScheme="purple" onClick={() => proctoring.enterFullscreen(shellRef.current)}>
+        <Button colorScheme="purple" onClick={requestQuizFullscreen}>
           Enter fullscreen and continue
         </Button>
       </SectionCard>
@@ -475,7 +490,7 @@ export default function QuizAttempt() {
             how much is left, and anything above the fold scrolls away. */}
         <Box
           position="sticky"
-          top={inFullscreen ? 0 : '72px'}
+          top={0}
           zIndex={5}
           bg="white"
           borderWidth="1px"
@@ -589,6 +604,23 @@ export default function QuizAttempt() {
             </Flex>
           )}
         </Box>
+
+        {/* The paper does not demand fullscreen — the gate above never fires —
+            but it still counts leaving, so dropping out of fullscreen has to
+            say what it costs rather than pass silently. Not dismissible: it is
+            true for exactly as long as they are out. */}
+        {!inFullscreen && leftFullscreenCost && (
+          <Alert status="warning" borderRadius="md" mb={4}>
+            <AlertIcon />
+            <Box flex="1">
+              <Text fontWeight="600">You are no longer in fullscreen</Text>
+              <Text fontSize="sm">{leftFullscreenCost}</Text>
+            </Box>
+            <Button size="xs" colorScheme="orange" onClick={requestQuizFullscreen}>
+              Back to fullscreen
+            </Button>
+          </Alert>
+        )}
 
         {notice && (
           <Alert status={notice.status || 'info'} borderRadius="md" mb={4}>
@@ -709,7 +741,7 @@ export default function QuizAttempt() {
                 ref={(node) => {
                   questionRefs.current[question._id] = node;
                 }}
-                scrollMarginTop={inFullscreen ? '96px' : '160px'}
+                scrollMarginTop="96px"
               >
                 <SectionCard
                   mb={3}
@@ -773,30 +805,27 @@ export default function QuizAttempt() {
             Submit test ({answeredCount}/{total} answered)
           </Button>
         )}
+
+        {/* Floats over the paper on its own fixed layer, so it is reachable
+            from any question in either delivery mode without moving anything
+            the student is reading. */}
+        {settings?.allowCalculator !== false && <QuizCalculator />}
       </Box>
     );
   }
 
   /**
-   * `shellRef` is what actually goes fullscreen, so a test fills the screen on
-   * its own — the module header, class header and tabs stay behind. Outside
-   * fullscreen this is an ordinary wrapper and the page looks unchanged.
+   * The stage owns the screen — it is already fullscreen when the brief handed
+   * over, and it covers the app either way, so the module header, class header
+   * and tabs never appear beside a live paper.
    */
   return (
-    <Box
-      ref={shellRef}
-      {...(inFullscreen && {
-        bg: 'gray.50',
-        w: '100vw',
-        h: '100vh',
-        overflowY: 'auto',
-        px: { base: 3, md: 6 },
-        py: 4,
-      })}
+    <QuizStage
+      subject={[banner.subject, klass?.subject, klass?.name].find(Boolean)}
+      faculty={[banner.facultyName, klass?.ownerName].find(Boolean)}
+      title={banner.title}
     >
-      <Box maxW={inFullscreen ? '960px' : undefined} mx={inFullscreen ? 'auto' : undefined}>
-        {content}
-      </Box>
-    </Box>
+      {content}
+    </QuizStage>
   );
 }

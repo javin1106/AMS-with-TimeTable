@@ -95,6 +95,8 @@ const TEACHER_ONLY = [
   `GET ${C}/short-sessions/:sessionId/report.csv`,
 
   `POST ${C}/quizzes`,
+  `POST ${C}/attempts/:attemptId/reopen`,
+  `DELETE ${C}/attempts/:attemptId`,
   `GET ${C}/quizzes/:quizId/results`,
   `GET ${C}/quizzes/:quizId/results.csv`,
 
@@ -121,6 +123,8 @@ const TEACHER_ONLY = [
   `GET ${C}/members/:membershipId/progress`,
 
   `GET ${C}/analytics`,
+
+  `PATCH ${C}/feedback/:feedbackId`,
 
   `POST ${C}/archive`,
   `POST ${C}/code/regenerate`,
@@ -169,6 +173,16 @@ const STUDENT_REACHABLE = [
   [`GET ${C}/studio/sessions/:sessionId`, 'transcript and quiz draft withheld'],
   [`GET ${C}/studio/sessions`, 'filtered to lectures whose material was published'],
   [`POST ${C}/studio/sessions/:sessionId/ask`, '403 unless the lecture was published to them'],
+
+  [
+    `GET ${C}/feedback`,
+    'students get only their own notes; staff get the class’s with every identifying field stripped by forTeacher()',
+  ],
+  [`POST ${C}/feedback`, 'requireClassStudent; the word filter and the strike ladder run before anything is written'],
+  [
+    `DELETE ${C}/feedback/:feedbackId`,
+    'platform-admin-only, checked in the handler — requireTeacher here would let the staff member a complaint is about delete it',
+  ],
 
   [`GET ${C}/topics`, 'topic names are not sensitive'],
   [`POST ${C}/leave`, 'acts on the caller’s own membership'],

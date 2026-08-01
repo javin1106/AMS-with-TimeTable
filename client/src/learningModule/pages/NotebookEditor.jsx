@@ -23,10 +23,13 @@ import {
   useToast,
 } from '@chakra-ui/react';
 
+import { FiUpload } from 'react-icons/fi';
+
 import lmApi from '../api/lmApi';
 import { ErrorState, Loading, SectionCard } from '../components/common';
 import NotebookCell from '../components/NotebookCell';
 import usePyodide from '../hooks/usePyodide';
+import { MAX_IMPORT_CELLS, cellsFromFile } from '../notebookImport';
 
 /**
  * Authoring a coding notebook.
@@ -58,12 +61,21 @@ export default function NotebookEditor() {
   const [packagesText, setPackagesText] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [saving, setSaving] = useState(false);
+  // Which button is working: 'save' | 'publish' | null. One shared boolean put a
+  // spinner on both of them at once, so a plain Save looked like it was
+  // publishing too.
+  const [savingAction, setSavingAction] = useState(null);
   const [problems, setProblems] = useState([]);
   const [setupDone, setSetupDone] = useState(false);
 
+  // The buttons only disable once React has re-rendered, which is a tick later
+  // than the click that started the save.
+  const savingRef = useRef(false);
+
   const cellsRef = useRef(cells);
   cellsRef.current = cells;
+
+  const fileInputRef = useRef(null);
 
   const { status, detail, busyCellId, start, restart, runCell, stop } = usePyodide(
     notebook?.packages || [],
@@ -132,9 +144,86 @@ export default function NotebookEditor() {
     }
   };
 
+  /**
+   * Brings a `.py` or `.ipynb` file in as cells.
+   *
+   * Appended rather than replacing what is already here, and left unsaved: the
+   * teacher decides what is locked, what is hidden setup and whether the split
+   * came out right before any of it reaches a student.
+   */
+  const importFile = async (file) => {
+    if (!file) return;
+    const isIpynb = /\.ipynb$/i.test(file.name);
+
+    try {
+      const { cells: imported, truncated, marked, skipped, language, packages, magics } = cellsFromFile(
+        file.name,
+        await file.text(),
+      );
+
+      if (!imported.length) {
+        toast({ status: 'warning', title: `${file.name} has nothing to import.`, duration: 4000 });
+        return;
+      }
+
+      setCells((current) => [
+        ...current,
+        ...imported.map((cell) => ({ ...newCell(cell.type), source: cell.source })),
+      ]);
+
+      // Without this the cells import perfectly and then every one of them
+      // raises ModuleNotFoundError, because the packages box is still empty.
+      const existing = packagesText.split(',').map((name) => name.trim()).filter(Boolean);
+      const added = packages.filter((name) => !existing.includes(name));
+      if (added.length) setPackagesText([...existing, ...added].join(', '));
+
+      const notes = [];
+      // Say so rather than letting a one-cell import read as a failed split.
+      if (!isIpynb && !marked) notes.push('There were no # %% markers, so it came in as a single cell.');
+      if (skipped) notes.push(`${skipped} raw ${skipped === 1 ? 'cell' : 'cells'} could not be imported.`);
+      if (magics) {
+        notes.push(
+          `${magics} Jupyter ${magics === 1 ? 'magic was' : 'magics were'} commented out — the browser kernel has no IPython.`,
+        );
+      }
+      if (added.length) notes.push(`Added ${added.join(', ')} to Packages.`);
+      if (truncated) notes.push(`Only the first ${MAX_IMPORT_CELLS} cells fit.`);
+      notes.push('Outputs are not carried over. Save to keep the cells.');
+
+      toast({
+        status: 'success',
+        title: `Imported ${imported.length} ${imported.length === 1 ? 'cell' : 'cells'} from ${file.name}`,
+        description: notes.join(' '),
+        duration: 7000,
+      });
+
+      // An R or Julia notebook imports perfectly cleanly and then fails on every
+      // cell, because the kernel here only speaks Python. Worth its own warning.
+      if (language && !/^python/i.test(language)) {
+        toast({
+          status: 'warning',
+          title: `That notebook was written for ${language}.`,
+          description: 'Cells here run against a Python kernel, so they will not work unmodified.',
+          duration: 9000,
+        });
+      }
+    } catch (err) {
+      toast({ status: 'error', title: 'Could not import that file.', description: err.message });
+    }
+  };
+
   const save = async ({ thenPublish = false } = {}) => {
-    setSaving(true);
+    // Two saves in flight against one notebook race each other: `cells` is
+    // replaced wholesale server-side, so the slower response decides what the
+    // notebook ends up containing.
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSavingAction(thenPublish ? 'publish' : 'save');
     setProblems([]);
+
+    // Publishing is a second request on top of the save, and it can be rejected
+    // on its own (an empty text cell, say) after the save has already landed.
+    let stored = false;
     try {
       await lmApi.updateNotebook(classId, notebookId, {
         title: notebook.title,
@@ -153,18 +242,25 @@ export default function NotebookEditor() {
         })),
       });
 
+      stored = true;
+
       if (thenPublish) {
         await lmApi.publishNotebook(classId, notebookId, { publish: true });
         toast({ status: 'success', title: 'Saved and published' });
       } else {
         toast({ status: 'success', title: 'Saved' });
       }
-      await load();
     } catch (err) {
       setProblems(err.payload?.errors || [err.message]);
       toast({ status: 'error', title: err.message });
     } finally {
-      setSaving(false);
+      // Only once the save itself landed. Reloading after a *rejected* save
+      // would throw away the very edits the teacher has to fix — but a publish
+      // that failed on top of a save that worked still needs the reload, or the
+      // editor keeps showing placeholder ids for cells the server has stored.
+      if (stored) await load();
+      savingRef.current = false;
+      setSavingAction(null);
     }
   };
 
@@ -199,10 +295,21 @@ export default function NotebookEditor() {
             Restart Python
           </Button>
         )}
-        <Button size="sm" onClick={() => save()} isLoading={saving}>
+        <Button
+          size="sm"
+          onClick={() => save()}
+          isLoading={savingAction === 'save'}
+          isDisabled={Boolean(savingAction)}
+        >
           Save
         </Button>
-        <Button size="sm" colorScheme="purple" onClick={() => save({ thenPublish: true })} isLoading={saving}>
+        <Button
+          size="sm"
+          colorScheme="purple"
+          onClick={() => save({ thenPublish: true })}
+          isLoading={savingAction === 'publish'}
+          isDisabled={Boolean(savingAction)}
+        >
           Save &amp; publish
         </Button>
       </Flex>
@@ -338,14 +445,44 @@ export default function NotebookEditor() {
         ))}
       </VStack>
 
-      <HStack>
+      <HStack wrap="wrap">
         <Button size="sm" variant="outline" onClick={() => setCells((c) => [...c, newCell('code')])}>
           + Code cell
         </Button>
         <Button size="sm" variant="outline" onClick={() => setCells((c) => [...c, newCell('markdown')])}>
           + Text cell
         </Button>
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".py,.ipynb,text/x-python,application/x-ipynb+json"
+          hidden
+          data-testid="notebook-import"
+          onChange={(event) => {
+            importFile(event.target.files?.[0]);
+            // Cleared so picking the same file again still fires a change.
+            event.target.value = '';
+          }}
+        />
+        <Tooltip label="A Jupyter notebook, or a script split on the # %% markers VS Code, Spyder and jupytext write">
+          <Button
+            size="sm"
+            variant="outline"
+            leftIcon={<FiUpload />}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            Import .ipynb / .py
+          </Button>
+        </Tooltip>
       </HStack>
+
+      <Text fontSize="xs" opacity={0.6}>
+        Importing adds cells to the end of this notebook, without their saved outputs. An{' '}
+        <Box as="code">.ipynb</Box> already knows where its cells are; in a <Box as="code">.py</Box> put{' '}
+        <Box as="code"># %%</Box> on its own line to start a new cell, or <Box as="code"># %% [markdown]</Box>{' '}
+        for a text cell.
+      </Text>
     </VStack>
   );
 }

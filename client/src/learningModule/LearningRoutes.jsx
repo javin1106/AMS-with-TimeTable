@@ -11,6 +11,7 @@ import CourseworkDetail from './pages/CourseworkDetail';
 import GradeWork from './pages/GradeWork';
 import People from './pages/People';
 import Grades from './pages/Grades';
+import Feedback from './pages/Feedback';
 import AiStudio from './pages/AiStudio';
 import AiPlayground from './pages/AiPlayground';
 import Insights from './pages/Insights';
@@ -71,6 +72,9 @@ export default function LearningRoutes() {
           <Route path="work/:courseworkId" element={<CourseworkDetail />} />
           <Route path="people" element={<People />} />
           <Route path="grades" element={<Grades />} />
+          {/* Not behind RequireTeacher: the same screen serves the student who
+              writes and the staff who read, and the server decides which. */}
+          <Route path="feedback" element={<Feedback />} />
           <Route path="studio" element={<AiStudio />} />
           <Route path="playground" element={<AiPlayground />} />
           <Route path="quizzes" element={<Quizzes />} />

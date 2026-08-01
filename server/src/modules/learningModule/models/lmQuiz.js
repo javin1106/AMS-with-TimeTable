@@ -27,12 +27,12 @@ const questionSchema = new mongoose.Schema(
       type: String,
       // single/multiple are the aim2Crack names for mcq/msq; both are accepted
       // so an import from there does not need translating.
-      enum: ['mcq', 'msq', 'truefalse', 'short', 'numerical'],
+      enum: ['mcq', 'msq', 'truefalse', 'numerical'],
       default: 'mcq',
     },
     options: [{ type: String }],
-    // Indices into `options` for choice types; expected text for "short";
-    // the expected number (as a string) for "numerical".
+    // Indices into `options` for choice types; the expected number (as a
+    // string) for "numerical".
     correctAnswers: [{ type: String }],
 
     // numerical only: how far off an answer may be and still be correct.
@@ -113,9 +113,15 @@ const lmQuizSchema = new mongoose.Schema({
     // Seconds stamped on each newly added question, chosen once when the quiz
     // is created so the teacher is not asked again per question.
     defaultQuestionSec: { type: Number, default: 60 },
-    // Latest a student may *start*, expressed as minutes after availableFrom.
-    // Mirrors aim2Crack's marginTime: the test stays open but late arrivals are
-    // turned away rather than given a full clock.
+    // Latest a student may *start*. The test stays open for those already in
+    // it; late arrivals are turned away rather than given a full clock.
+    //
+    // Two spellings, because they answer to different habits. `startDeadline`
+    // is an absolute moment set alongside the publish and start times, and wins
+    // whenever it is set. `marginMinutes` is the older relative form — minutes
+    // after availableFrom — kept working for quizzes already carrying it, and
+    // useless on its own when no opening time was ever set.
+    startDeadline: { type: Date, default: null },
     marginMinutes: { type: Number, default: 0 },
     availableFrom: { type: Date, default: null },
     availableTo: { type: Date, default: null },
@@ -127,7 +133,6 @@ const lmQuizSchema = new mongoose.Schema({
     // Quiz-wide default used by any question whose negativeMarks is null.
     negativeMarking: { type: Number, default: 0 },
     passPercent: { type: Number, default: 40 },
-    attemptsAllowed: { type: Number, default: 1 },
 
     /* ---- randomisation ---- */
     shuffleQuestions: { type: Boolean, default: false },
@@ -140,6 +145,12 @@ const lmQuizSchema = new mongoose.Schema({
     showScoreImmediately: { type: Boolean, default: true },
     allowReviewBeforeSubmit: { type: Boolean, default: true },
 
+    /* ---- tools ---- */
+    // An on-screen scientific calculator during the sitting. Defaults on: most
+    // papers either want one or do not care, and a teacher who needs mental
+    // arithmetic tested turns it off per quiz.
+    allowCalculator: { type: Boolean, default: true },
+
     /* ---- proctoring ---- */
     preventMobile: { type: Boolean, default: false },
     allowTabChange: { type: Boolean, default: true },
@@ -150,7 +161,14 @@ const lmQuizSchema = new mongoose.Schema({
     requireFullscreen: { type: Boolean, default: false },
   },
 
+  // Publishing and starting are two separate clocks, and both are needed: the
+  // link has to exist and be readable before the paper opens, or a cohort has
+  // nowhere to wait. `published` is the teacher's decision; `publishAt` is the
+  // moment it takes effect. Read paths ask `engine.isLive()` rather than the
+  // flag alone, so a scheduled publish needs no cron — the same lazy-release
+  // approach the stream already takes with scheduled posts.
   published: { type: Boolean, default: false, index: true },
+  publishAt: { type: Date, default: null },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'user', required: true },
   createdByName: { type: String, default: '' },
 

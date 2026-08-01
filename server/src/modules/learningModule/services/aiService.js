@@ -332,9 +332,9 @@ async function generateQuiz(transcript, ctx = {}, options = {}) {
 Return a JSON array where each element is:
 {
   "question": "...",
-  "type": "mcq" | "msq" | "truefalse" | "short",
-  "options": ["...", "..."],           // 4 options for mcq/msq, ["True","False"] for truefalse, [] for short
-  "correctAnswers": ["0"],              // indices as strings for mcq/msq/truefalse; the expected answer text for short
+  "type": "mcq" | "msq" | "truefalse",
+  "options": ["...", "..."],           // 4 options for mcq/msq, ["True","False"] for truefalse
+  "correctAnswers": ["0"],              // indices into options, as strings
   "explanation": "why that is the answer",
   "marks": 1,
   "difficulty": "easy" | "medium" | "hard",
@@ -343,7 +343,7 @@ Return a JSON array where each element is:
 }
 
 Rules:
-- Roughly 70% mcq, then a mix of msq, truefalse and short.
+- Roughly 70% mcq, then a mix of msq and truefalse.
 - Test understanding, not recall of the lecturer's exact wording.
 - Every distractor must be plausible.
 - Only use content actually present in the transcript.
@@ -363,7 +363,7 @@ ${clip(transcript)}
     .filter((q) => q && q.question)
     .map((q) => ({
       question: String(q.question),
-      type: ["mcq", "msq", "truefalse", "short"].includes(q.type) ? q.type : "mcq",
+      type: ["mcq", "msq", "truefalse"].includes(q.type) ? q.type : "mcq",
       options: Array.isArray(q.options) ? q.options.map(String) : [],
       correctAnswers: Array.isArray(q.correctAnswers)
         ? q.correctAnswers.map(String)

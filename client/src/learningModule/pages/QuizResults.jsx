@@ -23,6 +23,24 @@ import {
   Th,
   Thead,
   Tr,
+  FormControl,
+  FormHelperText,
+  FormLabel,
+  Menu,
+  MenuButton,
+  MenuDivider,
+  MenuItem,
+  MenuList,
+  Modal,
+  ModalBody,
+  ModalCloseButton,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+  ModalOverlay,
+  NumberInput,
+  NumberInputField,
+  useToast,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import { EmptyState, ErrorState, Loading, SectionCard, StatTile } from '../components/common';
@@ -38,6 +56,153 @@ const duration = (seconds) => {
 const bandColor = (percent) =>
   percent === null ? 'gray' : percent >= 70 ? 'green' : percent >= 40 ? 'orange' : 'red';
 
+/**
+ * The three ways a teacher can put one student's sitting right.
+ *
+ * They are kept behind a menu rather than laid out as buttons because two of
+ * them destroy exam data and the third hands out extra time — none belongs
+ * under a stray click in a table row that is otherwise read-only.
+ */
+const ACTIONS = {
+  continue: {
+    label: '▶️ Reopen — continue',
+    title: 'Let them carry on',
+    colorScheme: 'blue',
+    confirm: 'Reopen',
+    describe: (attempt) =>
+      `${attempt.studentName || attempt.studentEmail} keeps every answer already given and resumes at question ${
+        (attempt.cursor ?? 0) + 1
+      }. Use this when the test ended for a reason that was not their doing — a dropped connection, a dead battery, the window closing mid-paper.`,
+  },
+  restart: {
+    label: '🔄 Restart as a new test',
+    title: 'Give them a fresh paper',
+    colorScheme: 'orange',
+    confirm: 'Restart',
+    describe: (attempt) =>
+      `Everything ${attempt.studentName || attempt.studentEmail} answered is deleted and they sit the test again from question 1, on a freshly shuffled paper. Their old score goes with it.`,
+  },
+  delete: {
+    label: '🗑 Delete this response',
+    title: 'Remove the attempt',
+    colorScheme: 'red',
+    confirm: 'Delete',
+    describe: (attempt) =>
+      `Deletes this sitting by ${attempt.studentName || attempt.studentEmail} and its score, and frees the attempt slot so they can start again themselves — but only while the quiz window is open. To let them back in after it has closed, use Restart instead.`,
+  },
+};
+
+function AttemptActions({ attempt, onAct }) {
+  return (
+    <Menu placement="bottom-end">
+      <MenuButton as={Button} size="xs" variant="ghost" aria-label="Fix this attempt">
+        ⋯
+      </MenuButton>
+      <MenuList fontSize="sm">
+        <MenuItem onClick={() => onAct('continue')}>
+          {attempt.status === 'in_progress' ? '⏱ Give more time' : ACTIONS.continue.label}
+        </MenuItem>
+        <MenuItem onClick={() => onAct('restart')}>{ACTIONS.restart.label}</MenuItem>
+        <MenuDivider />
+        <MenuItem color="red.600" onClick={() => onAct('delete')}>
+          {ACTIONS.delete.label}
+        </MenuItem>
+      </MenuList>
+    </Menu>
+  );
+}
+
+/**
+ * Confirmation for all three, with the minutes granted where they apply.
+ *
+ * A reopened sitting gets its own clock: the paper's original time limit runs
+ * from when the student started, and the quiz's own closing time has usually
+ * passed — which is precisely the situation being fixed — so both would expire
+ * the moment the student clicked back in.
+ */
+function AttemptActionModal({ state, onClose, onDone, classId, toast }) {
+  const [minutes, setMinutes] = useState(30);
+  const [busy, setBusy] = useState(false);
+  const meta = state ? ACTIONS[state.action] : null;
+  const timed = state?.action !== 'delete';
+
+  const run = async () => {
+    setBusy(true);
+    try {
+      if (state.action === 'delete') {
+        await lmApi.deleteQuizAttempt(classId, state.attempt._id);
+        toast({ title: 'Attempt deleted', status: 'success', duration: 4000 });
+      } else {
+        await lmApi.reopenQuizAttempt(classId, state.attempt._id, {
+          mode: state.action === 'restart' ? 'restart' : 'continue',
+          minutes: Number(minutes) || 30,
+        });
+        toast({
+          title: state.action === 'restart' ? 'Test reset for the student' : 'Test reopened',
+          description: `They have ${minutes} minutes from now. They have been notified.`,
+          status: 'success',
+          duration: 5000,
+        });
+      }
+      onDone();
+      onClose();
+    } catch (err) {
+      toast({ title: err.message || 'Could not do that', status: 'error', duration: 6000 });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal isOpen={Boolean(state)} onClose={onClose} isCentered>
+      <ModalOverlay />
+      <ModalContent>
+        <ModalHeader>{meta?.title}</ModalHeader>
+        <ModalCloseButton />
+        <ModalBody>
+          <Text fontSize="sm" color="gray.700">
+            {state && meta?.describe(state.attempt)}
+          </Text>
+
+          {timed && (
+            <FormControl mt={4}>
+              <FormLabel fontSize="sm">Minutes allowed from now</FormLabel>
+              <NumberInput
+                size="sm"
+                min={1}
+                max={600}
+                value={minutes}
+                onChange={(value) => setMinutes(value)}
+              >
+                <NumberInputField />
+              </NumberInput>
+              <FormHelperText fontSize="xs">
+                This sitting runs on its own clock, so a closed quiz window will not shut them out
+                again.
+              </FormHelperText>
+            </FormControl>
+          )}
+
+          {state?.action === 'restart' && (
+            <Alert status="warning" borderRadius="md" mt={4} fontSize="xs">
+              <AlertIcon />
+              Their previous answers cannot be recovered afterwards.
+            </Alert>
+          )}
+        </ModalBody>
+        <ModalFooter gap={2}>
+          <Button size="sm" variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button size="sm" colorScheme={meta?.colorScheme} onClick={run} isLoading={busy}>
+            {meta?.confirm}
+          </Button>
+        </ModalFooter>
+      </ModalContent>
+    </Modal>
+  );
+}
+
 export default function QuizResults() {
   const { classId } = useOutletContext();
   const { quizId } = useParams();
@@ -45,6 +210,9 @@ export default function QuizResults() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // `{ attempt, action }` while a fix is being confirmed.
+  const [action, setAction] = useState(null);
+  const toast = useToast();
 
   const load = useCallback(async () => {
     setError(null);
@@ -151,6 +319,7 @@ export default function QuizResults() {
                         <Th isNumeric>Time</Th>
                         <Th>Flags</Th>
                         <Th>Submitted</Th>
+                        <Th>Fix</Th>
                       </Tr>
                     </Thead>
                     <Tbody>
@@ -204,7 +373,26 @@ export default function QuizResults() {
                               </Badge>
                             )}
                           </Td>
-                          <Td fontSize="xs">{attempt.submittedAt ? formatDateTime(attempt.submittedAt) : '—'}</Td>
+                          <Td fontSize="xs">
+                            {attempt.status === 'in_progress' ? (
+                              <Badge colorScheme="red" fontSize="0.6rem">
+                                sitting now
+                              </Badge>
+                            ) : attempt.submittedAt ? (
+                              formatDateTime(attempt.submittedAt)
+                            ) : (
+                              '—'
+                            )}
+                            {attempt.reopenCount > 0 && (
+                              <Text color="purple.600" fontSize="0.65rem">
+                                reopened ×{attempt.reopenCount}
+                                {attempt.reopenedByName ? ` by ${attempt.reopenedByName}` : ''}
+                              </Text>
+                            )}
+                          </Td>
+                          <Td>
+                            <AttemptActions attempt={attempt} onAct={(action) => setAction({ attempt, action })} />
+                          </Td>
                         </Tr>
                       ))}
                     </Tbody>
@@ -369,6 +557,14 @@ export default function QuizResults() {
           </TabPanel>
         </TabPanels>
       </Tabs>
+
+      <AttemptActionModal
+        state={action}
+        classId={classId}
+        toast={toast}
+        onClose={() => setAction(null)}
+        onDone={load}
+      />
     </Box>
   );
 }

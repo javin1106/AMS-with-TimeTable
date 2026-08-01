@@ -31,6 +31,11 @@ const TABS = [
   { path: 'studio', label: 'AI Studio' },
   { path: 'playground', label: 'AI Playground', studentOnly: true },
   { path: 'insights', label: 'Insights', teacherOnly: true },
+  // Last, and in its own colour. It is not another kind of classwork — it runs
+  // the other way, from the class to the teacher — and sitting it mid-row in
+  // the same grey as Quizzes made it read as one more thing to submit. The
+  // purple is the tell that this tab plays by different rules.
+  { path: 'feedback', label: 'Anonymous Feedback', accent: 'purple' },
 ];
 
 // Sits on the coloured header, so the active state has to read against the
@@ -100,70 +105,66 @@ export default function ClassLayout() {
         bg={klass.coverColor || '#1967d2'}
         color="white"
         borderRadius="lg"
-        px={{ base: 5, md: 8 }}
-        py={{ base: 6, md: 8 }}
+        px={{ base: 4, md: 5 }}
+        py={2}
         mb={4}
         position="relative"
         overflow="hidden"
       >
-        <Flex justify="space-between" align="flex-start" gap={4} wrap="wrap">
-          <Box>
-            <Heading size="lg">{klass.name}</Heading>
-            <Text opacity={0.9} fontSize="sm" mt={1}>
+        {/* One row, fixed height: the class identity scrolls out of the way as
+            the window narrows, but the actions on the right stay put. */}
+        <Flex justify="space-between" align="center" gap={3} wrap="nowrap">
+          {/* Clips itself rather than pushing the actions off the card: without
+              `overflow`, the nowrap children spill past the right edge and the
+              card's own `overflow="hidden"` eats the settings button. */}
+          <HStack spacing={3} flex="1 1 auto" minW={0} overflow="hidden" fontSize="sm" opacity={0.9}>
+            <Heading size="sm" whiteSpace="nowrap" opacity={1}>
+              {klass.name}
+            </Heading>
+            <Text isTruncated minW={0}>
               {[klass.section, klass.subject, klass.room].filter(Boolean).join(' · ')}
             </Text>
-            <HStack mt={3} spacing={3} fontSize="sm" opacity={0.9} wrap="wrap">
-              <Text>👤 {klass.ownerName}</Text>
-              <Text>📄 {klass.counts?.courseworkCount ?? 0} items</Text>
-              {klass.status === 'archived' && <Badge colorScheme="orange">Archived</Badge>}
-            </HStack>
-          </Box>
+            <Text whiteSpace="nowrap">👤 {klass.ownerName}</Text>
+            <Text whiteSpace="nowrap">📄 {klass.counts?.courseworkCount ?? 0} items</Text>
+            {klass.status === 'archived' && <Badge colorScheme="orange">Archived</Badge>}
+          </HStack>
 
-          <Flex direction="column" align="flex-end" gap={3}>
-            <HStack spacing={2}>
-              <Button
-                as={NavLink}
-                to={`/learning/class/${classId}/people`}
-                size="sm"
-                leftIcon={<span>👥</span>}
-                {...headerLinkStyles}
-              >
-                People · {klass.counts?.studentCount ?? 0}
-              </Button>
-              {isTeacher && (
-                <Tooltip label="Class settings">
-                  <IconButton
-                    as={NavLink}
-                    to={`/learning/class/${classId}/settings`}
-                    size="sm"
-                    aria-label="Class settings"
-                    icon={<span>⚙️</span>}
-                    {...headerLinkStyles}
-                  />
-                </Tooltip>
-              )}
-            </HStack>
-
+          <HStack spacing={2} flexShrink={0}>
+            <Button
+              as={NavLink}
+              to={`/learning/class/${classId}/people`}
+              size="sm"
+              leftIcon={<span>👥</span>}
+              {...headerLinkStyles}
+            >
+              People · {klass.counts?.studentCount ?? 0}
+            </Button>
             {isTeacher && (
-              <Box textAlign="right" bg="whiteAlpha.300" borderRadius="md" px={4} py={3}>
-                <Text fontSize="xs" opacity={0.9}>
-                  Class code
-                </Text>
-                <Tooltip label={hasCopied ? 'Copied!' : 'Click to copy'}>
-                  <Text
-                    as="button"
-                    onClick={onCopy}
-                    fontSize="xl"
-                    fontWeight="700"
-                    letterSpacing="wider"
-                    fontFamily="mono"
-                  >
-                    {klass.code}
-                  </Text>
-                </Tooltip>
-              </Box>
+              <Tooltip label={hasCopied ? 'Copied!' : 'Click to copy class code'}>
+                <Button
+                  onClick={onCopy}
+                  size="sm"
+                  fontFamily="mono"
+                  letterSpacing="wider"
+                  {...headerLinkStyles}
+                >
+                  {klass.code}
+                </Button>
+              </Tooltip>
             )}
-          </Flex>
+            {isTeacher && (
+              <Tooltip label="Class settings">
+                <IconButton
+                  as={NavLink}
+                  to={`/learning/class/${classId}/settings`}
+                  size="sm"
+                  aria-label="Class settings"
+                  icon={<span>⚙️</span>}
+                  {...headerLinkStyles}
+                />
+              </Tooltip>
+            )}
+          </HStack>
         </Flex>
       </Box>
 
@@ -177,28 +178,41 @@ export default function ClassLayout() {
         borderTopRadius="lg"
         px={2}
       >
-        {visibleTabs.map((tab) => (
-          <Box
-            key={tab.path || 'stream'}
-            as={NavLink}
-            to={tab.path ? `/learning/class/${classId}/${tab.path}` : `/learning/class/${classId}`}
-            end={tab.end}
-            px={4}
-            py={3}
-            fontSize="sm"
-            fontWeight="500"
-            color="gray.600"
-            whiteSpace="nowrap"
-            borderBottomWidth="3px"
-            borderColor="transparent"
-            _hover={{ color: 'blue.600' }}
-            sx={{
-              '&.active': { color: 'blue.600', borderColor: 'blue.500', fontWeight: '600' },
-            }}
-          >
-            {tab.label}
-          </Box>
-        ))}
+        {visibleTabs.map((tab) => {
+          // Blue is the module's default tab accent; a tab may claim its own to
+          // say it is a different kind of thing rather than the next item in a
+          // sequence. `ml="auto"` pushes an accented tab to the far end of the
+          // row, away from the teaching tabs it does not belong with.
+          const accent = tab.accent || 'blue';
+          return (
+            <Box
+              key={tab.path || 'stream'}
+              as={NavLink}
+              to={tab.path ? `/learning/class/${classId}/${tab.path}` : `/learning/class/${classId}`}
+              end={tab.end}
+              px={4}
+              py={3}
+              ml={tab.accent ? 'auto' : undefined}
+              fontSize="sm"
+              fontWeight={tab.accent ? '600' : '500'}
+              color={tab.accent ? `${accent}.600` : 'gray.600'}
+              whiteSpace="nowrap"
+              borderBottomWidth="3px"
+              borderColor="transparent"
+              _hover={{ color: `${accent}.600`, bg: tab.accent ? `${accent}.50` : undefined }}
+              sx={{
+                '&.active': {
+                  color: `${accent}.600`,
+                  borderColor: `${accent}.500`,
+                  fontWeight: '600',
+                  ...(tab.accent ? { bg: `${accent}.50` } : {}),
+                },
+              }}
+            >
+              {tab.label}
+            </Box>
+          );
+        })}
       </Flex>
 
       <Outlet context={{ klass, isTeacher, classId, reloadClass: load, toast }} />

@@ -42,6 +42,19 @@ export function formatDate(value) {
   });
 }
 
+/**
+ * An ISO date as `<input type="datetime-local">` wants it: local wall-clock,
+ * no zone, minute precision. `toISOString` would shift the value into UTC and
+ * show the teacher a time they never typed.
+ */
+export function toDateTimeInput(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (part) => String(part).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 export function initials(name = '') {
   return (
     name

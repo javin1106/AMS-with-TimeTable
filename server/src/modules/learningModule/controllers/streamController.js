@@ -1,7 +1,35 @@
 const LmAnnouncement = require("../models/lmAnnouncement");
 const LmCoursework = require("../models/lmCoursework");
 const LmClass = require("../models/lmClass");
+const LmMembership = require("../models/lmMembership");
 const { notifyClass } = require("../services/notifyService");
+
+/**
+ * Fills in reaction names for rows written before userName was denormalised,
+ * in one membership lookup for the whole page rather than one per reaction.
+ */
+async function withReactionNames(announcements, classId) {
+  const missing = new Set();
+  announcements.forEach((a) =>
+    (a.reactions || []).forEach((r) => {
+      if (r.userId && !r.userName) missing.add(String(r.userId));
+    }),
+  );
+  if (!missing.size) return announcements;
+
+  const members = await LmMembership.find({ classId, userId: { $in: [...missing] } })
+    .select("userId name")
+    .lean();
+  const nameById = new Map(members.map((m) => [String(m.userId), m.name]));
+
+  return announcements.map((a) => ({
+    ...a,
+    reactions: (a.reactions || []).map((r) => ({
+      ...r,
+      userName: r.userName || nameById.get(String(r.userId)) || "Someone",
+    })),
+  }));
+}
 
 const canPost = (req) => {
   if (req.lmIsTeacher) return true;
@@ -57,8 +85,10 @@ exports.getStream = async (req, res) => {
       .lean(),
   ]);
 
+  const named = await withReactionNames(announcements, req.lmClass._id);
+
   const items = [
-    ...announcements.map((a) => ({ ...a, streamType: "announcement" })),
+    ...named.map((a) => ({ ...a, streamType: "announcement" })),
     ...coursework.map((c) => ({ ...c, streamType: "coursework" })),
   ]
     .sort((a, b) => {
@@ -174,8 +204,9 @@ exports.reactToAnnouncement = async (req, res) => {
     (r) => String(r.userId) === req.lmUser.id && r.emoji === emoji,
   );
   if (index >= 0) announcement.reactions.splice(index, 1);
-  else announcement.reactions.push({ userId: req.lmUser.id, emoji });
+  else announcement.reactions.push({ userId: req.lmUser.id, userName: req.lmUser.name, emoji });
 
   await announcement.save();
-  return res.json({ reactions: announcement.reactions });
+  const [named] = await withReactionNames([announcement.toObject()], req.lmClass._id);
+  return res.json({ reactions: named.reactions });
 };

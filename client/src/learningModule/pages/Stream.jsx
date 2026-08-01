@@ -18,6 +18,7 @@ import {
   MenuItem,
   MenuList,
   Text,
+  Tooltip,
   useToast,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
@@ -126,12 +127,30 @@ function Composer({ classId, onPosted }) {
   );
 }
 
+/** Who reacted, the reader first, then everyone else in the order they did. */
+function likedByNames(reactions, myId) {
+  const mine = reactions.some((r) => String(r.userId) === String(myId));
+  const others = reactions
+    .filter((r) => String(r.userId) !== String(myId))
+    .map((r) => r.userName || 'Someone');
+  return mine ? ['You', ...others] : others;
+}
+
+/** Collapses that list to "You, Asha and 2 others" for the inline summary. */
+function likedBySummary(names) {
+  if (names.length <= 2) return names.join(' and ');
+  const rest = names.length - 2;
+  return `${names.slice(0, 2).join(', ')} and ${rest} ${rest === 1 ? 'other' : 'others'}`;
+}
+
 function AnnouncementCard({ item, classId, isTeacher, me, onChanged }) {
   const [showComments, setShowComments] = useState(false);
   const [reactions, setReactions] = useState(item.reactions || []);
+  const [commentCount, setCommentCount] = useState(item.commentCount || 0);
   const toast = useToast();
 
   const myReaction = reactions.some((r) => String(r.userId) === String(me?.id));
+  const likedBy = likedByNames(reactions, me?.id);
 
   const react = async () => {
     try {
@@ -201,7 +220,7 @@ function AnnouncementCard({ item, classId, isTeacher, me, onChanged }) {
       </Flex>
 
       <Divider my={3} />
-      <HStack spacing={3}>
+      <HStack spacing={3} wrap="wrap">
         <Button
           size="xs"
           variant={myReaction ? 'solid' : 'ghost'}
@@ -211,8 +230,15 @@ function AnnouncementCard({ item, classId, isTeacher, me, onChanged }) {
         >
           {reactions.length || ''}
         </Button>
+        {likedBy.length > 0 && (
+          <Tooltip label={likedBy.join(', ')} placement="top" hasArrow>
+            <Text fontSize="xs" color="gray.500" cursor="default">
+              Liked by {likedBySummary(likedBy)}
+            </Text>
+          </Tooltip>
+        )}
         <Button size="xs" variant="ghost" onClick={() => setShowComments((v) => !v)}>
-          💬 {item.commentCount || 0} class {item.commentCount === 1 ? 'comment' : 'comments'}
+          💬 {commentCount} class {commentCount === 1 ? 'comment' : 'comments'}
         </Button>
       </HStack>
 
@@ -224,6 +250,7 @@ function AnnouncementCard({ item, classId, isTeacher, me, onChanged }) {
             targetId={item._id}
             currentUserId={me?.id}
             canModerate={isTeacher}
+            onCountChange={setCommentCount}
           />
         </Box>
       </Collapse>

@@ -15,6 +15,7 @@ const TYPE_ICONS = {
   join_request: '🙋',
   quiz: '🧠',
   material: '📚',
+  feedback: '🕊️',
 };
 
 export default function Notifications() {

@@ -18,9 +18,12 @@ const lmAnnouncementSchema = new mongoose.Schema({
   scheduledFor: { type: Date, default: null },
   publishedAt: { type: Date, default: Date.now },
 
+  // userName is denormalised so the stream can say *who* reacted without a
+  // second lookup, the same way comments carry authorName.
   reactions: [
     {
       userId: { type: mongoose.Schema.Types.ObjectId, ref: "user" },
+      userName: { type: String, default: "" },
       emoji: { type: String, default: "👍" },
       _id: false,
     },

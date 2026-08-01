@@ -38,6 +38,18 @@ import { formatDateTime } from '../format';
 
 const AUTOSAVE_MS = 2500;
 
+/**
+ * A cell's identity for as long as this page is open.
+ *
+ * Deliberately not the `_id`: a cell the student adds has no `_id` until a save
+ * comes back with one, so anything keyed on `_id` — a run writing its output
+ * back, the busy spinner, React's reconciliation — loses track of the cell at
+ * exactly the moment the save lands.
+ */
+let keySeq = 0;
+const clientKey = () => `cell-${(keySeq += 1)}`;
+const withKeys = (cells) => (cells || []).map((cell) => ({ ...cell, key: clientKey() }));
+
 export default function NotebookPlayer() {
   const { classId, isTeacher } = useOutletContext();
   const { notebookId } = useParams();
@@ -52,13 +64,17 @@ export default function NotebookPlayer() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [saveState, setSaveState] = useState('saved');
-  const [setupDone, setSetupDone] = useState(false);
 
   const revisionRef = useRef(0);
   const saveTimer = useRef(null);
   // Set while a save is in flight so the debounce does not stack requests.
   const savingRef = useRef(false);
   const dirtyRef = useRef(false);
+  // The hidden-setup run, kept as the promise rather than a flag so a second
+  // caller waits for the first instead of racing it.
+  const setupRef = useRef(null);
+  // scheduleSave is defined below save() but save() needs to re-arm it.
+  const scheduleSaveRef = useRef(() => {});
 
   const packages = useMemo(() => notebook?.packages || [], [notebook]);
   const { status, detail, busyCellId, start, restart, runCell, stop } = usePyodide(packages);
@@ -69,7 +85,7 @@ export default function NotebookPlayer() {
       const data = await lmApi.notebookAttempt(classId, notebookId);
       setNotebook(data.notebook);
       setAttempt(data.attempt);
-      setCells(data.attempt.cells || []);
+      setCells(withKeys(data.attempt.cells));
       setHiddenSetup(data.hiddenSetup || []);
       setSolution(data.solution);
       revisionRef.current = data.attempt.revision || 0;
@@ -88,50 +104,119 @@ export default function NotebookPlayer() {
 
   /* ───────────────────────────── autosave ─────────────────────────────── */
 
-  const save = useCallback(
-    async (payload) => {
-      if (savingRef.current || submitted) return;
-      savingRef.current = true;
-      setSaveState('saving');
-      try {
-        const result = await lmApi.saveNotebookAttempt(classId, attempt._id, {
-          revision: revisionRef.current,
-          cells: payload,
-        });
-        revisionRef.current = result.revision;
-        // Adopt the server's cells: a cell the student added has no id until it
-        // is stored, and without this the next save would create a duplicate.
-        setCells(result.cells);
-        setSaveState(dirtyRef.current ? 'unsaved' : 'saved');
-      } catch (err) {
-        if (err.payload?.code === 'STALE_REVISION') {
-          setSaveState('conflict');
-        } else {
-          setSaveState('error');
-          toast({ status: 'error', title: err.message, duration: 3000 });
-        }
-      } finally {
-        savingRef.current = false;
-      }
-    },
-    [classId, attempt, submitted, toast],
-  );
-
   // One debounce for the whole document. `cells` is read at fire time rather
   // than captured, so a burst of edits saves once with the latest content.
   const cellsRef = useRef(cells);
   cellsRef.current = cells;
 
+  /**
+   * Folds the stored cells back into local state instead of replacing it.
+   *
+   * The ids have to be adopted — a cell the student added has none until the
+   * server assigns one, and without it the next save would store a duplicate.
+   * But adopting the whole array throws away everything that happened while the
+   * request was on the wire: keystrokes typed since, and the output of a cell
+   * still running, which is written back against the id this call just changed.
+   */
+  const adoptServerCells = useCallback((serverCells, sent) => {
+    const stored = serverCells || [];
+    const byId = new Map(stored.map((cell) => [String(cell._id), cell]));
+    const claimed = new Set();
+    const matches = new Map();
+
+    // Cells the server already knew about pair up on id.
+    sent.forEach((cell) => {
+      if (!cell._id) return;
+      const match = byId.get(String(cell._id));
+      if (!match) return;
+      matches.set(cell.key, match);
+      claimed.add(String(match._id));
+    });
+
+    // What is left over lines up in order with the cells we sent without an id:
+    // the server stores the payload in the order it arrived.
+    const fresh = stored.filter((cell) => !claimed.has(String(cell._id)));
+    let next = 0;
+    sent.forEach((cell) => {
+      if (cell._id || next >= fresh.length) return;
+      matches.set(cell.key, fresh[next]);
+      next += 1;
+    });
+
+    const sentByKey = new Map(sent.map((cell) => [cell.key, cell]));
+
+    setCells((current) =>
+      current.map((cell) => {
+        const match = matches.get(cell.key);
+        if (!match) return cell;
+        return {
+          ...cell,
+          _id: match._id,
+          locked: match.locked,
+          // The server rewrites a locked cell's source back to the teacher's and
+          // truncates an oversized one, so its copy wins — unless the student
+          // has typed since this save left, in which case theirs is newer.
+          source: cell.source === sentByKey.get(cell.key)?.source ? match.source : cell.source,
+        };
+      }),
+    );
+  }, []);
+
+  const save = useCallback(async () => {
+    if (submitted) return;
+    if (savingRef.current) {
+      // Already on the wire. Leave the document marked dirty so the save that is
+      // running re-arms the debounce on its way out; returning quietly here is
+      // how an edit made mid-request ends up never sent under a "saved" badge.
+      dirtyRef.current = true;
+      return;
+    }
+
+    const sent = cellsRef.current;
+    savingRef.current = true;
+    // Cleared here rather than in the debounce, so anything typed from this
+    // point on is still recorded as unsaved — it is not in `sent`.
+    dirtyRef.current = false;
+    setSaveState('saving');
+
+    let saved = false;
+    try {
+      const result = await lmApi.saveNotebookAttempt(classId, attempt._id, {
+        revision: revisionRef.current,
+        cells: sent,
+      });
+      revisionRef.current = result.revision;
+      adoptServerCells(result.cells, sent);
+      saved = true;
+      setSaveState(dirtyRef.current ? 'unsaved' : 'saved');
+    } catch (err) {
+      // Still dirty either way: the server did not take this content.
+      dirtyRef.current = true;
+      if (err.payload?.code === 'STALE_REVISION') {
+        setSaveState('conflict');
+      } else {
+        setSaveState('error');
+        toast({ status: 'error', title: err.message, duration: 3000 });
+      }
+    } finally {
+      savingRef.current = false;
+      // Only after a success: retrying a rejected save on a timer would spin
+      // against a server that has already said no.
+      if (saved && dirtyRef.current) scheduleSaveRef.current();
+    }
+  }, [adoptServerCells, classId, attempt, submitted, toast]);
+
   const scheduleSave = useCallback(() => {
     if (submitted) return;
     dirtyRef.current = true;
-    setSaveState('unsaved');
+    // A conflict is not cleared by typing — the other tab's copy is still newer,
+    // and hiding the warning would let the student write over it.
+    setSaveState((current) => (current === 'conflict' ? current : 'unsaved'));
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => {
-      dirtyRef.current = false;
-      save(cellsRef.current);
-    }, AUTOSAVE_MS);
+    saveTimer.current = setTimeout(save, AUTOSAVE_MS);
   }, [save, submitted]);
+
+  scheduleSaveRef.current = scheduleSave;
 
   useEffect(() => () => clearTimeout(saveTimer.current), []);
 
@@ -151,22 +236,34 @@ export default function NotebookPlayer() {
 
   /* ─────────────────────────── running cells ──────────────────────────── */
 
-  const patchCell = useCallback((cellId, patch) => {
+  /** `patch` may be a function of the current cell, for counters and the like. */
+  const patchCell = useCallback((key, patch) => {
     setCells((current) =>
-      current.map((cell) => (String(cell._id) === String(cellId) ? { ...cell, ...patch } : cell)),
+      current.map((cell) =>
+        cell.key === key ? { ...cell, ...(typeof patch === 'function' ? patch(cell) : patch) } : cell,
+      ),
     );
   }, []);
 
   /** Replays the teacher's hidden setup into a fresh kernel, once. */
-  const ensureSetup = useCallback(async () => {
-    if (setupDone || !hiddenSetup.length) return;
-    for (const source of hiddenSetup) {
-      // Sequential on purpose: setup cells depend on each other in order.
-      // eslint-disable-next-line no-await-in-loop
-      await runCell('__setup__', source, () => {});
+  const ensureSetup = useCallback(() => {
+    if (!hiddenSetup.length) return Promise.resolve();
+    if (!setupRef.current) {
+      setupRef.current = (async () => {
+        for (const source of hiddenSetup) {
+          // Sequential on purpose: setup cells depend on each other in order.
+          // eslint-disable-next-line no-await-in-loop
+          await runCell('__setup__', source, () => {});
+        }
+      })().catch((err) => {
+        // Setup that failed has not run, so the next cell should try again
+        // rather than execute against a half-built namespace.
+        setupRef.current = null;
+        throw err;
+      });
     }
-    setSetupDone(true);
-  }, [hiddenSetup, runCell, setupDone]);
+    return setupRef.current;
+  }, [hiddenSetup, runCell]);
 
   const executeCell = useCallback(
     async (cell) => {
@@ -174,31 +271,31 @@ export default function NotebookPlayer() {
         toast({ status: 'info', title: 'Python is still starting.', duration: 2000 });
         return;
       }
-      await ensureSetup();
 
       // Clear last run's output first, so a cell that now prints less does not
       // leave the old tail on screen looking like part of this run.
       const collected = [];
-      patchCell(cell._id, { outputs: [] });
+      patchCell(cell.key, { outputs: [] });
 
       const push = (output) => {
         collected.push(output);
-        patchCell(cell._id, { outputs: [...collected] });
+        patchCell(cell.key, { outputs: [...collected] });
       };
 
       try {
-        const { result, error: runError } = await runCell(cell._id, cell.source, push);
+        await ensureSetup();
+        const { result, error: runError } = await runCell(cell.key, cell.source, push);
         if (runError) collected.push({ type: 'error', text: runError });
         else if (result !== null && result !== undefined) collected.push({ type: 'result', text: result });
 
-        patchCell(cell._id, {
+        patchCell(cell.key, (current) => ({
           outputs: [...collected],
           executedAt: new Date().toISOString(),
-          runCount: (cell.runCount || 0) + 1,
-        });
+          runCount: (current.runCount || 0) + 1,
+        }));
         scheduleSave();
       } catch (err) {
-        patchCell(cell._id, { outputs: [{ type: 'error', text: err.message }] });
+        patchCell(cell.key, { outputs: [{ type: 'error', text: err.message }] });
       }
     },
     [ensureSetup, patchCell, runCell, scheduleSave, status, toast],
@@ -216,18 +313,23 @@ export default function NotebookPlayer() {
   }, [executeCell, status]);
 
   const restartKernel = useCallback(() => {
-    setSetupDone(false);
+    setupRef.current = null;
     restart();
     setCells((current) => current.map((cell) => ({ ...cell, runCount: 0 })));
   }, [restart]);
 
+  // Stop terminates the worker, so the setup that ran in it is gone too.
+  const stopKernel = useCallback(() => {
+    setupRef.current = null;
+    stop();
+  }, [stop]);
+
   /* ──────────────────────────── editing cells ─────────────────────────── */
 
   const addCell = (type) => {
-    setCells((current) => [
-      ...current,
-      { _id: `new-${Math.random().toString(36).slice(2)}`, type, source: '', outputs: [], runCount: 0 },
-    ]);
+    // No `_id`: the server assigns one, and `key` is what this page tracks the
+    // cell by until it does.
+    setCells((current) => [...current, { key: clientKey(), type, source: '', outputs: [], runCount: 0 }]);
     scheduleSave();
   };
 
@@ -243,9 +345,11 @@ export default function NotebookPlayer() {
   };
 
   const submit = async () => {
-    clearTimeout(saveTimer.current);
     // eslint-disable-next-line no-alert
     if (!window.confirm('Submit this notebook? You will not be able to edit it afterwards.')) return;
+    // Only once they have committed — cancelling out of the prompt must not
+    // discard a save that was already due.
+    clearTimeout(saveTimer.current);
     try {
       await lmApi.submitNotebookAttempt(classId, attempt._id, { cells: cellsRef.current });
       toast({ status: 'success', title: 'Submitted' });
@@ -318,7 +422,7 @@ export default function NotebookPlayer() {
                 Restart
               </Button>
               {busyCellId ? (
-                <Button size="sm" colorScheme="red" leftIcon={<FiSquare />} onClick={stop}>
+                <Button size="sm" colorScheme="red" leftIcon={<FiSquare />} onClick={stopKernel}>
                   Stop
                 </Button>
               ) : null}
@@ -373,22 +477,22 @@ export default function NotebookPlayer() {
       <VStack align="stretch" spacing={3}>
         {cells.map((cell, index) => (
           <NotebookCell
-            key={cell._id}
+            key={cell.key}
             cell={cell}
             index={index}
             total={cells.length}
             readOnly={submitted}
-            running={String(busyCellId) === String(cell._id)}
+            running={busyCellId === cell.key}
             canRun={status === 'ready' && !busyCellId}
             onChange={(patch) => {
-              patchCell(cell._id, patch);
+              patchCell(cell.key, patch);
               scheduleSave();
             }}
             onRun={() => executeCell(cell)}
-            onStop={stop}
+            onStop={stopKernel}
             onMove={(delta) => moveCell(index, delta)}
             onDelete={() => {
-              setCells((current) => current.filter((entry) => String(entry._id) !== String(cell._id)));
+              setCells((current) => current.filter((entry) => entry.key !== cell.key));
               scheduleSave();
             }}
           />

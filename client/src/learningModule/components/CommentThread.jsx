@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Avatar,
   Box,
@@ -26,6 +26,7 @@ export default function CommentThread({
   placeholder = 'Add a class comment…',
   emptyLabel = 'No comments yet.',
   collapsedCount = 3,
+  onCountChange,
 }) {
   const [comments, setComments] = useState([]);
   const [text, setText] = useState('');
@@ -49,6 +50,15 @@ export default function CommentThread({
   useEffect(() => {
     load();
   }, [load]);
+
+  // The thread is the source of truth for how many comments there are, so the
+  // badge that opened it follows the list rather than a stored counter that
+  // can drift. Held in a ref so an inline callback does not re-fire the effect.
+  const countCallback = useRef(onCountChange);
+  countCallback.current = onCountChange;
+  useEffect(() => {
+    if (!loading) countCallback.current?.(comments.length);
+  }, [comments.length, loading]);
 
   const submit = async () => {
     const body = text.trim();
