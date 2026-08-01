@@ -242,8 +242,13 @@ exports.inviteMembers = async (req, res) => {
     // "email the class when something is posted", and a teacher who turns off
     // post digests has not asked for their invitations to go out silently.
     // Sending the invite is an explicit, one-off action they just took.
-    let mailed = null;
-    if (!provisionResult?.created) {
+    let mailed;
+    if (provisionResult?.created) {
+      // The welcome mail stood in for the invite, so its outcome is the one
+      // worth reporting — that mail carries the set-password link, and an
+      // account that never received it is one nobody can sign in to.
+      mailed = provisionResult.mailed ?? null;
+    } else {
       // eslint-disable-next-line no-await-in-loop
       // `user` truthy means the row above was written as "active", so the mail
       // drops the class code — there is nothing left for them to join.
@@ -255,7 +260,7 @@ exports.inviteMembers = async (req, res) => {
       status: provisionResult?.created ? "account_created" : user ? "added" : "invited",
       platformRole: provisionResult?.created || provisionResult?.roleAdded ? roleForClassRole(role) : null,
       roleAdded: Boolean(provisionResult?.roleAdded && !provisionResult?.created),
-      // null when no invite mail was due (the welcome mail covered it).
+      // null when no mail was due at all.
       mailed,
     });
   }

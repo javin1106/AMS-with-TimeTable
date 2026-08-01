@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useOutletContext, useParams } from 'react-router-dom';
 import {
   Alert,
@@ -77,9 +77,28 @@ export default function NotebookEditor() {
 
   const fileInputRef = useRef(null);
 
-  const { status, detail, busyCellId, start, restart, runCell, stop } = usePyodide(
-    notebook?.packages || [],
+  /**
+   * The packages box, not the saved notebook.
+   *
+   * An import writes what the file declares and imports straight into this box,
+   * and a teacher can type into it. Starting the kernel from `notebook.packages`
+   * instead meant none of that reached Pyodide until a save *and* a restart, so
+   * a freshly imported notebook raised ModuleNotFoundError on every cell while
+   * the toast said the packages had been added.
+   */
+  const packages = useMemo(
+    () => packagesText.split(',').map((name) => name.trim()).filter(Boolean),
+    [packagesText],
   );
+
+  const { status, detail, busyCellId, kernelPackages, start, restart, runCell, stop } =
+    usePyodide(packages);
+
+  // Installs happen once, at startup: a package added after that is not in the
+  // running kernel however many times the cell is run.
+  const missingFromKernel = kernelPackages
+    ? packages.filter((name) => !kernelPackages.includes(name))
+    : [];
 
   const load = useCallback(async () => {
     setError(null);
@@ -229,7 +248,7 @@ export default function NotebookEditor() {
         title: notebook.title,
         description: notebook.description,
         settings: notebook.settings,
-        packages: packagesText.split(',').map((name) => name.trim()).filter(Boolean),
+        packages,
         cells: cells.map((cell, order) => ({
           // A `new-…` placeholder must not be sent as an _id; Mongo mints the
           // real one and the reload below picks it up.
@@ -320,6 +339,26 @@ export default function NotebookEditor() {
           {detail}
         </Alert>
       ) : null}
+
+      {missingFromKernel.length > 0 && (
+        <Alert status="warning" borderRadius="md" py={2} fontSize="sm">
+          <AlertIcon />
+          <Box flex="1">
+            Python is already running without {missingFromKernel.join(', ')}. Restart it to install{' '}
+            {missingFromKernel.length === 1 ? 'that package' : 'those packages'}.
+          </Box>
+          <Button
+            size="xs"
+            ml={3}
+            onClick={() => {
+              setSetupDone(false);
+              restart();
+            }}
+          >
+            Restart &amp; install
+          </Button>
+        </Alert>
+      )}
 
       {problems.length > 0 && (
         <Alert status="warning" borderRadius="md" alignItems="flex-start">

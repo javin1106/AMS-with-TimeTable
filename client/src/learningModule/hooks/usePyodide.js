@@ -24,6 +24,12 @@ export default function usePyodide(packages = []) {
   const [status, setStatus] = useState('idle');
   const [detail, setDetail] = useState('');
   const [busyCellId, setBusyCellId] = useState(null);
+  // What the live kernel was actually started with, which is not the same as
+  // `packages` the moment someone edits the list: installs happen at startup
+  // only. A caller that can change the list mid-session needs to be able to see
+  // the difference and offer a restart, rather than letting the notebook fail
+  // on an import it believes it has already declared.
+  const [kernelPackages, setKernelPackages] = useState(null);
 
   const workerRef = useRef(null);
   // Resolver for the run currently in flight, keyed so a stale worker's late
@@ -42,6 +48,7 @@ export default function usePyodide(packages = []) {
       pendingRef.current = null;
     }
     setBusyCellId(null);
+    setKernelPackages(null);
   }, []);
 
   useEffect(() => teardown, [teardown]);
@@ -99,6 +106,7 @@ export default function usePyodide(packages = []) {
     setStatus('loading');
     setDetail('Starting Python…');
     const worker = spawn();
+    setKernelPackages([...packagesRef.current]);
     worker.postMessage({ type: 'init', indexURL: PYODIDE_URL, packages: packagesRef.current });
   }, [spawn]);
 
@@ -108,6 +116,7 @@ export default function usePyodide(packages = []) {
     setStatus('loading');
     setDetail('Restarting Python…');
     const worker = spawn();
+    setKernelPackages([...packagesRef.current]);
     worker.postMessage({ type: 'init', indexURL: PYODIDE_URL, packages: packagesRef.current });
   }, [spawn, teardown]);
 
@@ -143,5 +152,5 @@ export default function usePyodide(packages = []) {
     setDetail('Stopped. Variables from the previous run are gone.');
   }, [teardown]);
 
-  return { status, detail, busyCellId, start, restart, runCell, stop };
+  return { status, detail, busyCellId, kernelPackages, start, restart, runCell, stop };
 }

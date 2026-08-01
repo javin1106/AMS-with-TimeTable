@@ -2,6 +2,7 @@ const LmAnnouncement = require("../models/lmAnnouncement");
 const LmCoursework = require("../models/lmCoursework");
 const LmClass = require("../models/lmClass");
 const LmMembership = require("../models/lmMembership");
+const LmQuiz = require("../models/lmQuiz");
 const { notifyClass } = require("../services/notifyService");
 
 /**
@@ -36,21 +37,94 @@ const canPost = (req) => {
   return req.lmClass.settings.whoCanPost === "students_can_post" && !req.lmMembership?.muted;
 };
 
-// Scheduled posts go live lazily: any read of the stream first flips items
-// whose scheduledFor has passed. That avoids running a cron for something the
-// stream itself observes, and keeps behaviour identical on a restarted server.
-async function releaseScheduled(classId) {
+/**
+ * Scheduled posts go live lazily: any read of the stream first flips items
+ * whose scheduledFor has passed. That avoids running a cron for something the
+ * stream itself observes, and keeps behaviour identical on a restarted server.
+ *
+ * Going live is also when the class is told. It used to be an `updateMany` and
+ * nothing else, so a post or quiz a teacher scheduled for Monday morning simply
+ * appeared — no notification, no email — while the same item published by hand
+ * announced itself. The scheduling teacher had no way to know the difference.
+ *
+ * Two things make announcing here safe. Each row is *claimed* with its own
+ * conditional update rather than flipped in bulk: `status: "scheduled"` in the
+ * filter means only one caller's update matches, so concurrent readers cannot
+ * each announce the same item. And the announcing is deliberately not awaited —
+ * this sits in front of every stream fetch, and no student's page load should
+ * wait on SMTP. `notifyClass` handles its own failures and never rejects.
+ */
+async function releaseScheduled(klass) {
+  const classId = klass._id;
   const now = new Date();
-  await Promise.all([
-    LmAnnouncement.updateMany(
-      { classId, status: "scheduled", scheduledFor: { $lte: now } },
+  const due = { classId, status: "scheduled", scheduledFor: { $lte: now } };
+
+  const [announcements, coursework] = await Promise.all([
+    LmAnnouncement.find(due).select("authorId authorName text audience").lean(),
+    LmCoursework.find(due)
+      .select("createdBy createdByName title workType dueDate audience quizId")
+      .lean(),
+  ]);
+  if (!announcements.length && !coursework.length) return;
+
+  const claim = (Model, id) =>
+    Model.findOneAndUpdate(
+      { _id: id, status: "scheduled" },
       { $set: { status: "published", publishedAt: now } },
+    ).lean();
+
+  const claimed = await Promise.all([
+    ...announcements.map((item) =>
+      claim(LmAnnouncement, item._id).then((won) => (won ? { kind: "announcement", item } : null)),
     ),
-    LmCoursework.updateMany(
-      { classId, status: "scheduled", scheduledFor: { $lte: now } },
-      { $set: { status: "published", publishedAt: now } },
+    ...coursework.map((item) =>
+      claim(LmCoursework, item._id).then((won) => (won ? { kind: "coursework", item } : null)),
     ),
   ]);
+
+  claimed.filter(Boolean).forEach(({ kind, item }) => {
+    if (kind === "announcement") {
+      notifyClass({
+        klass,
+        userIds: item.audience?.length ? item.audience : null,
+        excludeUserId: item.authorId,
+        type: "announcement",
+        title: `New post in ${klass.name}`,
+        body: item.text,
+        link: `/learning/class/${classId}`,
+        actorName: item.authorName,
+        email: true,
+      });
+      return;
+    }
+
+    // A scheduled quiz rides on its coursework row, and the class wants the
+    // paper itself — /work/:id is the gradebook entry, not the door.
+    const isQuiz = Boolean(item.quizId);
+    notifyClass({
+      klass,
+      userIds: item.audience?.length ? item.audience : null,
+      excludeUserId: item.createdBy,
+      type: isQuiz ? "quiz" : item.workType === "material" ? "material" : "coursework",
+      title: isQuiz
+        ? `New quiz in ${klass.name}: ${item.title}`
+        : `${klass.name}: ${item.title}`,
+      body: item.dueDate ? `Due ${new Date(item.dueDate).toLocaleString("en-IN")}` : "No due date",
+      link: isQuiz
+        ? `/learning/class/${classId}/quiz/${item.quizId}`
+        : `/learning/class/${classId}/work/${item._id}`,
+      actorName: item.createdByName,
+      email: true,
+    });
+
+    // Keep the quiz's own once-only marker in step, so bringing a released
+    // quiz forward later is not treated as a fresh one.
+    if (isQuiz) {
+      LmQuiz.updateOne({ _id: item.quizId, announcedAt: null }, { $set: { announcedAt: now } }).catch(
+        (err) => console.error("[LearningModule] quiz announcedAt:", err.message),
+      );
+    }
+  });
 }
 
 // Targeted posts (audience non-empty) are only visible to the listed students;
@@ -63,7 +137,7 @@ const audienceFilter = (req) =>
  * assignment" entries, newest first, pinned items on top.
  */
 exports.getStream = async (req, res) => {
-  await releaseScheduled(req.lmClass._id);
+  await releaseScheduled(req.lmClass);
 
   const limit = Math.min(Number(req.query.limit) || 30, 100);
   const before = req.query.before ? new Date(req.query.before) : null;

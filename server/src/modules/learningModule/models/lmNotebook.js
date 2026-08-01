@@ -61,6 +61,9 @@ const lmNotebookSchema = new mongoose.Schema({
 
   published: { type: Boolean, default: false },
   publishedAt: { type: Date, default: null },
+  // When the class was told this notebook exists — see the note on lmQuiz's
+  // own `announcedAt`. Editing cells and publishing again must not re-announce.
+  announcedAt: { type: Date, default: null },
   // Set when a published notebook has been mirrored into the Classwork list.
   courseworkId: { type: mongoose.Schema.Types.ObjectId, ref: 'lm_coursework', default: null },
   dueDate: { type: Date, default: null },

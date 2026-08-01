@@ -152,6 +152,10 @@ exports.publishNotebook = async (req, res) => {
 
   notebook.published = true;
   notebook.publishedAt = notebook.publishedAt || new Date();
+  // Announce once. Publishing again after editing a cell is the same notebook,
+  // and re-notifying the class for it is how a working mailer becomes noise.
+  const announce = !notebook.announcedAt;
+  if (announce) notebook.announcedAt = new Date();
   if (req.body.dueDate !== undefined) {
     notebook.dueDate = req.body.dueDate ? new Date(req.body.dueDate) : null;
   }
@@ -179,17 +183,19 @@ exports.publishNotebook = async (req, res) => {
   await notebook.save();
   await seedSubmissions(coursework, req.lmClass);
 
-  const codeCells = (notebook.cells || []).filter((cell) => cell.type === 'code' && !cell.hidden).length;
-  await notifyClass({
-    klass: req.lmClass,
-    excludeUserId: req.lmUser.id,
-    type: 'coursework',
-    title: `New coding notebook in ${req.lmClass.name}: ${notebook.title}`,
-    body: `${codeCells} code ${codeCells === 1 ? 'cell' : 'cells'} · runs in your browser, nothing to install`,
-    link: `/learning/class/${req.lmClass._id}/notebook/${notebook._id}`,
-    actorName: req.lmUser.name,
-    email: true,
-  });
+  if (announce) {
+    const codeCells = (notebook.cells || []).filter((cell) => cell.type === 'code' && !cell.hidden).length;
+    await notifyClass({
+      klass: req.lmClass,
+      excludeUserId: req.lmUser.id,
+      type: 'coursework',
+      title: `New coding notebook in ${req.lmClass.name}: ${notebook.title}`,
+      body: `${codeCells} code ${codeCells === 1 ? 'cell' : 'cells'} · runs in your browser, nothing to install`,
+      link: `/learning/class/${req.lmClass._id}/notebook/${notebook._id}`,
+      actorName: req.lmUser.name,
+      email: true,
+    });
+  }
 
   return res.json({ published: true, courseworkId: coursework._id });
 };

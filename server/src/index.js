@@ -204,7 +204,12 @@ mongoose
       
       // Register lifecycle alerts (startup & shutdown)
       alertNotifier.setupServerLifecycleAlerts();
-      
+
+      // Checks the SMTP settings once, here, rather than per message — bad
+      // credentials or an unreachable host now show up in the boot log instead
+      // of as an invite that quietly went nowhere. Never throws.
+      require("./modules/mailerModule/transport").verifyTransport();
+
      // ── Auto Attendance Scheduler ─────────────────────────────
       // No args needed — rooms, periods, and run settings are now read
       // live from AcquisitionControl + the Camera Registry on every tick.

@@ -122,7 +122,12 @@ async function provisionAccounts({
 
       notifyUserCreated(user);
 
-      sendWelcomeEmail({
+      // Awaited, and its answer kept: this mail carries the set-password link,
+      // so an account whose welcome mail never left is an account nobody can
+      // sign in to. The invite screen reports it rather than showing the
+      // teacher a clean "account created".
+      // eslint-disable-next-line no-await-in-loop
+      const mailed = await sendWelcomeEmail({
         email,
         frontendBase,
         // Matches the banner on the invite mail (notifyService), so both routes
@@ -142,7 +147,7 @@ async function provisionAccounts({
         accountCreated: true,
       });
 
-      results.set(email, { user, created: true, roleAdded: true });
+      results.set(email, { user, created: true, roleAdded: true, mailed });
     } catch (error) {
       // A duplicate here means a concurrent invite won the race — re-read
       // rather than reporting a failure the teacher can do nothing about.

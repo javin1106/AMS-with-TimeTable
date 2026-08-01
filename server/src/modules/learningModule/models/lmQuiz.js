@@ -169,6 +169,10 @@ const lmQuizSchema = new mongoose.Schema({
   // approach the stream already takes with scheduled posts.
   published: { type: Boolean, default: false, index: true },
   publishAt: { type: Date, default: null },
+  // When the class was told this quiz exists. Distinct from `publishAt`: a
+  // teacher who adjusts the window and saves again is republishing, not adding
+  // a second quiz, and the class should not be notified twice for it.
+  announcedAt: { type: Date, default: null },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'user', required: true },
   createdByName: { type: String, default: '' },
 

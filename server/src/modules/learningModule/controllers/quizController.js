@@ -570,7 +570,14 @@ exports.publishQuiz = async (req, res) => {
 
   // Announcing a quiz nobody can open yet would only send the class to a 404;
   // the scheduled stream entry does the announcing when it goes live.
-  if (!scheduled) {
+  //
+  // `announcedAt` rather than "is this the first publish": a teacher who
+  // corrects the window and saves again has not added a second quiz. It also
+  // covers the other order — a quiz first scheduled, then brought forward to
+  // publish now — which was announced by neither branch.
+  if (!scheduled && !quiz.announcedAt) {
+    quiz.announcedAt = now;
+    await quiz.save();
     await notifyClass({
       klass: req.lmClass,
       excludeUserId: req.lmUser.id,
