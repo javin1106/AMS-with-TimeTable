@@ -22,6 +22,7 @@ const v1router = require("./routes");
 const { startAutoScheduler } = require('./modules/attendanceModule/controllers/autoAttendanceScheduler');
 const { startGpuMetricsCollector } = require('./modules/attendanceModule/controllers/gpuMetricsCollector');
 const alertNotifier = require("./modules/attendanceModule/controllers/alertNotifier");
+const cameraHealthScheduler = require("./modules/attendanceModule/controllers/cameraHealthScheduler");
 
 process.on('uncaughtException',  (err) => console.error('UNCAUGHT EXCEPTION:', err));
 process.on('unhandledRejection', (err) => console.error('UNHANDLED REJECTION:', err));
@@ -213,6 +214,7 @@ mongoose
       // No args needed — rooms, periods, and run settings are now read
       // live from AcquisitionControl + the Camera Registry on every tick.
       startAutoScheduler();
+      cameraHealthScheduler.start();
       console.log('[AutoScheduler] Scheduler started — DB-driven (rooms, periods, embeddings).'); 
 
       // ── Frame Cleanup Scheduler (Task #1544) ──────────────────
