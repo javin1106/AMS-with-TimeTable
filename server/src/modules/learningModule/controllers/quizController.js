@@ -8,6 +8,7 @@ const { seedSubmissions } = require("./courseworkController");
 const engine = require("../services/examEngine");
 const { duplicateOptionMessage } = require("../services/questionRules");
 const { notifyClass, notifyUser } = require("../services/notifyService");
+const game = require("../services/gamification");
 
 /* ─────────────────────────────── helpers ──────────────────────────────── */
 
@@ -889,6 +890,10 @@ async function finaliseAttempt(attempt, quiz, req, reason = "completed") {
   attempt.submittedAt = now;
   attempt.durationSec = Math.round((now - new Date(attempt.startedAt)) / 1000);
   await attempt.save();
+
+  // Sitting the paper is what pays; the score adds a modest bonus on top. The
+  // marks are the teacher's business — points are not a second grade.
+  await game.onQuizSubmitted({ req, quiz, percent: scored.percent, at: now });
 
   // Best-of across attempts. A student now sits a quiz once, but rows from
   // before that rule — or from a re-sit a teacher opened up — are still read.

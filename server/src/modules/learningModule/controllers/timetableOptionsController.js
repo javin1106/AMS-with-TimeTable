@@ -17,6 +17,22 @@ async function currentSessionTables() {
   return TimeTable.find({ session: latest.session }).lean();
 }
 
+/**
+ * The session the institute is currently running, e.g. "2026-27 Odd".
+ *
+ * The one authority for it, so a class is stamped with the same session the
+ * picker drew its subjects from. Deliberately not taken from the request: a
+ * client that sent its own would let a class be filed under a session it was
+ * never taught in, and every points table for that session would be wrong.
+ *
+ * Returns "" when the timetable module has nothing set up, which reads as
+ * "unrecorded" everywhere downstream rather than inventing a session.
+ */
+async function currentSession() {
+  const [table] = await currentSessionTables();
+  return table?.session || "";
+}
+
 // Semesters are stored as strings ("3", "5", "M1"), so sort numerically where
 // both sides are numbers and fall back to text otherwise.
 const bySemester = (a, b) => {
@@ -72,3 +88,7 @@ exports.listSubjects = async (req, res) => {
 
   return res.json(mapped.sort((a, b) => a.name.localeCompare(b.name)));
 };
+
+// Exported for classController, which stamps a new class with the session it
+// was created in — see the note on `currentSession`.
+exports.currentSession = currentSession;

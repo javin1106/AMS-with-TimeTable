@@ -26,6 +26,7 @@ const TABS = [
   { path: 'quizzes', label: 'Quizzes' },
   { path: 'tutorials', label: 'Tutorials' },
   { path: 'shorts', label: 'Shorts' },
+  { path: 'discussions', label: 'Forum' },
   { path: 'notebooks', label: 'Coding' },
   { path: 'grades', label: 'Grades' },
   { path: 'studio', label: 'AI Studio' },
@@ -138,6 +139,17 @@ export default function ClassLayout() {
               {...headerLinkStyles}
             >
               People · {klass.counts?.studentCount ?? 0}
+            </Button>
+            {/* Beside People rather than in the teaching tabs: it is about who
+                is in the class, not about another thing to hand in. */}
+            <Button
+              as={NavLink}
+              to={`/learning/class/${classId}/leaderboard`}
+              size="sm"
+              leftIcon={<span>🏆</span>}
+              {...headerLinkStyles}
+            >
+              Leaderboard
             </Button>
             {isTeacher && (
               <Tooltip label={hasCopied ? 'Copied!' : 'Click to copy class code'}>

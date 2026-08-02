@@ -83,4 +83,23 @@ export const WORK_TYPE_META = {
   quiz: { icon: '🧠', label: 'Quiz', colorScheme: 'purple' },
   question: { icon: '❓', label: 'Question', colorScheme: 'orange' },
   material: { icon: '📚', label: 'Material', colorScheme: 'green' },
+  // Not a `workType` of its own — a coding exercise is stored as an assignment
+  // carrying a `notebookId`. It reads as one on the calendar because "📄
+  // Assignment due" tells a student nothing about what they have to open.
+  notebook: { icon: '🐍', label: 'Coding exercise', colorScheme: 'teal' },
 };
+
+/**
+ * The calendar/classwork identity of a coursework row.
+ *
+ * A notebook is mirrored into Classwork as an assignment so it inherits the due
+ * date and the gradebook column, but on a calendar it should say what it is and
+ * link to the exercise rather than to its gradebook row.
+ */
+export const courseworkMeta = (item) =>
+  item?.notebookId ? WORK_TYPE_META.notebook : WORK_TYPE_META[item?.workType] || WORK_TYPE_META.assignment;
+
+export const courseworkLink = (item) =>
+  item?.notebookId
+    ? `/learning/class/${item.classId}/notebook/${item.notebookId}`
+    : `/learning/class/${item?.classId}/work/${item?._id}`;

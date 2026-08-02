@@ -27,6 +27,10 @@ const notificationController = require("../controllers/notificationController");
 const dashboardController = require("../controllers/dashboardController");
 const uploadController = require("../controllers/uploadController");
 const timetableOptionsController = require("../controllers/timetableOptionsController");
+const leaderboardController = require("../controllers/leaderboardController");
+const discussionController = require("../controllers/discussionController");
+const bugReportController = require("../controllers/bugReportController");
+const profileController = require("../controllers/profileController");
 
 const router = express.Router();
 
@@ -68,6 +72,18 @@ router.get("/timetable/subjects", asyncRoute(timetableOptionsController.listSubj
 router.get("/classes", asyncRoute(classController.listMyClasses));
 router.post("/classes", requireClassCreator, asyncRoute(classController.createClass));
 router.get("/classes/all", asyncRoute(classController.listAllClasses));
+
+/* ── bug reports and the profile ────────────────────────────────────────
+   Outside the class router on purpose: most bugs are not about a class, and
+   making somebody navigate into one first is how a bug goes unreported. The
+   admin-only endpoints check `isPlatformAdmin` in the handler — there is no
+   class to hang a `requireTeacher` off. */
+router.post("/bugs", asyncRoute(bugReportController.createBugReport));
+router.get("/bugs/mine", asyncRoute(bugReportController.listMyBugReports));
+router.get("/bugs", asyncRoute(bugReportController.listAllBugReports));
+router.patch("/bugs/:reportId", asyncRoute(bugReportController.reviewBugReport));
+
+router.get("/me/profile", asyncRoute(profileController.getMyProfile));
 
 router.post("/join", asyncRoute(memberController.joinByCode));
 router.post("/claim-invites", asyncRoute(memberController.claimInvites));
@@ -231,6 +247,22 @@ classRouter.delete("/notebooks/:notebookId", requireTeacher, asyncRoute(notebook
 classRouter.post("/notebooks/:notebookId/publish", requireTeacher, asyncRoute(notebookController.publishNotebook));
 classRouter.get("/notebooks/:notebookId/attempt", asyncRoute(notebookController.getMyAttempt));
 classRouter.get("/notebooks/:notebookId/attempts", requireTeacher, asyncRoute(notebookController.listAttempts));
+
+/* ── points and badges ──────────────────────────────────────────────────
+   Open to the whole class, students included: a leaderboard only staff can
+   read is a report, not a game. */
+classRouter.get("/leaderboard", asyncRoute(leaderboardController.getLeaderboard));
+classRouter.get("/my-points", asyncRoute(leaderboardController.getMyPoints));
+classRouter.get("/points-guide", asyncRoute(leaderboardController.getPointsGuide));
+
+/* ── discussion forum ───────────────────────────────────────────────────
+   Open to students by design — starting a topic is the point. The one-a-week
+   limit is a unique index on the model, and staff moderate. */
+classRouter.get("/discussions", asyncRoute(discussionController.listDiscussions));
+classRouter.post("/discussions", asyncRoute(discussionController.createDiscussion));
+classRouter.get("/discussions/:discussionId", asyncRoute(discussionController.getDiscussion));
+classRouter.patch("/discussions/:discussionId", requireTeacher, asyncRoute(discussionController.updateDiscussion));
+classRouter.delete("/discussions/:discussionId", asyncRoute(discussionController.deleteDiscussion));
 classRouter.get("/notebook-attempts/:attemptId", asyncRoute(notebookController.getAttempt));
 classRouter.post("/notebook-attempts/:attemptId/save", asyncRoute(notebookController.saveAttempt));
 classRouter.post("/notebook-attempts/:attemptId/submit", asyncRoute(notebookController.submitAttempt));

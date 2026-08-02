@@ -333,6 +333,32 @@ const lmApi = {
     request(`/classes/${classId}/notebooks/${notebookId}`, { method: 'PATCH', body }),
   deleteNotebook: (classId, notebookId) =>
     request(`/classes/${classId}/notebooks/${notebookId}`, { method: 'DELETE' }),
+  /* ---- points and badges ---- */
+  leaderboard: (classId, scope = 'week') =>
+    request(`/classes/${classId}/leaderboard?scope=${scope}`),
+  myPoints: (classId) => request(`/classes/${classId}/my-points`),
+  pointsGuide: (classId) => request(`/classes/${classId}/points-guide`),
+
+  /* ---- profile and bug reports (outside any class) ---- */
+  myProfile: () => request('/me/profile'),
+  reportBug: (body) => request('/bugs', { method: 'POST', body }),
+  myBugReports: () => request('/bugs/mine'),
+  // 403s for anyone who is not a platform admin; the page uses that to decide
+  // whether to show the queue at all.
+  allBugReports: (status) => request(`/bugs${qs({ status })}`),
+  reviewBug: (reportId, body) => request(`/bugs/${reportId}`, { method: 'PATCH', body }),
+
+  /* ---- discussion forum ---- */
+  listDiscussions: (classId) => request(`/classes/${classId}/discussions`),
+  createDiscussion: (classId, body) =>
+    request(`/classes/${classId}/discussions`, { method: 'POST', body }),
+  getDiscussion: (classId, discussionId) =>
+    request(`/classes/${classId}/discussions/${discussionId}`),
+  updateDiscussion: (classId, discussionId, body) =>
+    request(`/classes/${classId}/discussions/${discussionId}`, { method: 'PATCH', body }),
+  deleteDiscussion: (classId, discussionId) =>
+    request(`/classes/${classId}/discussions/${discussionId}`, { method: 'DELETE' }),
+
   publishNotebook: (classId, notebookId, body) =>
     request(`/classes/${classId}/notebooks/${notebookId}/publish`, { method: 'POST', body: body || {} }),
   notebookAttempt: (classId, notebookId) =>

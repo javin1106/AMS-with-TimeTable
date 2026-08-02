@@ -18,7 +18,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 const PYODIDE_URL =
   import.meta.env.VITE_PYODIDE_URL || 'https://cdn.jsdelivr.net/pyodide/v0.26.4/full/';
 
-export default function usePyodide(packages = []) {
+/**
+ * @param {string[]} [packages] PyPI names to install with micropip. Only needed
+ *        for things Pyodide does not ship — numpy, pandas, matplotlib, scipy
+ *        and friends are found by scanning `sources` and need no declaration.
+ * @param {string[]} [sources]  the notebook's cell sources, read at kernel
+ *        start so their imports are fetched during the startup wait rather
+ *        than stalling the first cell that needs one.
+ */
+export default function usePyodide(packages = [], sources = []) {
   // 'idle' until something actually needs Python — a notebook that is only
   // being read should not pull ten megabytes.
   const [status, setStatus] = useState('idle');
@@ -37,6 +45,10 @@ export default function usePyodide(packages = []) {
   const pendingRef = useRef(null);
   const packagesRef = useRef(packages);
   packagesRef.current = packages;
+  // Read at start/restart rather than captured, so a kernel started after the
+  // notebook loads still sees the cells it has to scan.
+  const sourcesRef = useRef(sources);
+  sourcesRef.current = sources;
 
   const teardown = useCallback(() => {
     if (workerRef.current) {
@@ -107,7 +119,12 @@ export default function usePyodide(packages = []) {
     setDetail('Starting Python…');
     const worker = spawn();
     setKernelPackages([...packagesRef.current]);
-    worker.postMessage({ type: 'init', indexURL: PYODIDE_URL, packages: packagesRef.current });
+    worker.postMessage({
+      type: 'init',
+      indexURL: PYODIDE_URL,
+      packages: packagesRef.current,
+      sources: sourcesRef.current,
+    });
   }, [spawn]);
 
   /** Throws away the kernel and starts a clean one — the notebook "restart". */
@@ -117,7 +134,12 @@ export default function usePyodide(packages = []) {
     setDetail('Restarting Python…');
     const worker = spawn();
     setKernelPackages([...packagesRef.current]);
-    worker.postMessage({ type: 'init', indexURL: PYODIDE_URL, packages: packagesRef.current });
+    worker.postMessage({
+      type: 'init',
+      indexURL: PYODIDE_URL,
+      packages: packagesRef.current,
+      sources: sourcesRef.current,
+    });
   }, [spawn, teardown]);
 
   /**

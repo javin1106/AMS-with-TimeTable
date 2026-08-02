@@ -12,6 +12,7 @@ const LmClass = require('../models/lmClass');
 const { seedSubmissions } = require('./courseworkController');
 const agg = require('../services/shortsAggregator');
 const { notifyClass } = require('../services/notifyService');
+const game = require('../services/gamification');
 
 /* ─────────────────────────────── helpers ──────────────────────────────── */
 
@@ -876,6 +877,20 @@ exports.submitResponse = async (req, res) => {
     { _id: session._id, 'participants.userId': identity.id },
     { $set: { 'participants.$.lastSeenAt': new Date() } },
   );
+
+  // Points for joining in, keyed on the session rather than the slide: a deck
+  // of fifteen questions should be worth turning up for, not fifteen times an
+  // assignment. Guests have no account to credit, and are skipped inside.
+  await game.onShortAnswer({
+    classId: session.classId,
+    studentId: identity.isGuest ? null : identity.id,
+    studentName: identity.name,
+    shortSession: session,
+    // A participant may have joined by code with no class loaded on the
+    // request, so the academic session is read off the class rather than
+    // `req.lmClass`, which is not there on this route.
+    session: session.classSession || "",
+  });
 
   return res.json({ saved: true, changed: Boolean(existing) });
 };

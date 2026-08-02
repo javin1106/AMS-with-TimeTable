@@ -13,7 +13,7 @@ import {
 } from '@chakra-ui/react';
 
 import lmApi from '../api/lmApi';
-import { EmptyState, ErrorState, Loading, SectionCard } from '../components/common';
+import { DeadlineCountdown, EmptyState, ErrorState, Loading, SectionCard } from '../components/common';
 import { formatDate, relativeTime } from '../format';
 
 /**
@@ -154,6 +154,10 @@ export default function Notebooks() {
                           {notebook.packages.join(', ')}
                         </Badge>
                       ) : null}
+                      {/* Up here with the title rather than in the metadata
+                          line below: the deadline is the one thing on this card
+                          that changes while you are looking at it. */}
+                      <DeadlineCountdown dueDate={notebook.dueDate} size="xs" />
                     </HStack>
 
                     {notebook.description ? (

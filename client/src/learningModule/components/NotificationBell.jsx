@@ -43,10 +43,36 @@ export default function NotificationBell() {
       const data = await lmApi.notifications({ limit: 10 });
       setItems(data.items);
       setUnread(data.unreadCount);
+      return data;
     } catch {
       // A polling failure is not worth surfacing — the next tick retries.
+      return null;
     }
   }, []);
+
+  /**
+   * Opening the panel counts as having seen what is in it.
+   *
+   * The badge is a count of things you have not seen, and it used to survive
+   * reading them — it only came down by clicking each notification through to
+   * its page, or by finding "Mark all read". So a bell that said 6 still said 6
+   * after you had read all six, and the number stopped meaning anything.
+   *
+   * Only the ones actually listed are marked. Marking *everything* would clear
+   * a backlog sitting below the ten shown here, which the reader has by
+   * definition not seen.
+   */
+  const onOpen = useCallback(async () => {
+    const data = await load();
+    const seen = (data?.items || []).filter((item) => !item.read).map((item) => item._id);
+    if (!seen.length) return;
+
+    await lmApi.markNotificationsRead(seen).catch(() => {});
+    // The count drops; the rows keep their unread tint until the panel is
+    // reopened. Clearing both at once would leave the panel looking identical
+    // before and after, with nothing to show which ones were the new ones.
+    setUnread((count) => Math.max(0, count - seen.length));
+  }, [load]);
 
   useEffect(() => {
     load();
@@ -68,7 +94,7 @@ export default function NotificationBell() {
   };
 
   return (
-    <Popover placement="bottom-end" onOpen={load}>
+    <Popover placement="bottom-end" onOpen={onOpen}>
       <PopoverTrigger>
         <Box position="relative" display="inline-block">
           <IconButton variant="ghost" aria-label="Notifications" icon={<span>🔔</span>} />

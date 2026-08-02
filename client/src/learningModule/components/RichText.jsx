@@ -159,7 +159,16 @@ const PROSE_STYLES = {
   'sub, sup': { fontSize: '0.75em' },
 };
 
-export default function RichText({ children, fallback = null, ...rest }) {
+/**
+ * @param {boolean} [markdown]
+ *        Set by a caller that already knows the content is Markdown — a
+ *        notebook's markdown cell, say, where the cell type says so outright.
+ *        The sniff below only recognises *block* markers, so `**bold**` on its
+ *        own would otherwise fall through to the plain-text branch and render
+ *        as literal asterisks. HTML still wins: an .ipynb cell may hold raw
+ *        HTML, and that is not markdown whatever the cell is labelled.
+ */
+export default function RichText({ children, fallback = null, markdown = false, ...rest }) {
   const source = String(children ?? '');
 
   const html = useMemo(() => {
@@ -183,7 +192,7 @@ export default function RichText({ children, fallback = null, ...rest }) {
     );
   }
 
-  if (MARKDOWN_PATTERN.test(source)) {
+  if (markdown || MARKDOWN_PATTERN.test(source)) {
     return <Markdown {...rest}>{source}</Markdown>;
   }
 

@@ -11,6 +11,9 @@ import CourseworkDetail from './pages/CourseworkDetail';
 import GradeWork from './pages/GradeWork';
 import People from './pages/People';
 import Grades from './pages/Grades';
+import Leaderboard from './pages/Leaderboard';
+import PointsGuide from './pages/PointsGuide';
+import Discussions from './pages/Discussions';
 import Feedback from './pages/Feedback';
 import AiStudio from './pages/AiStudio';
 import AiPlayground from './pages/AiPlayground';
@@ -39,6 +42,8 @@ import TutorialResults from './pages/TutorialResults';
 import Todo from './pages/Todo';
 import Calendar from './pages/Calendar';
 import Notifications from './pages/Notifications';
+import Profile from './pages/Profile';
+import BugReports from './pages/BugReports';
 
 /**
  * The whole learning module hangs off one route in App.jsx (`/learning/*`),
@@ -62,6 +67,8 @@ export default function LearningRoutes() {
         <Route path="todo" element={<Todo />} />
         <Route path="calendar" element={<Calendar />} />
         <Route path="notifications" element={<Notifications />} />
+        <Route path="profile" element={<Profile />} />
+        <Route path="bugs" element={<BugReports />} />
 
         <Route path="class/:classId" element={<ClassLayout />}>
           <Route index element={<Stream />} />
@@ -72,6 +79,10 @@ export default function LearningRoutes() {
           <Route path="work/:courseworkId" element={<CourseworkDetail />} />
           <Route path="people" element={<People />} />
           <Route path="grades" element={<Grades />} />
+          <Route path="leaderboard" element={<Leaderboard />} />
+          <Route path="points" element={<PointsGuide />} />
+          <Route path="discussions" element={<Discussions />} />
+          <Route path="discussions/:discussionId" element={<Discussions />} />
           {/* Not behind RequireTeacher: the same screen serves the student who
               writes and the staff who read, and the server decides which. */}
           <Route path="feedback" element={<Feedback />} />

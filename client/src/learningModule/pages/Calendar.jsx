@@ -21,7 +21,7 @@ import {
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import { EmptyState, ErrorState, Loading, SectionCard } from '../components/common';
-import { WORK_TYPE_META, formatDate, formatDateTime } from '../format';
+import { courseworkLink, courseworkMeta, formatDate, formatDateTime } from '../format';
 
 const startOfMonth = (date) => new Date(date.getFullYear(), date.getMonth(), 1);
 const endOfMonth = (date) => new Date(date.getFullYear(), date.getMonth() + 1, 0, 23, 59, 59);
@@ -232,7 +232,7 @@ export default function Calendar() {
     };
 
     data.coursework.forEach((item) => {
-      const meta = WORK_TYPE_META[item.workType] || WORK_TYPE_META.assignment;
+      const meta = courseworkMeta(item);
       const subject = subjectShort(item.class);
       const kindLabel = `${meta.label} ${item.dateKind === 'posted' ? 'posted' : 'due'}`;
       const at = item.calendarDate || item.dueDate;
@@ -248,7 +248,7 @@ export default function Calendar() {
         className: item.class?.name || '',
         label: `${meta.icon} ${item.title}`,
         tooltip: `${item.class?.subject || item.class?.name || ''} — ${kindLabel}: ${item.title}`,
-        to: `/learning/class/${item.classId}/work/${item._id}`,
+        to: courseworkLink(item),
         badge: item.mySubmissionState ? (
           <Badge colorScheme={item.mySubmissionState === 'assigned' ? 'orange' : 'green'}>
             {item.mySubmissionState === 'assigned' ? 'Not done' : item.mySubmissionState}
@@ -475,12 +475,12 @@ export default function Calendar() {
               <EmptyState icon="📅" title="No coursework this month" />
             ) : (
               data.coursework.map((item) => {
-                const meta = WORK_TYPE_META[item.workType] || WORK_TYPE_META.assignment;
+                const meta = courseworkMeta(item);
                 return (
                   <Flex
                     key={item._id}
                     as={RouterLink}
-                    to={`/learning/class/${item.classId}/work/${item._id}`}
+                    to={courseworkLink(item)}
                     align="center"
                     gap={3}
                     py={2.5}
