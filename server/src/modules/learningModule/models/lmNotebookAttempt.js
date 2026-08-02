@@ -65,6 +65,27 @@ const lmNotebookAttemptSchema = new mongoose.Schema({
   lastSavedAt: { type: Date, default: null },
   submittedAt: { type: Date, default: null },
 
+  /**
+   * What the notebook looked like at the moment it was turned in.
+   *
+   * Frozen rather than derived on read, for one blunt reason: deriving it means
+   * loading `cells.outputs` for every student in the class, and those outputs
+   * hold base64 PNGs. A roster of two hundred would be tens of megabytes to
+   * answer "how many finished it".
+   *
+   * `completed` is every code cell run with no error left behind — a student
+   * who worked through the notebook, as against one who opened it and pressed
+   * submit. It is not a mark and does not pretend to be: the outputs come from
+   * the student's own browser and are trivially forged. It is a read on effort,
+   * for a teacher who wants to know who to go and talk to.
+   */
+  summary: {
+    codeCells: { type: Number, default: 0 },
+    cellsRun: { type: Number, default: 0 },
+    cellsErrored: { type: Number, default: 0 },
+    completed: { type: Boolean, default: false },
+  },
+
   // Marked by hand. There is no auto-grade here on purpose: the only thing the
   // server can vouch for is the code, so a human reads it.
   grade: { type: Number, default: null },

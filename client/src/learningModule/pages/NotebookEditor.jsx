@@ -18,7 +18,6 @@ import {
   Switch,
   Text,
   Textarea,
-  Tooltip,
   VStack,
   useToast,
 } from '@chakra-ui/react';
@@ -26,8 +25,10 @@ import {
 import { FiUpload } from 'react-icons/fi';
 
 import lmApi from '../api/lmApi';
-import { ErrorState, Loading, SectionCard } from '../components/common';
+import { DeadlineCountdown, ErrorState, Loading, SectionCard } from '../components/common';
+import HintTooltip from '../components/HintTooltip';
 import NotebookCell from '../components/NotebookCell';
+import { toDateTimeInput } from '../format';
 import usePyodide from '../hooks/usePyodide';
 import { MAX_IMPORT_CELLS, cellsFromFile } from '../notebookImport';
 
@@ -91,8 +92,12 @@ export default function NotebookEditor() {
     [packagesText],
   );
 
+  // Scanned for imports at kernel start, so numpy and friends are fetched
+  // during the startup wait without the teacher declaring them anywhere.
+  const sources = useMemo(() => cells.map((cell) => cell.source), [cells]);
+
   const { status, detail, busyCellId, kernelPackages, start, restart, runCell, stop } =
-    usePyodide(packages);
+    usePyodide(packages, sources);
 
   // Installs happen once, at startup: a package added after that is not in the
   // running kernel however many times the cell is run.
@@ -132,6 +137,18 @@ export default function NotebookEditor() {
       return next;
     });
 
+  /**
+   * Stop kills the worker, which takes the hidden setup and every variable with
+   * it. `setupDone` has to go back with it or the next run would skip replaying
+   * the setup into a kernel that never had it — and the run ticks are vouching
+   * for state that no longer exists.
+   */
+  const stopKernel = () => {
+    stop();
+    setSetupDone(false);
+    setCells((current) => current.map((cell) => ({ ...cell, runCount: 0 })));
+  };
+
   /** Runs hidden setup first, exactly as a student's kernel will. */
   const executeCell = async (cell) => {
     if (status !== 'ready') {
@@ -157,7 +174,12 @@ export default function NotebookEditor() {
       const { result, error: runError } = await runCell(cell._id, cell.source, push);
       if (runError) collected.push({ type: 'error', text: runError });
       else if (result !== null && result !== undefined) collected.push({ type: 'result', text: result });
-      patchCell(cell._id, { outputs: [...collected], runCount: (cell.runCount || 0) + 1 });
+      patchCell(cell._id, {
+        outputs: [...collected],
+        runCount: (cell.runCount || 0) + 1,
+        // Stamped so the status tick can say when, the same as the student side.
+        executedAt: new Date().toISOString(),
+      });
     } catch (err) {
       patchCell(cell._id, { outputs: [{ type: 'error', text: err.message }] });
     }
@@ -248,6 +270,9 @@ export default function NotebookEditor() {
         title: notebook.title,
         description: notebook.description,
         settings: notebook.settings,
+        // Sent on save, not only on publish: extending a deadline on a live
+        // exercise is an edit, and the class calendar reads it from here.
+        dueDate: notebook.dueDate || null,
         packages,
         cells: cells.map((cell, order) => ({
           // A `new-…` placeholder must not be sent as an _id; Mongo mints the
@@ -307,7 +332,10 @@ export default function NotebookEditor() {
             size="sm"
             variant="outline"
             onClick={() => {
+              // Same reset as Stop — the ticks belong to the kernel that earned
+              // them, and a fresh one has none of those variables.
               setSetupDone(false);
+              setCells((current) => current.map((cell) => ({ ...cell, runCount: 0 })));
               restart();
             }}
           >
@@ -404,6 +432,44 @@ export default function NotebookEditor() {
 
           <Divider />
 
+          <FormControl>
+            <Flex align="center" gap={3} wrap="wrap">
+              <FormLabel fontSize="sm" mb={0}>
+                Submission deadline
+              </FormLabel>
+              {notebook.dueDate && <DeadlineCountdown dueDate={notebook.dueDate} size="xs" />}
+            </Flex>
+            <HStack mt={2}>
+              <Input
+                type="datetime-local"
+                maxW="260px"
+                value={toDateTimeInput(notebook.dueDate)}
+                onChange={(e) =>
+                  setNotebook((current) => ({
+                    ...current,
+                    dueDate: e.target.value ? new Date(e.target.value).toISOString() : null,
+                  }))
+                }
+              />
+              {notebook.dueDate && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setNotebook((current) => ({ ...current, dueDate: null }))}
+                >
+                  Clear
+                </Button>
+              )}
+            </HStack>
+            <FormHelperText fontSize="xs">
+              Optional. Nothing locks at the deadline — students can still submit, and late ones are
+              marked as such so you can see who was on time and who was not. It also puts the exercise
+              on the class calendar.
+            </FormHelperText>
+          </FormControl>
+
+          <Divider />
+
           <FormControl display="flex" alignItems="flex-start" gap={3}>
             <Switch
               mt={1}
@@ -443,7 +509,7 @@ export default function NotebookEditor() {
           <Box key={cell._id}>
             {cell.type === 'code' && (
               <HStack spacing={4} mb={1} px={1}>
-                <Tooltip label="The student can run it but not edit it — imports and scaffolding">
+                <HintTooltip label="The student can run it but not edit it — imports and scaffolding">
                   <Checkbox
                     size="sm"
                     isChecked={cell.locked}
@@ -451,8 +517,8 @@ export default function NotebookEditor() {
                   >
                     <Text fontSize="xs">Locked</Text>
                   </Checkbox>
-                </Tooltip>
-                <Tooltip label="Runs before their cells but is never shown — data setup, helper functions">
+                </HintTooltip>
+                <HintTooltip label="Runs before their cells but is never shown — data setup, helper functions">
                   <Checkbox
                     size="sm"
                     isChecked={cell.hidden}
@@ -460,7 +526,7 @@ export default function NotebookEditor() {
                   >
                     <Text fontSize="xs">Hidden setup</Text>
                   </Checkbox>
-                </Tooltip>
+                </HintTooltip>
                 {cell.hidden && (
                   <Badge colorScheme="orange" fontSize="2xs">
                     not shown to students
@@ -476,7 +542,7 @@ export default function NotebookEditor() {
               canRun={status === 'ready' && !busyCellId}
               onChange={(patch) => patchCell(cell._id, patch)}
               onRun={() => executeCell(cell)}
-              onStop={stop}
+              onStop={stopKernel}
               onMove={(delta) => moveCell(index, delta)}
               onDelete={() => setCells((current) => current.filter((entry) => entry._id !== cell._id))}
             />
@@ -504,7 +570,7 @@ export default function NotebookEditor() {
             event.target.value = '';
           }}
         />
-        <Tooltip label="A Jupyter notebook, or a script split on the # %% markers VS Code, Spyder and jupytext write">
+        <HintTooltip label="A Jupyter notebook, or a script split on the # %% markers VS Code, Spyder and jupytext write">
           <Button
             size="sm"
             variant="outline"
@@ -513,7 +579,7 @@ export default function NotebookEditor() {
           >
             Import .ipynb / .py
           </Button>
-        </Tooltip>
+        </HintTooltip>
       </HStack>
 
       <Text fontSize="xs" opacity={0.6}>

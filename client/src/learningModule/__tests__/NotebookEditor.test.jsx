@@ -170,8 +170,10 @@ describe('learningModule <NotebookEditor /> saving', () => {
       }),
     );
 
-    // Appended to what is already here, not a replacement.
-    await waitFor(() => expect(screen.getAllByTestId('editor')).toHaveLength(4));
+    // Appended to what is already here, not a replacement. Three editors, not
+    // four: the imported markdown cell renders as prose until Edit is pressed.
+    await waitFor(() => expect(screen.getAllByTestId('editor')).toHaveLength(3));
+    expect(screen.getByText('Notes')).toBeInTheDocument();
 
     // Left unsaved on purpose — nothing reaches a student until the teacher
     // has looked at the split and pressed Save.
@@ -209,7 +211,9 @@ describe('learningModule <NotebookEditor /> saving', () => {
     });
     pick(new File([doc], 'lecture.ipynb', { type: 'application/x-ipynb+json' }));
 
-    await waitFor(() => expect(screen.getAllByTestId('editor')).toHaveLength(3));
+    // Two editors plus the imported markdown, which renders as prose.
+    await waitFor(() => expect(screen.getAllByTestId('editor')).toHaveLength(2));
+    expect(screen.getByText('Warm up')).toBeInTheDocument();
 
     fireEvent.click(saveButton());
     await waitFor(() => expect(lmApi.updateNotebook).toHaveBeenCalled());

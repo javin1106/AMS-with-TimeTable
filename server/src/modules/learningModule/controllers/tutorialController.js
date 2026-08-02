@@ -9,6 +9,7 @@ const { seedSubmissions } = require('./courseworkController');
 const formula = require('../services/formulaEngine');
 const variants = require('../services/variantGenerator');
 const { notifyClass, notifyUser } = require('../services/notifyService');
+const game = require('../services/gamification');
 
 /* ─────────────────────────────── helpers ──────────────────────────────── */
 
@@ -625,6 +626,8 @@ exports.submitAttempt = async (req, res) => {
   attempt.late = Boolean(due && now > due);
   attempt.durationSec = Math.round((now - attempt.startedAt) / 1000);
   await attempt.save();
+
+  await game.onTutorialSubmitted({ req, tutorial, at: now });
 
   // Mirror into the gradebook alongside every other piece of classwork.
   if (tutorial.courseworkId) {

@@ -18,7 +18,10 @@
  * Pyodide runtime, which a module worker cannot do.
  *
  * ── protocol ──────────────────────────────────────────────────────────────
- * in:  { type: 'init', indexURL, packages: [] }
+ * in:  { type: 'init', indexURL, packages: [], sources: [] }
+ *        `packages` are PyPI names installed with micropip; `sources` are the
+ *        notebook's cells, scanned so anything Pyodide already ships a wheel
+ *        for is fetched up front without being declared at all.
  *      { type: 'run', id, code }
  * out: { type: 'status', phase, detail }
  *      { type: 'stream', id, stream: 'stdout'|'stderr', text }
@@ -77,7 +80,9 @@ def _lm_install_matplotlib_hook():
     try:
         import matplotlib
     except ImportError:
-        return
+        # Not loaded yet. An import in a later cell can pull it in, so the
+        # caller retries rather than treating this as settled.
+        return False
     matplotlib.use("AGG", force=True)
     import matplotlib.pyplot as plt
 
@@ -90,15 +95,72 @@ def _lm_install_matplotlib_hook():
         plt.close("all")
 
     plt.show = _lm_show
+    return True
 
 _lm_install_matplotlib_hook()
 `;
 
-async function init(indexURL, packages) {
+/**
+ * Installs the matplotlib hook, retrying on later cells until it takes.
+ *
+ * It used to run once at startup and give up quietly if matplotlib was not
+ * there. Now that an `import matplotlib.pyplot` in any cell can load it, the
+ * hook has to be installed at that point too — otherwise the plot renders to a
+ * buffer nobody reads and the student's chart just never appears.
+ */
+let matplotlibHooked = false;
+async function installMatplotlibHook() {
+  if (matplotlibHooked || !pyodide) return;
+  try {
+    matplotlibHooked = Boolean(await pyodide.runPythonAsync(MATPLOTLIB_SHIM));
+  } catch {
+    // Nothing to recover: the next cell tries again.
+  }
+}
+
+/**
+ * Every import in the notebook, gathered into one synthetic snippet.
+ *
+ * Import *lines* rather than whole cells: a cell need not parse on its own — a
+ * half-finished edit, or a block continued in the next cell — and the import
+ * scanner needs something parseable. An import line with its indentation
+ * stripped always is. Continuation forms (`from x import (`) are dropped rather
+ * than repaired; the per-cell load catches those when the cell actually runs.
+ */
+const IMPORT_LINE = /^\s*(?:import|from)\s+[A-Za-z0-9_.]+\s/;
+const importProbe = (sources) => [
+  ...new Set(
+    (sources || [])
+      .flatMap((source) => String(source || '').split('\n'))
+      .map((line) => line.trim())
+      .filter((line) => IMPORT_LINE.test(`${line} `) && !/[(,\\]$/.test(line)),
+  ),
+].join('\n');
+
+async function init(indexURL, packages, sources) {
   post({ type: 'status', phase: 'loading', detail: 'Downloading the Python runtime…' });
 
   importScripts(`${indexURL}pyodide.js`);
   pyodide = await loadPyodide({ indexURL });
+
+  // Fetch the bundled wheels the notebook needs — numpy, pandas, matplotlib and
+  // the rest — while the student is already waiting for the kernel, instead of
+  // stalling whichever cell first says `import numpy`. Declaring them is no
+  // longer required for anything Pyodide ships; the packages list is for PyPI
+  // names it does not.
+  const probe = importProbe(sources);
+  if (probe) {
+    try {
+      await pyodide.loadPackagesFromImports(probe, {
+        messageCallback: (text) => post({ type: 'status', phase: 'loading', detail: text }),
+        errorCallback: () => {},
+      });
+    } catch (error) {
+      // Not fatal, and not worth reporting: a package that could not be fetched
+      // here is retried when its own cell runs, and fails there with a message
+      // that names it.
+    }
+  }
 
   if (packages && packages.length) {
     post({ type: 'status', phase: 'loading', detail: `Installing ${packages.join(', ')}…` });
@@ -115,7 +177,7 @@ async function init(indexURL, packages) {
     }
   }
 
-  await pyodide.runPythonAsync(MATPLOTLIB_SHIM);
+  await installMatplotlibHook();
 
   ready = true;
   post({ type: 'status', phase: 'ready', detail: '' });
@@ -144,6 +206,29 @@ async function run(id, code) {
   let result = null;
   let error = null;
 
+  // Pyodide ships prebuilt wheels for numpy, pandas, matplotlib, scipy and
+  // friends, but loads none of them until asked. Only the notebook's declared
+  // `packages` were ever installed, so a cell that simply says `import numpy` —
+  // the most ordinary line in a teaching notebook — failed with
+  // ModuleNotFoundError against a runtime that had numpy sitting right there.
+  // This resolves the imports in the cell about to run and loads what it can.
+  //
+  // Outside the run's own try: a loader that cannot fetch a wheel must not
+  // replace the error Python is about to raise. `ModuleNotFoundError: No module
+  // named 'numpy'` names the package; "failed to fetch" does not.
+  try {
+    await pyodide.loadPackagesFromImports(code, {
+      messageCallback: (text) => post({ type: 'status', phase: 'loading', detail: text }),
+      errorCallback: (text) => post({ type: 'status', phase: 'warning', detail: text }),
+    });
+    // Clear the loader line. `phase: 'loading'` only ever sets the detail text,
+    // so this does not disturb the kernel's ready state.
+    post({ type: 'status', phase: 'loading', detail: '' });
+    await installMatplotlibHook();
+  } catch (thrown) {
+    post({ type: 'status', phase: 'warning', detail: `Could not load imports: ${thrown.message || thrown}` });
+  }
+
   try {
     const value = await pyodide.runPythonAsync(code);
     // A notebook shows the value of the last expression. `undefined` means the
@@ -167,7 +252,7 @@ async function run(id, code) {
 self.onmessage = async (event) => {
   const { type } = event.data || {};
   try {
-    if (type === 'init') await init(event.data.indexURL, event.data.packages);
+    if (type === 'init') await init(event.data.indexURL, event.data.packages, event.data.sources);
     else if (type === 'run') await run(event.data.id, event.data.code);
   } catch (error) {
     post({ type: 'status', phase: 'failed', detail: String(error.message || error) });

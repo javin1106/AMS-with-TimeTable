@@ -1,6 +1,11 @@
 const crypto = require("crypto");
+const mongoose = require("mongoose");
 
 const LmClass = require("../models/lmClass");
+const LmPoints = require("../models/lmPoints");
+const LmBadge = require("../models/lmBadge");
+const game = require("../services/gamification");
+const { currentSession } = require("./timetableOptionsController");
 const LmMembership = require("../models/lmMembership");
 const LmAnnouncement = require("../models/lmAnnouncement");
 const LmCoursework = require("../models/lmCoursework");
@@ -52,7 +57,14 @@ exports.createClass = async (req, res) => {
   }
 
   const code = await generateUniqueCode();
+  // Resolved here rather than taken from the body: the picker already narrowed
+  // the subject list to the current session, and a client that named its own
+  // could file a class under a session it was never taught in — which would
+  // put every point earned in it on the wrong table.
+  const session = await currentSession();
+
   const klass = await LmClass.create({
+    session,
     name: String(name).trim(),
     section: section || "",
     subject: subject || "",
@@ -102,12 +114,50 @@ exports.listMyClasses = async (req, res) => {
     .sort({ updated_at: -1 })
     .lean();
 
+  // Points and badges for the cards, in two aggregates for the whole dashboard
+  // rather than a pair per class — a student in eight classes would otherwise
+  // pay sixteen round trips to render one page.
+  const classIds = classes.map((klass) => klass._id);
+  const [pointRows, badgeRows] = await Promise.all([
+    LmPoints.aggregate([
+      { $match: { classId: { $in: classIds }, studentId: new mongoose.Types.ObjectId(req.lmUser.id) } },
+      {
+        $group: {
+          _id: "$classId",
+          points: { $sum: "$points" },
+          weekly: {
+            $sum: { $cond: [{ $eq: ["$weekKey", game.weekKeyOf()] }, "$points", 0] },
+          },
+        },
+      },
+    ]),
+    LmBadge.find({ classId: { $in: classIds }, studentId: req.lmUser.id })
+      .sort({ earnedAt: -1 })
+      .select("classId badge")
+      .lean(),
+  ]);
+
+  const pointsBy = new Map(pointRows.map((row) => [String(row._id), row]));
+  const badgesBy = new Map();
+  badgeRows.forEach((row) => {
+    const key = String(row.classId);
+    if (!badgesBy.has(key)) badgesBy.set(key, []);
+    badgesBy.get(key).push(game.describeBadge(row.badge));
+  });
+
   const enriched = classes.map((klass) => {
     const membership = byClassId.get(String(klass._id));
+    const tally = pointsBy.get(String(klass._id));
     return {
       ...klass,
       myRole: membership?.role || null,
       myStatus: membership?.status || null,
+      myPoints: tally?.points || 0,
+      myWeeklyPoints: tally?.weekly || 0,
+      // The most recent few, which is what fits on a card. The count carries
+      // the rest.
+      myBadges: (badgesBy.get(String(klass._id)) || []).slice(0, 3),
+      myBadgeCount: (badgesBy.get(String(klass._id)) || []).length,
     };
   });
 

@@ -3,6 +3,7 @@ const LmFeedbackStrike = require("../models/lmFeedbackStrike");
 const LmMembership = require("../models/lmMembership");
 const { findProfanity, profanityMessage } = require("../services/profanityFilter");
 const { notifyClass, notifyUser } = require("../services/notifyService");
+const game = require("../services/gamification");
 
 const MIN_LENGTH = 15;
 const MAX_LENGTH = 2000;
@@ -259,6 +260,15 @@ exports.createFeedback = async (req, res) => {
     title: `New anonymous feedback in ${req.lmClass.name}`,
     body: "A student has sent anonymous feedback. Open the Anonymous Feedback tab to read it.",
     link: `/learning/class/${req.lmClass._id}/feedback`,
+  });
+
+  // Credited like any other activity. The ledger row is deliberately worded to
+  // say nothing about feedback — see `onFeedback` for what that protects and
+  // what it does not.
+  await game.onFeedback({
+    classId: req.lmClass._id,
+    studentId: req.lmUser.id,
+    studentName: membership?.name || req.lmUser.name,
   });
 
   return res.status(201).json(forAuthor(feedback));

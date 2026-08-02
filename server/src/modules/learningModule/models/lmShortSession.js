@@ -16,6 +16,11 @@ const lmShortSessionSchema = new mongoose.Schema({
   shortId: { type: mongoose.Schema.Types.ObjectId, ref: 'lm_short', required: true, index: true },
   classId: { type: mongoose.Schema.Types.ObjectId, ref: 'lm_class', required: true, index: true },
   title: { type: String, default: '' },
+  // The class's academic session, copied when the deck is presented. The
+  // participant route has no class loaded — someone can join by code with no
+  // membership at all — so points earned here would otherwise have no session
+  // to file themselves under.
+  classSession: { type: String, default: '' },
 
   // Numeric and short, because it gets read off a projector and typed on a
   // phone. Only unique among *live* sessions — see the partial index below.

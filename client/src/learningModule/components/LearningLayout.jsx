@@ -38,6 +38,14 @@ const NAV_ITEMS = [
   { to: '/learning/todo', label: 'To-do', icon: '✅' },
   { to: '/learning/calendar', label: 'Calendar', icon: '📅' },
   { to: '/learning/notifications', label: 'Notifications', icon: '🔔' },
+  // Points and badges are a student's record. Staff earn none — they set the
+  // work rather than doing it, and the leaderboard leaves them off entirely —
+  // so a "My progress" that was always empty would only invite the question.
+  { to: '/learning/profile', label: 'My progress', icon: '🎖️', studentOnly: true },
+  // Last, and separated below. Reporting something broken is not navigation —
+  // it is what you do *instead* of what you came here for, and it has to be
+  // reachable from wherever the thing broke.
+  { to: '/learning/bugs', label: 'Report a bug', icon: '🛠️', foot: true },
 ];
 
 /**
@@ -166,16 +174,22 @@ function ClassSwitcher({ classes, activeClassId, carriedTab, onNavigate }) {
   );
 }
 
-function NavItems({ onNavigate }) {
+function NavItems({ onNavigate, studentOnly = false }) {
   return (
     <>
-      {NAV_ITEMS.map((item) => (
+      {NAV_ITEMS.filter((item) => !item.studentOnly || studentOnly).map((item) => (
         <Box
           key={item.to}
           as={NavLink}
           to={item.to}
           end={item.end}
           onClick={onNavigate}
+          // Pushed away from the navigation proper: it is not another place to
+          // go, it is the escape hatch when a place you went is broken.
+          mt={item.foot ? 4 : undefined}
+          borderTopWidth={item.foot ? '1px' : undefined}
+          borderColor="gray.200"
+          pt={item.foot ? 4 : undefined}
           px={4}
           py={2.5}
           borderRadius="full"
@@ -363,7 +377,7 @@ export default function LearningLayout() {
             position="sticky"
             top="88px"
           >
-            <NavItems />
+            <NavItems studentOnly={studentOnly} />
             <ClassSwitcher
               classes={classes}
               activeClassId={activeClassId}
@@ -385,7 +399,7 @@ export default function LearningLayout() {
             <Icon as="span">🎓</Icon> XCEED Learning
           </DrawerHeader>
           <DrawerBody>
-            <NavItems onNavigate={onClose} />
+            <NavItems onNavigate={onClose} studentOnly={studentOnly} />
             <ClassSwitcher
               classes={classes}
               activeClassId={activeClassId}

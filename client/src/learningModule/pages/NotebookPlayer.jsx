@@ -17,7 +17,7 @@ import {
 import { FiFastForward, FiPlay, FiRefreshCw, FiSquare } from 'react-icons/fi';
 
 import lmApi from '../api/lmApi';
-import { ErrorState, Loading } from '../components/common';
+import { DeadlineCountdown, ErrorState, Loading } from '../components/common';
 import NotebookCell from '../components/NotebookCell';
 import RichText from '../components/RichText';
 import usePyodide from '../hooks/usePyodide';
@@ -77,7 +77,16 @@ export default function NotebookPlayer() {
   const scheduleSaveRef = useRef(() => {});
 
   const packages = useMemo(() => notebook?.packages || [], [notebook]);
-  const { status, detail, busyCellId, start, restart, runCell, stop } = usePyodide(packages);
+  // Scanned for imports at kernel start. The hidden setup counts: it runs first
+  // and is exactly the place a notebook does its `import numpy`.
+  const sources = useMemo(
+    () => [...hiddenSetup, ...cells.map((cell) => cell.source)],
+    [hiddenSetup, cells],
+  );
+  const lateSubmission =
+    Boolean(notebook?.dueDate && attempt?.submittedAt) &&
+    new Date(attempt.submittedAt) > new Date(notebook.dueDate);
+  const { status, detail, busyCellId, start, restart, runCell, stop } = usePyodide(packages, sources);
 
   const load = useCallback(async () => {
     setError(null);
@@ -318,10 +327,14 @@ export default function NotebookPlayer() {
     setCells((current) => current.map((cell) => ({ ...cell, runCount: 0 })));
   }, [restart]);
 
-  // Stop terminates the worker, so the setup that ran in it is gone too.
+  // Stop terminates the worker, so the setup that ran in it is gone too — and
+  // with it every variable the ticks were vouching for. Same reset as a
+  // restart, or the notebook would look run against a kernel that no longer
+  // exists.
   const stopKernel = useCallback(() => {
     setupRef.current = null;
     stop();
+    setCells((current) => current.map((cell) => ({ ...cell, runCount: 0 })));
   }, [stop]);
 
   /* ──────────────────────────── editing cells ─────────────────────────── */
@@ -382,9 +395,15 @@ export default function NotebookPlayer() {
           <HStack spacing={2} mt={2} wrap="wrap">
             <Badge colorScheme={kernelBadge[0]}>Python {kernelBadge[1]}</Badge>
             {notebook.packages?.length ? <Badge>{notebook.packages.join(', ')}</Badge> : null}
-            {notebook.dueDate ? <Badge colorScheme="orange">due {formatDateTime(notebook.dueDate)}</Badge> : null}
+            {/* A live counter rather than a date, and dropped once they have
+                turned it in — a clock still ticking down on submitted work
+                reads as though something is still owed. */}
+            {!submitted && <DeadlineCountdown dueDate={notebook.dueDate} />}
             {submitted ? (
-              <Badge colorScheme="green">submitted {formatDateTime(attempt.submittedAt)}</Badge>
+              <Badge colorScheme={lateSubmission ? 'orange' : 'green'}>
+                submitted {formatDateTime(attempt.submittedAt)}
+                {lateSubmission ? ' · after the deadline' : ''}
+              </Badge>
             ) : (
               <Badge
                 colorScheme={

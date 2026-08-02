@@ -44,6 +44,24 @@ const lmClassSchema = new mongoose.Schema({
   semester: { type: String, default: "" },
   batch: { type: String, default: "" },
 
+  /**
+   * The academic session this class belongs to, e.g. "2026-27 Odd".
+   *
+   * Stamped at creation from the timetable's current session — the same one the
+   * subject picker drew from — and never changed afterwards. A class is taught
+   * once, in one session, and moving it later would silently re-file every
+   * point and badge earned in it.
+   *
+   * This is what makes points session-scoped for free: a class belongs to
+   * exactly one session, so anything already scoped per class is already scoped
+   * per session. The field exists so a student's profile can *group* by it
+   * without joining every class they have ever been in.
+   *
+   * Blank on classes created before this was recorded, which reads as
+   * "unrecorded" rather than being guessed at.
+   */
+  session: { type: String, default: "", index: true },
+
   coverColor: { type: String, default: "#1967d2" },
   coverImage: { type: String, default: "" },
   meetLink: { type: String, default: "" },

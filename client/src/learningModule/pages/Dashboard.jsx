@@ -29,6 +29,7 @@ import {
   TabPanels,
   Tabs,
   Text,
+  Tooltip,
   useToast,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
@@ -85,6 +86,39 @@ function ClassCard({ klass, onOpen }) {
           <Text>📄 {klass.stats?.courseworkCount ?? 0}</Text>
           {isTeacher && <Text>🔑 {klass.code}</Text>}
         </HStack>
+
+        {/* Points and badges, students only. A teacher's card showing a score
+            would suggest they are playing the same game, and the leaderboard
+            deliberately leaves staff off it. */}
+        {!isTeacher && (klass.myPoints > 0 || klass.myBadgeCount > 0) && (
+          <Flex mt={3} align="center" gap={2} wrap="wrap">
+            <Badge colorScheme="purple" borderRadius="full" px={2} fontSize="0.7rem">
+              ⭐ {klass.myPoints} pts
+            </Badge>
+            {klass.myWeeklyPoints > 0 && (
+              <Badge colorScheme="green" borderRadius="full" px={2} fontSize="0.7rem">
+                +{klass.myWeeklyPoints} this week
+              </Badge>
+            )}
+            {klass.myBadges?.length > 0 && (
+              <Tooltip label={klass.myBadges.map((badge) => badge.name).join(' · ')}>
+                <HStack spacing={0.5} fontSize="sm">
+                  {klass.myBadges.map((badge) => (
+                    <Text key={badge.id} as="span" aria-label={badge.name}>
+                      {badge.emoji}
+                    </Text>
+                  ))}
+                  {klass.myBadgeCount > klass.myBadges.length && (
+                    <Text as="span" fontSize="xs" color="gray.500">
+                      +{klass.myBadgeCount - klass.myBadges.length}
+                    </Text>
+                  )}
+                </HStack>
+              </Tooltip>
+            )}
+          </Flex>
+        )}
+
         {klass.myStatus === 'pending' && (
           <Badge mt={3} colorScheme="orange">
             Waiting for approval

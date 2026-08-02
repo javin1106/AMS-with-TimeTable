@@ -74,6 +74,10 @@ const C = '/classes/:classId';
 // Endpoints that expose an answer key, another student's work, or the ability to
 // change what the class sees.
 const TEACHER_ONLY = [
+  // Pin and close a forum thread. Staff moderation, and neither touches the
+  // text — removal is a separate route the author can also reach.
+  `PATCH ${C}/discussions/:discussionId`,
+
   `POST ${C}/notebooks`,
   `PATCH ${C}/notebooks/:notebookId`,
   `DELETE ${C}/notebooks/:notebookId`,
@@ -157,6 +161,18 @@ const TEACHER_ONLY = [
  * table alone cannot express it.
  */
 const STUDENT_REACHABLE = [
+  // Open on purpose: a leaderboard only staff can read is a report, not a game.
+  // The response is aggregate scores and badge counts — no submissions, no
+  // marks — and the teacher-only class summary is gated inside the handler on
+  // `req.lmIsTeacher`.
+  [`GET ${C}/leaderboard`, 'aggregate points only; the staff summary is gated in the handler'],
+  [`GET ${C}/points-guide`, 'the rules themselves — nothing class-specific in it'],
+  // The forum is a student surface by design; starting a topic is the point.
+  [`GET ${C}/discussions`, 'class-visible threads only; withdrawn ones filtered out'],
+  [`POST ${C}/discussions`, 'one a week per student, enforced by a unique index'],
+  [`GET ${C}/discussions/:discussionId`, 'class-visible thread'],
+  [`DELETE ${C}/discussions/:discussionId`, 'author-only while unanswered; staff otherwise — checked in the handler'],
+  [`GET ${C}/my-points`, "scoped to the caller's own studentId"],
   [`GET ${C}/notebooks`, 'unpublished notebooks filtered out of the query'],
   [`GET ${C}/notebooks/:notebookId/attempt`, '403 unless published; seeds the caller their own copy'],
   [`GET ${C}/notebook-attempts/:attemptId`, 'ownership checked in the handler'],
