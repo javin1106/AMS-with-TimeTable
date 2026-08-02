@@ -165,26 +165,46 @@ const getTodayAttendanceStats = async (req, res) => {
         const selectedBatch = req.query.batch ? String(req.query.batch).trim() : null;
 
         const today = getCampusDate();
+        const utcToday = new Date().toISOString().slice(0, 10);
+        const targetDates = Array.from(new Set([today, utcToday]));
+
         const scoped = Boolean(department);
 
-        // Build a base scope for department/batch selections (without date)
         const baseScope = {
             ...(scoped ? { department: departmentRegex(department) } : {}),
             ...(selectedBatch ? { batch: selectedBatch } : {}),
         };
 
-        // Use an $expr to handle both Date objects and string formats safely in Asia/Kolkata timezone
         const dateEqualityExpr = {
             $expr: {
-                $eq: [
+                $in: [
                     {
                         $cond: [
                             { $eq: [{ $type: '$date' }, 'date'] },
                             { $dateToString: { date: '$date', format: '%Y-%m-%d', timezone: 'Asia/Kolkata' } },
-                            { $ifNull: ['$date', ''] },
+                            {
+                                $let: {
+                                    vars: {
+                                        parsedDate: { 
+                                            $dateFromString: { 
+                                                dateString: '$date',
+                                                onError: null,
+                                                onNull: null
+                                            } 
+                                        },
+                                    },
+                                    in: {
+                                        $cond: [
+                                            { $ne: ['$$parsedDate', null] },
+                                            { $dateToString: { date: '$$parsedDate', format: '%Y-%m-%d', timezone: 'Asia/Kolkata' } },
+                                            { $ifNull: ['$date', ''] },
+                                        ],
+                                    },
+                                },
+                            },
                         ],
                     },
-                    today,
+                    targetDates,
                 ],
             },
         };
