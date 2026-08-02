@@ -923,7 +923,6 @@ class RollAssignController {
             }
             // ── Update DB record by ObjectId ──────────────────────────
             if (mergedIntoExisting) {
-                await ClusterMatch.findByIdAndDelete(id);
                 const allFinalFiles = fs.existsSync(folderPath) ? (await fsPromises.readdir(folderPath)).filter(f => /\.(jpg|jpeg|png|webp)$/i.test(f)).sort() : [];
                 
                 const merged = {
