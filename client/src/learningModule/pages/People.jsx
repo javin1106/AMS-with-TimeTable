@@ -33,7 +33,7 @@ import {
   useToast,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
-import { EmptyState, ErrorState, Loading, SectionCard } from '../components/common';
+import { EmptyState, ErrorState, Loading, SectionCard, buttonTextStyles } from '../components/common';
 import { formatDate, initials, relativeTime } from '../format';
 
 function InviteModal({ isOpen, onClose, classId, onDone }) {
@@ -341,25 +341,28 @@ function PersonRow({ member, isTeacher, isOwner, classId, onChanged, onViewProgr
           </MenuButton>
           <MenuList>
             {member.role === 'student' && (
-              <MenuItem onClick={() => onViewProgress(member)}>View progress</MenuItem>
+              <MenuItem {...buttonTextStyles} onClick={() => onViewProgress(member)}>
+                View progress
+              </MenuItem>
             )}
             {member.role === 'student' && (
-              <MenuItem onClick={() => act(() => lmApi.updateMember(classId, member._id, { role: 'co-teacher' }), 'Promoted to co-teacher')}>
+              <MenuItem {...buttonTextStyles} onClick={() => act(() => lmApi.updateMember(classId, member._id, { role: 'co-teacher' }), 'Promoted to co-teacher')}>
                 Make co-teacher
               </MenuItem>
             )}
             {member.role === 'co-teacher' && (
-              <MenuItem onClick={() => act(() => lmApi.updateMember(classId, member._id, { role: 'student' }), 'Changed to student')}>
+              <MenuItem {...buttonTextStyles} onClick={() => act(() => lmApi.updateMember(classId, member._id, { role: 'student' }), 'Changed to student')}>
                 Make student
               </MenuItem>
             )}
-            <MenuItem onClick={() => act(() => lmApi.updateMember(classId, member._id, { muted: !member.muted }), member.muted ? 'Unmuted' : 'Muted')}>
+            <MenuItem {...buttonTextStyles} onClick={() => act(() => lmApi.updateMember(classId, member._id, { muted: !member.muted }), member.muted ? 'Unmuted' : 'Muted')}>
               {member.muted ? 'Allow posting' : 'Mute (no posts or comments)'}
             </MenuItem>
             {isOwner && member.role !== 'teacher' && (
               <>
                 <MenuDivider />
                 <MenuItem
+                  {...buttonTextStyles}
                   onClick={() => {
                     // eslint-disable-next-line no-alert
                     if (window.confirm(`Transfer ownership of this class to ${member.name}?`)) {

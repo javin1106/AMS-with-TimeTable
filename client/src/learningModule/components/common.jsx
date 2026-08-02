@@ -16,6 +16,18 @@ import {
 } from '@chakra-ui/react';
 import { formatDateTime, relativeTime } from '../format';
 
+/**
+ * The text colour a bare-button control has to state for itself.
+ *
+ * Chakra renders MenuItem and AccordionButton as plain `<button>`s and its
+ * theme sets no colour on them, so they take whatever they inherit — except a
+ * global `button { color: #fff }` in timetableadmin/Timetable.css matches the
+ * element directly, and a matched rule beats an inherited value however far
+ * away it was written. The result is white text on a white menu. Spread this
+ * onto any such control that is not already saying its own colour.
+ */
+export const buttonTextStyles = { color: 'gray.800' };
+
 /** Consistent loading state for every panel in the module. */
 export function Loading({ label = 'Loading…', minH = '200px' }) {
   return (
