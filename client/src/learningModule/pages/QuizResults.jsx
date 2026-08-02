@@ -43,7 +43,7 @@ import {
   useToast,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
-import { EmptyState, ErrorState, Loading, SectionCard, StatTile } from '../components/common';
+import { EmptyState, ErrorState, Loading, SectionCard, StatTile, buttonTextStyles } from '../components/common';
 import { richTextToPlain } from '../richTextUtils';
 import { formatDateTime } from '../format';
 
@@ -99,10 +99,12 @@ function AttemptActions({ attempt, onAct }) {
         ⋯
       </MenuButton>
       <MenuList fontSize="sm">
-        <MenuItem onClick={() => onAct('continue')}>
+        <MenuItem {...buttonTextStyles} onClick={() => onAct('continue')}>
           {attempt.status === 'in_progress' ? '⏱ Give more time' : ACTIONS.continue.label}
         </MenuItem>
-        <MenuItem onClick={() => onAct('restart')}>{ACTIONS.restart.label}</MenuItem>
+        <MenuItem {...buttonTextStyles} onClick={() => onAct('restart')}>
+          {ACTIONS.restart.label}
+        </MenuItem>
         <MenuDivider />
         <MenuItem color="red.600" onClick={() => onAct('delete')}>
           {ACTIONS.delete.label}

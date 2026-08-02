@@ -21,7 +21,7 @@ import {
 import lmApi from '../api/lmApi';
 import { AttachmentList } from '../components/Attachments';
 import MaterialModal from '../components/MaterialModal';
-import { EmptyState, ErrorState, Loading } from '../components/common';
+import { EmptyState, ErrorState, Loading, buttonTextStyles } from '../components/common';
 import { formatDate } from '../format';
 
 function TopicManager({ classId, topics, onChanged }) {
@@ -141,7 +141,9 @@ function MaterialRow({ item, classId, isTeacher, onChanged, onEdit }) {
           <Menu>
             <MenuButton as={IconButton} size="sm" variant="ghost" icon={<span>⋮</span>} aria-label="Material actions" />
             <MenuList>
-              <MenuItem onClick={() => onEdit(item)}>Edit</MenuItem>
+              <MenuItem {...buttonTextStyles} onClick={() => onEdit(item)}>
+                Edit
+              </MenuItem>
               <MenuItem color="red.600" onClick={remove}>
                 Delete
               </MenuItem>

@@ -24,7 +24,7 @@ import {
 } from '@chakra-ui/react';
 
 import lmApi from '../api/lmApi';
-import { ErrorState, Loading, SectionCard, StatTile } from '../components/common';
+import { ErrorState, Loading, SectionCard, StatTile, buttonTextStyles } from '../components/common';
 import { formatDateTime } from '../format';
 import { richTextToPlain } from '../richTextUtils';
 import ShortResults from '../components/ShortResults';
@@ -191,7 +191,7 @@ export default function ShortReport() {
         <Accordion allowMultiple>
           {slides.map((slide) => (
             <AccordionItem key={slide.slideId}>
-              <AccordionButton>
+              <AccordionButton {...buttonTextStyles}>
                 <HStack flex="1" spacing={3} textAlign="left">
                   <Badge>{slide.index + 1}</Badge>
                   <Text fontSize="sm" flex="1" noOfLines={1}>

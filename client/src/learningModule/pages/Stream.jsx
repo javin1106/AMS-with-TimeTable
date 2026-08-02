@@ -27,7 +27,7 @@ import CommentThread from '../components/CommentThread';
 import RichText from '../components/RichText';
 import RichTextEditor from '../components/RichTextEditor';
 import { isRichTextEmpty } from '../richTextUtils';
-import { DueBadge, EmptyState, ErrorState, Loading, StateBadge } from '../components/common';
+import { DueBadge, EmptyState, ErrorState, Loading, StateBadge, buttonTextStyles } from '../components/common';
 import { WORK_TYPE_META, relativeTime } from '../format';
 
 function Composer({ classId, onPosted }) {
@@ -210,7 +210,11 @@ function AnnouncementCard({ item, classId, isTeacher, me, onChanged }) {
           <Menu>
             <MenuButton as={IconButton} size="sm" variant="ghost" icon={<span>⋮</span>} aria-label="Post actions" />
             <MenuList>
-              {isTeacher && <MenuItem onClick={togglePin}>{item.pinned ? 'Unpin' : 'Pin to top'}</MenuItem>}
+              {isTeacher && (
+                <MenuItem {...buttonTextStyles} onClick={togglePin}>
+                  {item.pinned ? 'Unpin' : 'Pin to top'}
+                </MenuItem>
+              )}
               <MenuItem color="red.600" onClick={remove}>
                 Delete post
               </MenuItem>

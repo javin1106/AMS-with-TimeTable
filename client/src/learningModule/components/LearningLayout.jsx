@@ -32,6 +32,7 @@ import lmApi from '../api/lmApi';
 import useStableNavigate from '../hooks/useStableNavigate';
 import { canCreateClass, isStudentOnly } from '../roles';
 import NotificationBell from './NotificationBell';
+import { buttonTextStyles } from './common';
 
 const NAV_ITEMS = [
   { to: '/learning', label: 'Classes', icon: '🏫', end: true },
@@ -359,7 +360,9 @@ export default function LearningLayout() {
                     </Text>
                   </Box>
                   <MenuDivider />
-                  <MenuItem onClick={handleLogout}>Log out</MenuItem>
+                  <MenuItem {...buttonTextStyles} onClick={handleLogout}>
+                    Log out
+                  </MenuItem>
                 </MenuList>
               </Menu>
             )}
