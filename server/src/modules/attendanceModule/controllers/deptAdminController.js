@@ -7,6 +7,7 @@ const StudentEmbedding = require('../../../models/attendanceModule/studentEmbedd
 const Subject = require('../../../models/subject');
 
 const ERP_PHOTOS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'erp_photos');
+const GROUND_TRUTH_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'ground_truth');
 
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -141,21 +142,45 @@ const getContext = async (req, res) => {
     });
 };
 
+const getCanonicalKey = (batchStr) => {
+    const parts = String(batchStr || '').split('_').filter(Boolean);
+    if (parts.length < 3) return String(batchStr).toUpperCase().replace(/[\s_-]+/g, '');
+    const degree = parts[0].toUpperCase();
+    const year = parts[parts.length - 1].toUpperCase();
+    const rawDept = parts.slice(1, -1).join('_').toUpperCase().replace(/[\s_-]+/g, '');
+    let deptKey = rawDept;
+    if (deptKey === 'ECE') deptKey = 'ELECTRONICSANDCOMMUNICATIONENGINEERING';
+    if (deptKey === 'CSE') deptKey = 'COMPUTERSCIENCEANDENGINEERING';
+    if (deptKey === 'ME' || deptKey === 'MECHANICAL') deptKey = 'MECHANICALENGINEERING';
+    if (deptKey === 'CE' || deptKey === 'CIVIL') deptKey = 'CIVILENGINEERING';
+    return `${degree}|${deptKey}|${year}`;
+};
+
 const getTodayAttendanceStats = async (req, res) => {
     try {
         // Dept-admins are locked to their own department. Full-access admins
         // see the whole institute, but may narrow to one via ?department=.
-        const department = req.attendanceFullAccess
+        const rawDepartment = req.attendanceFullAccess
             ? (req.query.department ? String(req.query.department).trim() : null)
             : req.attendanceDepartment;
+
+        const department = rawDepartment ? rawDepartment.replace(/_/g, ' ').trim() : null;
+        const selectedBatch = req.query.batch ? String(req.query.batch).trim() : null;
+
         const today = getCampusDate();
         const scoped = Boolean(department);
         const reportMatch = {
             date: today,
             ...(scoped ? { department: departmentRegex(department) } : {}),
+            ...(selectedBatch ? { batch: selectedBatch } : {}),
         };
-        const reportScope = scoped ? { department: departmentRegex(department) } : {};
-        const groundTruthScope = scoped ? { batch: batchDepartmentRegex(department) } : {};
+        const reportScope = {
+            ...(scoped ? { department: departmentRegex(department) } : {}),
+            ...(selectedBatch ? { batch: selectedBatch } : {}),
+        };
+        const groundTruthScope = selectedBatch
+            ? { batch: selectedBatch }
+            : (scoped ? { batch: batchDepartmentRegex(department) } : {});
 
         const [yearStats, statusStats, groundTruthStats, verificationStats, recentReports] = await Promise.all([
             AttendanceReport.aggregate([
@@ -213,7 +238,19 @@ const getTodayAttendanceStats = async (req, res) => {
                     $group: {
                         _id: null,
                         pending: {
-                            $sum: { $cond: [{ $eq: ['$approved', false] }, 1, 0] },
+                            $sum: {
+                                $cond: [
+                                    {
+                                        $or: [
+                                            { $and: [{ $eq: ['$status', 'matched'] }, { $eq: ['$approved', false] }] },
+                                            { $eq: ['$status', 'merged_unapproved'] },
+                                            { $eq: ['$status', 'flagged'] },
+                                        ],
+                                    },
+                                    1,
+                                    0,
+                                ],
+                            },
                         },
                         approved: {
                             $sum: { $cond: [{ $eq: ['$approved', true] }, 1, 0] },
@@ -264,6 +301,89 @@ const getTodayAttendanceStats = async (req, res) => {
                 .lean(),
         ]);
 
+        const canonicalMap = new Map();
+
+        const belongsToDept = (bName) => {
+            if (!department) return true;
+            const parsed = parseBatch(bName);
+            const targetKey = normalizeDepartmentKey(department);
+            const batchDeptKey = normalizeDepartmentKey(parsed.department);
+            return batchDeptKey === targetKey || batchDeptKey.includes(targetKey) || targetKey.includes(batchDeptKey);
+        };
+
+        if (selectedBatch) {
+            const cKey = getCanonicalKey(selectedBatch);
+            canonicalMap.set(cKey, new Set([selectedBatch]));
+        } else {
+            if (fs.existsSync(ERP_PHOTOS_DIR)) {
+                try {
+                    const entries = await fsPromises.readdir(ERP_PHOTOS_DIR, { withFileTypes: true });
+                    for (const entry of entries) {
+                        if (!entry.isDirectory()) continue;
+                        if (scoped && !belongsToDept(entry.name)) continue;
+                        const cKey = getCanonicalKey(entry.name);
+                        if (!canonicalMap.has(cKey)) canonicalMap.set(cKey, new Set());
+                        canonicalMap.get(cKey).add(entry.name);
+                    }
+                } catch (_) {}
+            }
+
+            if (fs.existsSync(GROUND_TRUTH_DIR)) {
+                try {
+                    const entries = await fsPromises.readdir(GROUND_TRUTH_DIR, { withFileTypes: true });
+                    for (const entry of entries) {
+                        if (!entry.isDirectory()) continue;
+                        if (scoped && !belongsToDept(entry.name)) continue;
+                        const cKey = getCanonicalKey(entry.name);
+                        if (!canonicalMap.has(cKey)) canonicalMap.set(cKey, new Set());
+                        canonicalMap.get(cKey).add(entry.name);
+                    }
+                } catch (_) {}
+            }
+
+            const dbBatches = await ClusterMatch.distinct('batch', groundTruthScope);
+            for (const b of dbBatches) {
+                if (!b) continue;
+                if (scoped && !belongsToDept(b)) continue;
+                const cKey = getCanonicalKey(b);
+                if (!canonicalMap.has(cKey)) canonicalMap.set(cKey, new Set());
+                canonicalMap.get(cKey).add(b);
+            }
+        }
+
+        let pendingAcquisition = 0;
+
+        for (const rawBatchSet of canonicalMap.values()) {
+            const combinedErpRollNos = new Set();
+            const combinedAcquiredSet = new Set();
+
+            for (const bName of rawBatchSet) {
+                const erpRolls = await getErpRollNosForBatch(bName);
+                erpRolls.forEach(r => combinedErpRollNos.add(r));
+
+                const batchAcquiredRollNos = await ClusterMatch.distinct('rollNo', {
+                    batch: bName,
+                    rollNo: { $nin: [null, ''] },
+                });
+                batchAcquiredRollNos.forEach(r => combinedAcquiredSet.add(String(r || '').trim().toUpperCase()));
+
+                const batchGtPath = path.join(GROUND_TRUTH_DIR, bName);
+                if (fs.existsSync(batchGtPath)) {
+                    try {
+                        const studentEntries = await fsPromises.readdir(batchGtPath, { withFileTypes: true });
+                        for (const sEntry of studentEntries) {
+                            if (!sEntry.isDirectory() || sEntry.name.startsWith('_') || /^person_\d+$/i.test(sEntry.name)) continue;
+                            combinedAcquiredSet.add(sEntry.name.trim().toUpperCase());
+                        }
+                    } catch (_) {}
+                }
+            }
+
+            for (const rollNo of combinedErpRollNos) {
+                if (!combinedAcquiredSet.has(rollNo)) pendingAcquisition += 1;
+            }
+        }
+
         const totals = statusStats[0] || {};
         const groundTruth = groundTruthStats[0] || {};
         const attendanceVerificationPending = verificationStats[0]?.pending || 0;
@@ -278,6 +398,7 @@ const getTodayAttendanceStats = async (req, res) => {
 
         res.json({
             department: department || 'Institute',
+            batch: selectedBatch || null,
             fullAccess: Boolean(req.attendanceFullAccess),
             date: today,
             attendancePct,
@@ -288,6 +409,7 @@ const getTodayAttendanceStats = async (req, res) => {
             sessions: totals.sessions || 0,
             groundTruthPending: groundTruth.pending || 0,
             groundTruthApproved: groundTruth.approved || 0,
+            pendingAcquisition,
             attendanceVerificationPending,
             matchAccuracy,
             byYear: yearStats
@@ -589,21 +711,21 @@ const getDeptMenus = async (req, res) => {
     try {
         const batch = await Batch.findOne({}).sort({ batchYear: -1 });
         const defaults = {
-    dashboard: true,
-    groundTruth: true,
-    rollAssignment: true,
-    erpUpload: true,
-    attendanceReports: true,
-    classVerification: true,
-    cameraRegistry: true,   // ← new
-    subjectEmbeddings: true,
-    livePreview: true,
-    gpuMetrics: true,       // ← new
-    confidenceMonitor: true,
-    erpOverrides: false,    // off by default — enable per-dept from Dept Menu Config
-    erpSync: false,         // off by default — enable per-dept from Dept Menu Config
-    helpManual: true,
-};
+            dashboard: true,
+            groundTruth: true,
+            rollAssignment: true,
+            erpUpload: true,
+            attendanceReports: true,
+            classVerification: true,
+            cameraRegistry: true,   // ← new
+            subjectEmbeddings: true,
+            livePreview: true,
+            gpuMetrics: true,       // ← new
+            confidenceMonitor: true,
+            erpOverrides: false,    // off by default — enable per-dept from Dept Menu Config
+            erpSync: false,         // off by default — enable per-dept from Dept Menu Config
+            helpManual: true,
+        };
         res.json({ deptMenus: batch?.deptMenus ?? defaults });
     } catch (error) {
         console.error('[DeptAdmin] getDeptMenus:', error);
