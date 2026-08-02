@@ -158,26 +158,39 @@ const getCanonicalKey = (batchStr) => {
 
 const getTodayAttendanceStats = async (req, res) => {
     try {
-        // Dept-admins are locked to their own department. Full-access admins
-        // see the whole institute, but may narrow to one via ?department=.
-        const rawDepartment = req.attendanceFullAccess
+        const department = req.attendanceFullAccess
             ? (req.query.department ? String(req.query.department).trim() : null)
             : req.attendanceDepartment;
 
-        const department = rawDepartment ? rawDepartment.replace(/_/g, ' ').trim() : null;
         const selectedBatch = req.query.batch ? String(req.query.batch).trim() : null;
 
         const today = getCampusDate();
         const scoped = Boolean(department);
-        const reportMatch = {
-            date: today,
+
+        // Build a base scope for department/batch selections (without date)
+        const baseScope = {
             ...(scoped ? { department: departmentRegex(department) } : {}),
             ...(selectedBatch ? { batch: selectedBatch } : {}),
         };
-        const reportScope = {
-            ...(scoped ? { department: departmentRegex(department) } : {}),
-            ...(selectedBatch ? { batch: selectedBatch } : {}),
+
+        // Use an $expr to handle both Date objects and string formats safely in Asia/Kolkata timezone
+        const dateEqualityExpr = {
+            $expr: {
+                $eq: [
+                    {
+                        $cond: [
+                            { $eq: [{ $type: '$date' }, 'date'] },
+                            { $dateToString: { date: '$date', format: '%Y-%m-%d', timezone: 'Asia/Kolkata' } },
+                            { $ifNull: ['$date', ''] },
+                        ],
+                    },
+                    today,
+                ],
+            },
         };
+
+        const reportMatch = Object.assign({}, baseScope, dateEqualityExpr);
+        const reportScope = baseScope;
         const groundTruthScope = selectedBatch
             ? { batch: selectedBatch }
             : (scoped ? { batch: batchDepartmentRegex(department) } : {});
@@ -224,10 +237,10 @@ const getTodayAttendanceStats = async (req, res) => {
                 {
                     $group: {
                         _id: null,
-                        present: { $sum: '$summary.present' },
-                        absent: { $sum: '$summary.absent' },
-                        review: { $sum: '$summary.review' },
-                        totalStudents: { $sum: '$summary.totalStudents' },
+                        present: { $sum: { $ifNull: ["$summary.present", 0] } },
+                        absent: { $sum: { $ifNull: ["$summary.absent", 0] } },
+                        review: { $sum: { $ifNull: ["$summary.review", 0] } },
+                        totalStudents: { $sum: { $ifNull: ["$summary.totalStudents", 0] } },
                         sessions: { $sum: 1 },
                     },
                 },
@@ -286,19 +299,18 @@ const getTodayAttendanceStats = async (req, res) => {
                     },
                 },
             ]),
-            // Overridden students still awaiting a dept-coordinator remark —
-            // "attendance verifications pending" (all dates, dept-scoped).
             AttendanceReport.aggregate([
                 { $match: { ...reportScope, 'finalReport.isOverridden': true } },
                 { $unwind: '$finalReport' },
                 { $match: { 'finalReport.isOverridden': true, 'finalReport.coordinatorVerified': { $ne: true } } },
                 { $count: 'pending' },
             ]),
-            AttendanceReport.find(reportScope)
-                .select('batch semester subject faculty room date timeSlot summary status')
-                .sort({ date: -1, created_at: -1 })
-                .limit(6)
-                .lean(),
+            AttendanceReport.aggregate([
+                { $match: reportMatch },
+                { $project: { batch: 1, semester: 1, subject: 1, faculty: 1, room: 1, date: 1, timeSlot: 1, summary: 1, status: 1, created_at: 1 } },
+                { $sort: { date: -1, created_at: -1 } },
+                { $limit: 6 },
+            ]),
         ]);
 
         const canonicalMap = new Map();
@@ -387,9 +399,12 @@ const getTodayAttendanceStats = async (req, res) => {
         const totals = statusStats[0] || {};
         const groundTruth = groundTruthStats[0] || {};
         const attendanceVerificationPending = verificationStats[0]?.pending || 0;
-        const attendancePct = totals.totalStudents > 0
-            ? Math.round((totals.present / totals.totalStudents) * 100)
-            : null;
+        
+        let attendancePct = null;
+        if (totals.totalStudents > 0) {
+            attendancePct = Math.round((totals.present / totals.totalStudents) * 100);
+        }
+
         const matchAccuracy = groundTruth.approvedWithConfidence > 0
             ? Math.round(
                 (groundTruth.approvedConfidenceTotal / groundTruth.approvedWithConfidence) * 100,
