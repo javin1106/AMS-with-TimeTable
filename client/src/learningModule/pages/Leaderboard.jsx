@@ -4,6 +4,13 @@ import {
   Avatar,
   Badge,
   Box,
+  Divider,
+  Drawer,
+  DrawerBody,
+  DrawerCloseButton,
+  DrawerContent,
+  DrawerHeader,
+  DrawerOverlay,
   Flex,
   HStack,
   Heading,
@@ -37,8 +44,9 @@ import { formatDate } from '../format';
 
 const MEDALS = ['🥇', '🥈', '🥉'];
 
-function Row({ row, highlight }) {
+function Row({ row, highlight, onOpen }) {
   const bg = useColorModeValue('purple.50', 'purple.900');
+  const hoverBg = useColorModeValue('gray.50', 'whiteAlpha.100');
   return (
     <Flex
       align="center"
@@ -49,6 +57,19 @@ function Row({ row, highlight }) {
       bg={highlight ? bg : 'transparent'}
       borderWidth={highlight ? '1px' : 0}
       borderColor="purple.200"
+      // A row is only a button when there is something behind it to read:
+      // staff may open anybody, a student only themselves.
+      {...(onOpen
+        ? {
+            as: 'button',
+            type: 'button',
+            onClick: onOpen,
+            w: '100%',
+            textAlign: 'left',
+            cursor: 'pointer',
+            _hover: { bg: highlight ? bg : hoverBg },
+          }
+        : {})}
     >
       <Box minW="34px" fontSize="lg" textAlign="center">
         {MEDALS[row.rank - 1] || (
@@ -80,7 +101,7 @@ function Row({ row, highlight }) {
   );
 }
 
-function Board({ data }) {
+function Board({ data, onOpenStudent }) {
   if (!data.rows.length) {
     return (
       <EmptyState
@@ -93,7 +114,14 @@ function Board({ data }) {
   return (
     <VStack align="stretch" spacing={1}>
       {data.rows.map((row) => (
-        <Row key={String(row.studentId)} row={row} highlight={row.isMe} />
+        <Row
+          key={String(row.studentId)}
+          row={row}
+          highlight={row.isMe}
+          // Anybody may open anybody: the badges are the class's to see. What
+          // is behind them narrows in the response, not here.
+          onOpen={onOpenStudent ? () => onOpenStudent(row) : undefined}
+        />
       ))}
       {/* Somebody outside the visible top still wants to know where they are —
           a board that simply omits you is one you stop opening. */}
@@ -102,7 +130,20 @@ function Board({ data }) {
           <Text fontSize="xs" color="gray.400" textAlign="center" py={1}>
             ⋯
           </Text>
-          <Row row={{ rank: data.me.rank || '—', studentName: 'You', points: data.me.points, badges: data.me.badges.length }} highlight />
+          <Row
+            row={{
+              rank: data.me.rank || '—',
+              studentName: 'You',
+              points: data.me.points,
+              badges: data.me.badges.length,
+            }}
+            highlight
+            onOpen={
+              onOpenStudent && data.me.studentId
+                ? () => onOpenStudent({ studentId: data.me.studentId, studentName: 'You', rank: data.me.rank })
+                : undefined
+            }
+          />
         </>
       )}
     </VStack>
@@ -120,6 +161,246 @@ const KIND_LABELS = {
 };
 
 /**
+ * One student's badges and the split of their points, behind a row on the
+ * table.
+ *
+ * A leaderboard answers "who" and refuses to answer "why", which is the first
+ * thing anybody asks of it — a teacher looking at a quiet student, a student
+ * looking at their own total, or one classmate wondering how another got the
+ * rare one.
+ *
+ * How much of it fills in is the server's call, not this component's: everybody
+ * gets the badges, and `scope: 'full'` comes back with the split and the ledger
+ * for the two people entitled to read them. So the sections below render on
+ * what arrived rather than on who is looking.
+ *
+ * Loaded when opened rather than with the board: it is one student out of fifty
+ * and nobody opens all of them.
+ */
+function StudentPoints({ classId, student, onClose }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const studentId = student?.studentId;
+
+  useEffect(() => {
+    if (!studentId) return undefined;
+    // Guards against a slow response for a row the reader has already moved
+    // on from landing in the panel for the next one.
+    let live = true;
+    setData(null);
+    setError(null);
+    lmApi
+      .studentPoints(classId, studentId)
+      .then((res) => live && setData(res))
+      .catch((err) => live && setError(err));
+    return () => {
+      live = false;
+    };
+  }, [classId, studentId]);
+
+  const earned = new Set((data?.badges || []).map((badge) => badge.id));
+  const unearned = (data?.catalogue || []).filter((badge) => !earned.has(badge.id));
+  const byKind = data?.byKind || [];
+  const history = data?.history || [];
+  // The split is over the ledger, so it sums to the same total the table shows.
+  const total = byKind.reduce((sum, row) => sum + row.points, 0);
+
+  return (
+    <Drawer isOpen={Boolean(student)} onClose={onClose} placement="right" size="md">
+      <DrawerOverlay />
+      <DrawerContent>
+        <DrawerCloseButton />
+        <DrawerHeader pb={2}>
+          <HStack spacing={3}>
+            <Avatar size="sm" name={data?.studentName || student?.studentName} />
+            <Box minW={0}>
+              <Text noOfLines={1}>{data?.studentName || student?.studentName}</Text>
+              {student?.rank && (
+                <Text fontSize="xs" color="gray.500" fontWeight="400">
+                  #{student.rank} on this table
+                </Text>
+              )}
+            </Box>
+          </HStack>
+        </DrawerHeader>
+
+        <DrawerBody pb={8}>
+          {error ? (
+            <ErrorState error={error} />
+          ) : !data ? (
+            <Loading label="Adding it up…" />
+          ) : (
+            <VStack align="stretch" spacing={5}>
+              <SimpleGrid columns={3} spacing={3}>
+                <Box>
+                  <Text fontSize="2xl" fontWeight="700">
+                    {data.points}
+                  </Text>
+                  <Text fontSize="xs" color="gray.500">
+                    points all time
+                  </Text>
+                </Box>
+                <Box>
+                  <Text fontSize="2xl" fontWeight="700" color="green.500">
+                    {data.weeklyPoints}
+                  </Text>
+                  <Text fontSize="xs" color="gray.500">
+                    this week
+                  </Text>
+                </Box>
+                <Box>
+                  <Text fontSize="2xl" fontWeight="700" color="purple.500">
+                    {data.badges.length}
+                  </Text>
+                  <Text fontSize="xs" color="gray.500">
+                    of {data.catalogue.length} badges
+                  </Text>
+                </Box>
+              </SimpleGrid>
+
+              {data.scope === 'full' && (
+                <Box>
+                  <Heading size="xs" mb={2}>
+                    Where the points came from
+                  </Heading>
+                  {byKind.length === 0 ? (
+                    <Text fontSize="sm" color="gray.500">
+                      Nothing earned in this class yet.
+                    </Text>
+                  ) : (
+                    <VStack align="stretch" spacing={2}>
+                      {byKind.map((row) => (
+                        <Box key={row.kind}>
+                          <Flex justify="space-between" fontSize="sm" mb={1}>
+                            <Text>{KIND_LABELS[row.kind] || row.kind}</Text>
+                            <Text color="gray.500">
+                              {row.points} pts · {row.awards} time{row.awards === 1 ? '' : 's'}
+                            </Text>
+                          </Flex>
+                          <Box bg="gray.100" borderRadius="full" h="6px" overflow="hidden">
+                            <Box
+                              bg="purple.400"
+                              h="100%"
+                              w={`${total ? Math.round((row.points / total) * 100) : 0}%`}
+                            />
+                          </Box>
+                        </Box>
+                      ))}
+                    </VStack>
+                  )}
+                </Box>
+              )}
+
+              <Divider />
+
+              <Box>
+                <Heading size="xs" mb={2}>
+                  Badges earned
+                </Heading>
+                {data.badges.length === 0 ? (
+                  <Text fontSize="sm" color="gray.500">
+                    None yet.
+                  </Text>
+                ) : (
+                  <VStack align="stretch" spacing={1}>
+                    {data.badges.map((badge) => (
+                      <Flex key={badge.id} gap={3} align="flex-start" py={1.5}>
+                        <Text fontSize="xl">{badge.emoji}</Text>
+                        <Box flex="1" minW={0}>
+                          <HStack spacing={2}>
+                            <Text fontSize="sm" fontWeight="600">
+                              {badge.name}
+                            </Text>
+                            {badge.rare && (
+                              <Badge colorScheme="orange" fontSize="0.55rem">
+                                rare
+                              </Badge>
+                            )}
+                          </HStack>
+                          {/* What it was actually for — "#1 of the all-time
+                              table" says more than the badge name repeated. */}
+                          <Text fontSize="xs" color="gray.600">
+                            {badge.detail || badge.hint}
+                          </Text>
+                        </Box>
+                        <Text fontSize="xs" color="gray.400" whiteSpace="nowrap">
+                          {formatDate(badge.earnedAt)}
+                        </Text>
+                      </Flex>
+                    ))}
+                  </VStack>
+                )}
+
+                {unearned.length > 0 && (
+                  <>
+                    <Text fontSize="xs" color="gray.500" mt={3} mb={1}>
+                      Still to get
+                    </Text>
+                    <Flex gap={1.5} wrap="wrap">
+                      {unearned.map((badge) => (
+                        <Tooltip key={badge.id} label={`${badge.name} — ${badge.hint}`}>
+                          <Text fontSize="lg" filter="grayscale(1)" opacity={0.45}>
+                            {badge.emoji}
+                          </Text>
+                        </Tooltip>
+                      ))}
+                    </Flex>
+                  </>
+                )}
+              </Box>
+
+              {/* Said out loud, so an empty-looking panel does not read as a
+                  student who has done nothing. */}
+              {data.scope !== 'full' && (
+                <Text fontSize="xs" color="gray.500">
+                  Badges are for the class to see. Where somebody earned their points is between
+                  them and the teacher.
+                </Text>
+              )}
+
+              {history.length > 0 && (
+                <>
+                  <Divider />
+                  <Box>
+                    <Heading size="xs" mb={2}>
+                      Recent awards
+                    </Heading>
+                    <VStack align="stretch" spacing={0}>
+                      {history.map((row) => (
+                        <Flex
+                          key={row._id}
+                          gap={3}
+                          align="baseline"
+                          py={2}
+                          borderBottomWidth="1px"
+                          borderColor="gray.100"
+                        >
+                          <Box flex="1" minW={0}>
+                            <Text fontSize="sm" noOfLines={1}>
+                              {row.reason}
+                            </Text>
+                            <Text fontSize="xs" color="gray.500">
+                              {KIND_LABELS[row.kind] || row.kind} · {formatDate(row.created_at)}
+                            </Text>
+                          </Box>
+                          <Badge colorScheme={row.points > 0 ? 'purple' : 'gray'} borderRadius="full">
+                            {row.points > 0 ? `+${row.points}` : row.points}
+                          </Badge>
+                        </Flex>
+                      ))}
+                    </VStack>
+                  </Box>
+                </>
+              )}
+            </VStack>
+          )}
+        </DrawerBody>
+      </DrawerContent>
+    </Drawer>
+  );
+}
+
+/**
  * What staff see instead.
  *
  * A teacher is not on the table and earns nothing, so "where you stand" was
@@ -128,7 +409,8 @@ const KIND_LABELS = {
  * who has gone quiet — so the summary leads, and the tail of the table is given
  * as much room as the top of it.
  */
-function TeacherView({ week, all }) {
+function TeacherView({ week, all, classId }) {
+  const [opened, setOpened] = useState(null);
   const summary = week?.summary;
   if (!summary) return <ErrorState error={{ message: 'No summary available.' }} />;
 
@@ -210,7 +492,19 @@ function TeacherView({ week, all }) {
           ) : (
             <VStack align="stretch" spacing={1}>
               {summary.quietest.map((row) => (
-                <Flex key={String(row.studentId)} justify="space-between" px={2} py={1.5}>
+                <Flex
+                  key={String(row.studentId)}
+                  as="button"
+                  type="button"
+                  onClick={() => setOpened(row)}
+                  w="100%"
+                  justify="space-between"
+                  align="center"
+                  px={2}
+                  py={1.5}
+                  borderRadius="md"
+                  _hover={{ bg: 'blackAlpha.50' }}
+                >
                   <Text fontSize="sm">{row.studentName}</Text>
                   <Badge colorScheme="gray" borderRadius="full">
                     {row.points}
@@ -242,7 +536,7 @@ function TeacherView({ week, all }) {
         </SectionCard>
       </SimpleGrid>
 
-      <SectionCard title="The table">
+      <SectionCard title="The table" subtitle="Open anybody for their badges and where their points came from">
         <Tabs colorScheme="purple" size="sm" isLazy>
           <TabList>
             <Tab>This week</Tab>
@@ -250,14 +544,16 @@ function TeacherView({ week, all }) {
           </TabList>
           <TabPanels>
             <TabPanel px={0}>
-              <Board data={week} />
+              <Board data={week} onOpenStudent={setOpened} />
             </TabPanel>
             <TabPanel px={0}>
-              <Board data={all} />
+              <Board data={all} onOpenStudent={setOpened} />
             </TabPanel>
           </TabPanels>
         </Tabs>
       </SectionCard>
+
+      <StudentPoints classId={classId} student={opened} onClose={() => setOpened(null)} />
     </VStack>
   );
 }
@@ -266,6 +562,7 @@ export default function Leaderboard() {
   const { classId } = useOutletContext();
   const [week, setWeek] = useState(null);
   const [all, setAll] = useState(null);
+  const [opened, setOpened] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -294,7 +591,7 @@ export default function Leaderboard() {
 
   // Staff earn nothing and appear on neither table, so showing them "where you
   // stand" was showing them a game they are not playing. They get the class.
-  if (week?.isTeacher) return <TeacherView week={week} all={all} />;
+  if (week?.isTeacher) return <TeacherView week={week} all={all} classId={classId} />;
 
   const me = week?.me;
   const earned = new Set((me?.badges || []).map((badge) => badge.id));
@@ -379,7 +676,7 @@ export default function Leaderboard() {
         </SimpleGrid>
       </SectionCard>
 
-      <SectionCard title="Leaderboard">
+      <SectionCard title="Leaderboard" subtitle="Tap anybody to see the badges they hold">
         <Tabs colorScheme="purple" size="sm" isLazy>
           <TabList>
             <Tab>
@@ -397,14 +694,16 @@ export default function Leaderboard() {
               <HStack fontSize="xs" color="gray.500" mb={2}>
                 <Text>Resets every Monday, so a slow week is never the end of it.</Text>
               </HStack>
-              <Board data={week} />
+              <Board data={week} onOpenStudent={setOpened} />
             </TabPanel>
             <TabPanel px={0}>
-              <Board data={all} />
+              <Board data={all} onOpenStudent={setOpened} />
             </TabPanel>
           </TabPanels>
         </Tabs>
       </SectionCard>
+
+      <StudentPoints classId={classId} student={opened} onClose={() => setOpened(null)} />
 
       <Heading size="xs" color="gray.500" fontWeight="500">
         Points come from turning work in, sitting quizzes, working through coding exercises and joining

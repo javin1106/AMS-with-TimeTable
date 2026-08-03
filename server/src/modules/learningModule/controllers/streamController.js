@@ -247,7 +247,14 @@ exports.updateAnnouncement = async (req, res) => {
   if (req.body.audience !== undefined) announcement.audience = req.body.audience;
   if (req.body.pinned !== undefined && req.lmIsTeacher) announcement.pinned = Boolean(req.body.pinned);
 
-  if (req.body.publish === true && announcement.status !== "published") {
+  // Publishing here is the same event as posting: a draft the teacher was
+  // still writing, or a scheduled item brought forward, now exists for the
+  // class. It used to flip the status and stop — so a post written as a draft
+  // first, which is how most long posts are written, reached the stream with
+  // no notification and no email, while the same text posted directly
+  // announced itself to everyone.
+  const published = req.body.publish === true && announcement.status !== "published";
+  if (published) {
     announcement.status = "published";
     announcement.publishedAt = new Date();
     announcement.scheduledFor = null;
@@ -255,6 +262,22 @@ exports.updateAnnouncement = async (req, res) => {
 
   announcement.updated_at = new Date();
   await announcement.save();
+
+  if (published) {
+    await LmClass.updateOne({ _id: req.lmClass._id }, { $inc: { "stats.announcementCount": 1 } });
+    await notifyClass({
+      klass: req.lmClass,
+      userIds: announcement.audience.length ? announcement.audience : null,
+      excludeUserId: announcement.authorId,
+      type: "announcement",
+      title: `New post in ${req.lmClass.name}`,
+      body: announcement.text,
+      link: `/learning/class/${req.lmClass._id}`,
+      actorName: announcement.authorName,
+      email: true,
+    });
+  }
+
   return res.json(announcement);
 };
 

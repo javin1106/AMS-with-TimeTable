@@ -979,9 +979,10 @@ into) an email body.
 Every mail this module sends uses the platform frame in `notifyService.emailShell`
 — the same 480px card, teal banner, `Dear User,` greeting and footer as the
 forgot-password OTP mail (`otpbody.ejs`) and the welcome mail
-(`usermanagement/welcomeMailer`). The banner carries the `XCEED — NIT Jalandhar`
-wordmark by default; the invitation overrides it with `Welcome to XCEED
-Learning!`, since for most recipients it is their first mail from the module.
+(`usermanagement/welcomeMailer`). The banner carries `XCEED Learning` by default
+— this is Learning module mail, and that is the product the recipient is being
+told about; the invitation overrides it with `Welcome to XCEED Learning!`, since
+for most recipients it is their first mail from the module.
 Links are absolutised against the request origin
 (falling back to `FRONTEND_URL`, then `https://xceed.nitj.ac.in`): a stored
 in-app path such as `/learning/class/:id` is not resolvable from a mail client.
@@ -990,8 +991,30 @@ Two distinct kinds of mail, gated differently:
 
 | Mail | Trigger | Gate |
 | --- | --- | --- |
-| Post/notification digest | someone posts to the class | `settings.emailNotifications` |
+| Post notification | anything is posted to the class | `settings.emailNotifications` |
 | Invitation | a teacher adds someone by email | none — always sent |
+
+**Every post type mails the class**: announcements (including a draft published
+later), coursework, materials, quizzes, tutorials, notebooks, audio study
+material, discussions and a live Short starting. Comments and anonymous feedback
+do not — they are replies and staff traffic, not posts.
+
+Post mail goes out **one message per recipient**, addressed to that student. It
+used to be one message per fifty with the class in `bcc` and the `to:` pointing
+back at the sending account, which the relay accepted and the receiving side
+filed as junk — the failure mode being that nothing errored and no student got
+anything. `sendBulkMail` reports `{ sent, failed }` and `notifyClass` logs both
+per post, so a delivery problem is readable in the log instead of inferred from
+students saying they never heard.
+
+Three things used to suppress this mail silently, all of them fixed and all of
+them worth not reintroducing: `muted: false` in the audience query (Mongo does
+not match a missing field against `false`, so pre-`muted` rows were read as
+muted), a truthy test on `settings.emailNotifications` (a class document without
+the field read as opted out), and sharing one `try` block with the in-app
+notification insert (one rejected row cancelled the whole class's mail). A
+member whose membership row carries no denormalised `email` is now looked up
+from their account rather than skipped.
 
 The invitation is transactional, not a digest, so it is **not** gated on
 `settings.emailNotifications` ("email the class when something is posted"). It

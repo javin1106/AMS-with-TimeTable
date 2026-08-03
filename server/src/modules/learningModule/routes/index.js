@@ -253,6 +253,10 @@ classRouter.get("/notebooks/:notebookId/attempts", requireTeacher, asyncRoute(no
    read is a report, not a game. */
 classRouter.get("/leaderboard", asyncRoute(leaderboardController.getLeaderboard));
 classRouter.get("/my-points", asyncRoute(leaderboardController.getMyPoints));
+// One student's badges and the split of their points. Not staff-gated at the
+// router, because a student reading their own is the same request — the
+// controller is where "mine, or anybody's if I am staff" is decided.
+classRouter.get("/students/:studentId/points", asyncRoute(leaderboardController.getStudentPoints));
 classRouter.get("/points-guide", asyncRoute(leaderboardController.getPointsGuide));
 
 /* ── discussion forum ───────────────────────────────────────────────────

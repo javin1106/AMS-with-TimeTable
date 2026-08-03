@@ -337,15 +337,17 @@ const lmApi = {
   leaderboard: (classId, scope = 'week') =>
     request(`/classes/${classId}/leaderboard?scope=${scope}`),
   myPoints: (classId) => request(`/classes/${classId}/my-points`),
+  // Staff may ask for anybody on the table; a student only for themselves.
+  studentPoints: (classId, studentId) => request(`/classes/${classId}/students/${studentId}/points`),
   pointsGuide: (classId) => request(`/classes/${classId}/points-guide`),
 
-  /* ---- profile and bug reports (outside any class) ---- */
+  /* ---- profile and bugs/suggestions (outside any class) ---- */
   myProfile: () => request('/me/profile'),
   reportBug: (body) => request('/bugs', { method: 'POST', body }),
   myBugReports: () => request('/bugs/mine'),
   // 403s for anyone who is not a platform admin; the page uses that to decide
   // whether to show the queue at all.
-  allBugReports: (status) => request(`/bugs${qs({ status })}`),
+  allBugReports: ({ status, kind } = {}) => request(`/bugs${qs({ status, kind })}`),
   reviewBug: (reportId, body) => request(`/bugs/${reportId}`, { method: 'PATCH', body }),
 
   /* ---- discussion forum ---- */

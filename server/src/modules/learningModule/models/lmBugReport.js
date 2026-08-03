@@ -21,6 +21,19 @@ const lmBugReportSchema = new mongoose.Schema({
   // different bugs and the report rarely says which.
   reporterRole: { type: String, default: "" },
 
+  /**
+   * What kind of thing this is.
+   *
+   * The queue used to hold only defects, but the same sidebar entry is where
+   * people went to say "this works, but it would be better if…" — so the
+   * suggestions arrived filed as bugs and an admin had to read the whole thing
+   * to tell them apart. Asking once, at submission, is cheaper than triaging.
+   *
+   * Points are paid on the same terms either way: a suggestion an admin adopts
+   * is worth as much as a bug an admin confirms.
+   */
+  kind: { type: String, enum: ["bug", "suggestion"], default: "bug", index: true },
+
   title: { type: String, required: true, trim: true },
   description: { type: String, default: "" },
   // Where they were. Not parsed, just recorded — the single most useful line in

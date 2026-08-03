@@ -96,6 +96,22 @@ describe("POST /auth/forgot-password", () => {
     expect(mailSender).toHaveBeenCalledTimes(1);
   });
 
+  // mailSender resolves to undefined rather than throwing when the send fails.
+  // The route used to discard sendOTP's result and answer "OTP sent
+  // successfully" regardless, so a user whose mail never left was told to go
+  // wait for a code that did not exist.
+  it("reports failure when the OTP email could not be sent", async () => {
+    await createUser();
+    mailSender.mockResolvedValueOnce(undefined);
+
+    const res = await request(app)
+      .post("/auth/forgot-password")
+      .send({ email: EMAIL });
+
+    expect(res.status).toBe(502);
+    expect(res.body.success).toBe(false);
+  });
+
   it("issues a fresh OTP on every request instead of reusing a stale one", async () => {
     await createUser();
     await request(app).post("/auth/forgot-password").send({ email: EMAIL });

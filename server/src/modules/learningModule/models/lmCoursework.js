@@ -1,15 +1,18 @@
 const mongoose = require("mongoose");
 const { attachmentSchema } = require("./lmClass");
 
-// One collection backs all four Classwork item types. They share ~90% of their
+// One collection backs every Classwork item type. They share ~90% of their
 // fields (title, instructions, attachments, topic, scheduling, audience) and
 // the Classwork page always lists them together ordered by date, so splitting
-// them into four collections would mean a four-way merge on every read.
+// them into one collection each would mean an n-way merge on every read.
 const lmCourseworkSchema = new mongoose.Schema({
   classId: { type: mongoose.Schema.Types.ObjectId, ref: "lm_class", required: true, index: true },
   workType: {
     type: String,
-    enum: ["assignment", "quiz", "question", "material"],
+    // "coding" is not a type a teacher picks on the Classwork page — it is set
+    // by publishing a notebook, which is the only route that fills in the
+    // `notebookId` a coding row needs to open onto the exercise.
+    enum: ["assignment", "quiz", "question", "material", "coding"],
     default: "assignment",
     index: true,
   },
@@ -52,10 +55,14 @@ const lmCourseworkSchema = new mongoose.Schema({
   // workType === "quiz"
   quizId: { type: mongoose.Schema.Types.ObjectId, ref: "lm_quiz", default: null },
 
-  // A coding notebook mirrored into Classwork. Same idea as `quizId`: the row
-  // carries the due date and the gradebook link, but the work itself lives on
-  // its own page, and a calendar entry that sent the class to the gradebook row
-  // instead of the exercise would be a dead end.
+  // workType === "coding": the notebook mirrored into Classwork. Same idea as
+  // `quizId` — the row carries the due date and the gradebook link, but the work
+  // itself lives on its own page, and a calendar entry that sent the class to
+  // the gradebook row instead of the exercise would be a dead end.
+  //
+  // Rows published before "coding" existed as a workType are stored as
+  // assignments carrying this id; they are corrected on the next publish, and
+  // the client reads either shape.
   notebookId: { type: mongoose.Schema.Types.ObjectId, ref: "lm_notebook", default: null },
 
   // Set when the item was produced by the audio → AI pipeline, so the source

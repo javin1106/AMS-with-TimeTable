@@ -46,9 +46,13 @@ function getTransport() {
     auth: { user, pass },
     tls: { rejectUnauthorized: false, minVersion: 'TLSv1.2' },
 
-    connectionTimeout: 60000,
-    greetingTimeout: 30000,
-    socketTimeout: 60000,
+    // Kept short on purpose. A blocked outbound SMTP port does not refuse the
+    // connection, it black-holes it — so a 60s connect timeout across three
+    // retries left /auth/forgot-password hanging for ~3 minutes with the button
+    // still spinning. Failing in seconds lets the caller show a real error.
+    connectionTimeout: 15000,
+    greetingTimeout: 10000,
+    socketTimeout: 30000,
 
     // The pool is the point: connections are opened once and kept, rather than
     // re-authenticated per message. `rateLimit` keeps a large invite batch from

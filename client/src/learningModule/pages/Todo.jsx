@@ -15,10 +15,10 @@ import {
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import { DueBadge, EmptyState, ErrorState, Loading, StateBadge } from '../components/common';
-import { WORK_TYPE_META } from '../format';
+import { courseworkMeta } from '../format';
 
 function WorkRow({ entry, showStudent }) {
-  const meta = WORK_TYPE_META[entry.workType] || WORK_TYPE_META.assignment;
+  const meta = courseworkMeta(entry);
   const link = entry.class
     ? `/learning/class/${entry.class._id}/work/${entry.courseworkId}`
     : '/learning';

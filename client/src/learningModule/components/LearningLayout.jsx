@@ -43,10 +43,10 @@ const NAV_ITEMS = [
   // work rather than doing it, and the leaderboard leaves them off entirely —
   // so a "My progress" that was always empty would only invite the question.
   { to: '/learning/profile', label: 'My progress', icon: '🎖️', studentOnly: true },
-  // Last, and separated below. Reporting something broken is not navigation —
-  // it is what you do *instead* of what you came here for, and it has to be
-  // reachable from wherever the thing broke.
-  { to: '/learning/bugs', label: 'Report a bug', icon: '🛠️', foot: true },
+  // Last, and separated below. Reporting something broken — or asking for
+  // something better — is not navigation: it is what you do *instead* of what
+  // you came here for, and it has to be reachable from wherever the thing broke.
+  { to: '/learning/bugs', label: 'Bug / Suggestion', icon: '🛠️', foot: true },
 ];
 
 /**

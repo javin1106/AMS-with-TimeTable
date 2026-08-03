@@ -80,8 +80,11 @@ function weekStartOf(key) {
  *
  * Weighted by what the task actually costs a student, so an evening on a coding
  * exercise cannot be matched by a afternoon of comments. The ladder, heaviest
- * first: coding exercise, assignment, quiz, tutorial, feedback, live Short,
- * comment. Flat values rather than a share of the task's marks — a student
+ * first: assignment, coding exercise, quiz, tutorial, feedback, live Short,
+ * comment. A coding exercise pays the most in total — its base is modest and
+ * the rest is the completion bonus, so the points follow working it through
+ * rather than opening it. Flat values rather than a share of the task's marks —
+ * a student
  * should be able to look at this and know what something is worth before they
  * do it, and "40% of the marks available" is not that.
  *
@@ -89,8 +92,9 @@ function weekStartOf(key) {
  * which is the opposite of what a participation score is for.
  */
 const POINTS = {
-  // The heaviest thing in the module: written, run and debugged.
-  notebookOnTime: 30,
+  // Written, run and debugged — but most of what it pays is the bonus below,
+  // not this. Turning one in barely started is not worth an assignment.
+  notebookOnTime: 20,
   notebookLate: 12,
   // On top, for actually working it through rather than submitting a shell.
   notebookCompleted: 15,
@@ -900,6 +904,51 @@ async function standingFor({ classId, studentId }) {
 }
 
 /**
+ * Where one student's total in a class actually came from.
+ *
+ * The split and the rows come from the same collection in one round trip, so
+ * the two can never disagree — a breakdown that did not add up to the number
+ * on the leaderboard would be worse than no breakdown at all.
+ *
+ * Kinds with nothing in them are absent rather than zeroed: the caller knows
+ * the full set of kinds and can decide whether an unused one is worth drawing.
+ */
+async function breakdownFor({ classId, studentId, historyLimit = 50 }) {
+  const [byKind, history] = await Promise.all([
+    LmPoints.aggregate([
+      { $match: { classId: asId(classId), studentId: asId(studentId) } },
+      {
+        $group: {
+          _id: "$kind",
+          points: { $sum: "$points" },
+          awards: { $sum: 1 },
+          lastAt: { $max: "$created_at" },
+        },
+      },
+      { $sort: { points: -1 } },
+    ]),
+    LmPoints.find({ classId, studentId })
+      .sort({ created_at: -1 })
+      .limit(historyLimit)
+      .select("kind points reason studentName created_at")
+      .lean(),
+  ]);
+
+  return {
+    byKind: byKind.map((row) => ({
+      kind: row._id,
+      points: row.points,
+      awards: row.awards,
+      lastAt: row.lastAt,
+    })),
+    history,
+    // Denormalised on the ledger, so the caller does not have to hold the
+    // roster open just to put a name on the panel.
+    studentName: history[0]?.studentName || "",
+  };
+}
+
+/**
  * Crowns last week's winner.
  *
  * Run lazily when the leaderboard is read rather than on a timer, the same way
@@ -1162,6 +1211,7 @@ module.exports = {
   grantBadge,
   leaderboard,
   standingFor,
+  breakdownFor,
   crownLastWeek,
   onSubmission,
   onQuizSubmitted,

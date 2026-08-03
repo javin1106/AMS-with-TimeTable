@@ -23,6 +23,7 @@ import Login from './dashboard/login';
 import Messages from './timetableadmin/messages';
 import ForgotPassword from './dashboard/ForgotPassword';
 import SuperAdminPage from './dashboard/superadmin';
+import BugReportsAdmin from './dashboard/bugReports';
 import DeptAdminAssignPage from './dashboard/deptAdminAssign';
 import CommonSlot from './timetableadmin/commonslot.jsx';
 import Subjects from './timetableadmin/addsubjects';
@@ -227,6 +228,7 @@ function App() {
         <Route path="/register" element={<RegistrationForm />} />
         <Route path="/userroles" element={<AllocatedRolesPage />} />
         <Route path="/superadmin" element={<SuperAdminPage />} />
+        <Route path="/superadmin/bugs" element={<BugReportsAdmin />} />
         <Route path="/usermanagement" element={<UserManagement />} />
         <Route path="/fileupload" element={<FileUpload />} />
         <Route path="/camera" element={<Camera />} />

@@ -1,4 +1,5 @@
-const LmPoints = require("../models/lmPoints");
+const mongoose = require("mongoose");
+
 const LmBadge = require("../models/lmBadge");
 const game = require("../services/gamification");
 
@@ -47,6 +48,9 @@ exports.getLeaderboard = async (req, res) => {
     me: mine
       ? {
           ...mine,
+          // So the client can open their own breakdown from the fallback row
+          // it draws when they are nowhere near the visible top.
+          studentId: req.lmUser.id,
           // Their own position, even when they are nowhere near the visible
           // top. A leaderboard that simply omits you is one you stop opening.
           rank: rows.findIndex((row) => String(row.studentId) === req.lmUser.id) + 1 || null,
@@ -77,7 +81,7 @@ exports.getPointsGuide = async (req, res) => {
         latePoints: p.notebookLate,
         bonus: p.notebookCompleted,
         bonusFor: "running every cell with no errors left",
-        note: "The heaviest thing here — written, run and debugged.",
+        note: "Worth the most here once it is finished — most of it is the bonus.",
       },
       {
         id: "submission",
@@ -130,21 +134,61 @@ exports.getPointsGuide = async (req, res) => {
   });
 };
 
-/** Where a student's own points came from — the answer to "why 240?". */
-exports.getMyPoints = async (req, res) => {
-  const classId = req.lmClass._id;
-  const [standing, history] = await Promise.all([
-    game.standingFor({ classId, studentId: req.lmUser.id }),
-    LmPoints.find({ classId, studentId: req.lmUser.id })
-      .sort({ created_at: -1 })
-      .limit(50)
-      .select("kind points reason created_at")
-      .lean(),
+/**
+ * One student's standing, badges and ledger in a class — the answer to
+ * "why 240?", and to "what has this one actually been doing?".
+ *
+ * Two shapes, because two different people ask. `full` adds the split by
+ * activity and the ledger itself, which are the owner's and their teacher's to
+ * read. Anybody else in the class gets the badges: a badge is meant to be seen,
+ * and one nobody else can look at is a trophy in a locked room.
+ */
+const detailFor = async (classId, studentId, { full = false } = {}) => {
+  const [standing, breakdown] = await Promise.all([
+    game.standingFor({ classId, studentId }),
+    // Still needed when not `full`: it carries the name, and one round trip
+    // that returns a field the response drops is cheaper than a second query
+    // to fetch that field alone.
+    game.breakdownFor({ classId, studentId, historyLimit: full ? 50 : 1 }),
   ]);
 
-  return res.json({
+  return {
+    studentId: String(studentId),
+    studentName: breakdown.studentName,
+    scope: full ? "full" : "badges",
     ...standing,
-    history,
+    /**
+     * A badge's `detail` is free text written wherever it is granted, and at
+     * least one of them is a pair of marks — Glow Up records "38% → 61%". So a
+     * classmate gets the badge without the footnote rather than a whitelist of
+     * which details are safe, which would silently be wrong the first time
+     * somebody adds a badge and does not think about this file.
+     */
+    badges: full ? standing.badges : standing.badges.map(({ detail, ...badge }) => badge),
+    ...(full ? { byKind: breakdown.byKind, history: breakdown.history } : {}),
     catalogue: Object.keys(game.BADGES).map((id) => game.describeBadge(id)),
-  });
+  };
+};
+
+/** Where a student's own points came from. */
+exports.getMyPoints = async (req, res) =>
+  res.json(await detailFor(req.lmClass._id, req.lmUser.id, { full: true }));
+
+/**
+ * The same thing for somebody else on the table.
+ *
+ * Badges are class-visible on purpose — they are the part meant to be shown
+ * off, and the table already says how many each person holds. What is withheld
+ * from a classmate is the ledger behind the number: a row reads `Sat "Midterm"
+ * — 42%`, and the split by activity gives the same away for anybody who has sat
+ * one quiz. Staff see everything; so does the student themselves.
+ */
+exports.getStudentPoints = async (req, res) => {
+  const { studentId } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(studentId)) {
+    return res.status(400).json({ message: "Not a student id." });
+  }
+
+  const full = Boolean(req.lmIsTeacher) || studentId === req.lmUser.id;
+  return res.json(await detailFor(req.lmClass._id, studentId, { full }));
 };

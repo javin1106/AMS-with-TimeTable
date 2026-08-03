@@ -25,7 +25,7 @@ import { EmptyState, ErrorState, Loading, SectionCard } from '../components/comm
 import { formatDateTime, relativeTime } from '../format';
 
 /**
- * "Something is broken."
+ * "Something is broken" — or "this would be better if".
  *
  * Open to students and staff alike, because the people who find bugs are the
  * people using the thing. Points are paid when a platform admin confirms the
@@ -35,13 +35,33 @@ import { formatDateTime, relativeTime } from '../format';
 
 const STATUS_STYLE = {
   open: { colorScheme: 'blue', label: 'waiting to be read' },
-  acknowledged: { colorScheme: 'green', label: 'confirmed — points added' },
+  acknowledged: { colorScheme: 'green', label: 'approved — points added' },
   duplicate: { colorScheme: 'purple', label: 'already known' },
-  rejected: { colorScheme: 'gray', label: 'not a bug' },
-  fixed: { colorScheme: 'teal', label: 'fixed' },
+  rejected: { colorScheme: 'gray', label: 'not taken up' },
+  fixed: { colorScheme: 'teal', label: 'done' },
+};
+
+const KIND_STYLE = {
+  bug: { colorScheme: 'red', label: 'Bug' },
+  suggestion: { colorScheme: 'orange', label: 'Suggestion' },
+};
+
+// The two halves of the form that read differently depending on which one you
+// are filing. Asking "is this broken, or could it be better?" once is cheaper
+// than an admin reading the whole thing to work it out.
+const KIND_COPY = {
+  bug: {
+    title: 'What went wrong, in one line?',
+    description: 'What were you doing, what did you expect, and what happened instead?',
+  },
+  suggestion: {
+    title: 'What would you like to see, in one line?',
+    description: 'What are you trying to do, and how would this make it easier?',
+  },
 };
 
 function ReportForm({ classes, pointsPerReport, onSent }) {
+  const [kind, setKind] = useState('bug');
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [classId, setClassId] = useState('');
@@ -53,6 +73,7 @@ function ReportForm({ classes, pointsPerReport, onSent }) {
     setSaving(true);
     try {
       await lmApi.reportBug({
+        kind,
         title: title.trim(),
         description: description.trim(),
         classId: classId || null,
@@ -74,14 +95,18 @@ function ReportForm({ classes, pointsPerReport, onSent }) {
 
   return (
     <VStack align="stretch" spacing={3}>
+      <Select value={kind} onChange={(event) => setKind(event.target.value)} maxW="420px">
+        <option value="bug">🐛 Something is broken (bug)</option>
+        <option value="suggestion">💡 Something could be better (suggestion)</option>
+      </Select>
       <Input
-        placeholder="What went wrong, in one line?"
+        placeholder={KIND_COPY[kind].title}
         value={title}
         maxLength={160}
         onChange={(event) => setTitle(event.target.value)}
       />
       <Textarea
-        placeholder="What were you doing, what did you expect, and what happened instead?"
+        placeholder={KIND_COPY[kind].description}
         rows={5}
         value={description}
         onChange={(event) => setDescription(event.target.value)}
@@ -100,11 +125,11 @@ function ReportForm({ classes, pointsPerReport, onSent }) {
       </Select>
       <Flex align="center" gap={3} wrap="wrap">
         <Button colorScheme="purple" onClick={submit} isLoading={saving} isDisabled={!title.trim()}>
-          Send report
+          Send
         </Button>
         <Text fontSize="xs" color="gray.500">
-          {pointsPerReport} points once an administrator confirms it is real — and a badge if it was
-          in one of your classes.
+          {pointsPerReport} points once an administrator approves it — and a badge if it was in one
+          of your classes.
         </Text>
       </Flex>
     </VStack>
@@ -142,7 +167,12 @@ function AdminQueue({ reports, counts, onReviewed }) {
         reports.map((report) => (
           <Box key={report._id} borderWidth="1px" borderRadius="md" p={4}>
             <Flex justify="space-between" gap={3} wrap="wrap" mb={1}>
-              <Text fontWeight="600">{report.title}</Text>
+              <HStack spacing={2}>
+                <Badge colorScheme={KIND_STYLE[report.kind]?.colorScheme || 'red'}>
+                  {KIND_STYLE[report.kind]?.label || 'Bug'}
+                </Badge>
+                <Text fontWeight="600">{report.title}</Text>
+              </HStack>
               <Badge colorScheme={STATUS_STYLE[report.status]?.colorScheme || 'gray'}>{report.status}</Badge>
             </Flex>
             <Text fontSize="xs" color="gray.500" mb={2}>
@@ -174,19 +204,19 @@ function AdminQueue({ reports, counts, onReviewed }) {
               mb={2}
             />
             <HStack spacing={2} wrap="wrap">
-              {/* Only "confirmed" pays, and only the first time — the server
-                  will not pay twice however often this is pressed. */}
+              {/* Only "approve" pays, and only the first time — the server will
+                  not pay twice however often this is pressed. */}
               <Button size="xs" colorScheme="green" onClick={() => decide(report, 'acknowledged')}>
-                Confirm it is real
+                Approve
               </Button>
               <Button size="xs" variant="outline" onClick={() => decide(report, 'fixed')}>
-                Fixed
+                {report.kind === 'suggestion' ? 'Done' : 'Fixed'}
               </Button>
               <Button size="xs" variant="outline" onClick={() => decide(report, 'duplicate')}>
                 Already known
               </Button>
               <Button size="xs" variant="ghost" colorScheme="red" onClick={() => decide(report, 'rejected')}>
-                Not a bug
+                Reject
               </Button>
             </HStack>
           </Box>
@@ -231,23 +261,31 @@ export default function BugReports() {
   if (error) return <ErrorState error={error} onRetry={load} />;
 
   const form = (
-    <SectionCard title="Report a bug" subtitle="Found something broken? Tell us and we will look.">
+    <SectionCard
+      title="Bug / Suggestion"
+      subtitle="Found something broken, or thought of something better? Tell us and we will look."
+    >
       <ReportForm classes={classes} pointsPerReport={mine.pointsPerReport} onSent={load} />
     </SectionCard>
   );
 
   const history = (
-    <SectionCard title="Your reports">
+    <SectionCard title="Your submissions">
       {mine.reports.length === 0 ? (
-        <EmptyState icon="🐛" title="Nothing reported yet" />
+        <EmptyState icon="🐛" title="Nothing sent yet" />
       ) : (
         <VStack align="stretch" spacing={2}>
           {mine.reports.map((report) => (
             <Box key={report._id} borderWidth="1px" borderRadius="md" p={3}>
               <Flex justify="space-between" gap={2} wrap="wrap">
-                <Text fontSize="sm" fontWeight="500">
-                  {report.title}
-                </Text>
+                <HStack spacing={2}>
+                  <Badge colorScheme={KIND_STYLE[report.kind]?.colorScheme || 'red'}>
+                    {KIND_STYLE[report.kind]?.label || 'Bug'}
+                  </Badge>
+                  <Text fontSize="sm" fontWeight="500">
+                    {report.title}
+                  </Text>
+                </HStack>
                 <HStack spacing={2}>
                   {report.awarded && <Badge colorScheme="purple">+{mine.pointsPerReport}</Badge>}
                   <Badge colorScheme={STATUS_STYLE[report.status]?.colorScheme || 'gray'}>
@@ -285,7 +323,7 @@ export default function BugReports() {
   return (
     <Tabs colorScheme="purple" isLazy>
       <TabList>
-        <Tab>Report a bug</Tab>
+        <Tab>Bug / Suggestion</Tab>
         <Tab>
           Queue
           {queue.counts?.open ? (
@@ -303,7 +341,10 @@ export default function BugReports() {
           </VStack>
         </TabPanel>
         <TabPanel px={0}>
-          <SectionCard title="Reported bugs" subtitle="Confirming a report pays the reporter, once.">
+          <SectionCard
+            title="Bugs & suggestions"
+            subtitle="Approving pays the person who sent it, once."
+          >
             <AdminQueue reports={queue.reports} counts={queue.counts || {}} onReviewed={load} />
           </SectionCard>
         </TabPanel>

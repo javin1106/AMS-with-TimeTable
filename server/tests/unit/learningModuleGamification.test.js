@@ -72,7 +72,11 @@ describe("learningModule gamification — what a score is worth", () => {
    */
   it("pays heavier work more than lighter work", () => {
     const { POINTS: p } = game;
-    expect(p.notebookOnTime).toBeGreaterThan(p.submissionOnTime);
+    // A coding exercise still pays the most of anything on the ladder, but it
+    // pays it for finishing: the base alone must not out-earn an assignment.
+    expect(p.notebookOnTime + p.notebookCompleted).toBeGreaterThan(p.submissionOnTime);
+    expect(p.submissionOnTime).toBeGreaterThan(p.notebookOnTime);
+    expect(p.notebookOnTime).toBeGreaterThanOrEqual(p.quizAttempt);
     expect(p.submissionOnTime).toBeGreaterThan(p.quizAttempt);
     expect(p.quizAttempt).toBeGreaterThanOrEqual(p.tutorial);
     expect(p.tutorial).toBeGreaterThan(p.feedback);
