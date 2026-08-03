@@ -209,6 +209,126 @@ describe("class-specific versus platform-wide", () => {
   });
 });
 
+describe("bugs versus suggestions", () => {
+  it("defaults to a bug, and refuses to invent a third kind", async () => {
+    const { student } = await seedStudentInClass();
+
+    const plain = await report(student, { title: "No kind given" });
+    expect(plain.body.kind).toBe("bug");
+
+    // A defect miscategorised as a suggestion is the costlier mistake, so
+    // anything unrecognised falls back to the queue that gets read first.
+    const nonsense = await report(student, { title: "Nonsense kind", kind: "feature-request" });
+    expect(nonsense.body.kind).toBe("bug");
+
+    const wanted = await report(student, { title: "Dark mode please", kind: "suggestion" });
+    expect(wanted.body.kind).toBe("suggestion");
+  });
+
+  it("counts legacy rows as bugs when the queue is filtered", async () => {
+    const { student } = await seedStudentInClass();
+    const admin = await seedAdmin();
+
+    await report(student, { title: "Broken", kind: "bug" });
+    await report(student, { title: "Could be better", kind: "suggestion" });
+    // Written before `kind` existed: no value at all. Filtering to bugs has to
+    // include it, or the queue would appear to empty itself on upgrade.
+    await LmBugReport.collection.insertOne({
+      reporterId: student._id,
+      title: "From before the field existed",
+      status: "open",
+      created_at: new Date(),
+    });
+
+    const bugs = await request(app)
+      .get(`${BASE}/bugs?kind=bug`)
+      .set("Cookie", cookieFor(admin, ["admin"]));
+    expect(bugs.body.reports.map((row) => row.title).sort()).toEqual([
+      "Broken",
+      "From before the field existed",
+    ]);
+    expect(bugs.body.kindCounts).toEqual({ bug: 2, suggestion: 1 });
+
+    const ideas = await request(app)
+      .get(`${BASE}/bugs?kind=suggestion`)
+      .set("Cookie", cookieFor(admin, ["admin"]));
+    expect(ideas.body.reports).toHaveLength(1);
+  });
+});
+
+describe("mailing the admins", () => {
+  const { sendBulkMail } = require("../../src/modules/mailerModule/mailer");
+
+  beforeEach(() => sendBulkMail.mockClear());
+
+  // The send is deliberately not awaited by the handler — the reporter should
+  // not wait on SMTP — and resolving the recipients is a database round trip,
+  // so there is no fixed number of ticks to drain. Poll for the call instead,
+  // and give up quickly enough that "never sent" still fails fast.
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const settle = async () => {
+    for (let waited = 0; waited < 2000; waited += 10) {
+      if (sendBulkMail.mock.calls.length) return;
+      // eslint-disable-next-line no-await-in-loop
+      await pause(10);
+    }
+  };
+
+  it("mails every platform admin the report itself", async () => {
+    const { student } = await seedStudentInClass();
+    await seedAdmin();
+    await User.create({
+      name: "Super",
+      role: ["SUPERADMIN"],
+      password: "hashed",
+      email: ["super@example.com"],
+    });
+
+    await report(student, {
+      title: "Timer keeps running after submit",
+      description: "Submitted the quiz and the clock carried on counting down.",
+    });
+    await settle();
+
+    expect(sendBulkMail).toHaveBeenCalledTimes(1);
+    const [recipients, subject, html] = sendBulkMail.mock.calls[0];
+    expect(recipients.sort()).toEqual(["admin@example.com", "super@example.com"]);
+    expect(subject).toContain("Timer keeps running after submit");
+    // The whole report travels in the body: an admin should be able to read it
+    // without signing in, and only follow the link to act on it.
+    expect(html).toContain("Submitted the quiz and the clock carried on counting down.");
+    expect(html).toContain("asha@example.com");
+  });
+
+  it("does not mail the teacher of the class, only administrators", async () => {
+    const { klass, student } = await seedStudentInClass();
+    await seedAdmin();
+
+    await report(student, { title: "Class-specific", classId: String(klass._id) });
+    await settle();
+
+    // rao@example.com owns the class but is FACULTY, not a platform admin, and
+    // cannot act on the queue — mailing them would be noise they cannot clear.
+    expect(sendBulkMail.mock.calls[0][0]).toEqual(["admin@example.com"]);
+  });
+
+  it("still records the report when there is nobody to mail", async () => {
+    const { student } = await seedStudentInClass();
+
+    const created = await report(student, { title: "Nobody is listening" });
+    // Nothing to poll for here — the point is that nothing happens — so give
+    // the fire-and-forget path long enough to have sent if it were going to.
+    await pause(300);
+
+    // Mail is best-effort: a report that was written down must never be lost to
+    // an empty recipient list or an unreachable mail box.
+    expect(created.status).toBe(201);
+    expect(await LmBugReport.countDocuments({})).toBe(1);
+    expect(sendBulkMail).not.toHaveBeenCalled();
+  });
+});
+
 describe("the profile", () => {
   it("groups a whole career by session, newest first", async () => {
     const { klass, student } = await seedStudentInClass({ session: "2026-27 Odd" });

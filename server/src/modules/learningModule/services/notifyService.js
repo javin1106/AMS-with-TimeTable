@@ -1,5 +1,10 @@
 const LmMembership = require("../models/lmMembership");
 const LmNotification = require("../models/lmNotification");
+// Bug reports go to whoever is a platform admin *now*, so the roles that mean
+// "admin" are read from the middleware that already defines them rather than
+// copied — a role added there must not need a second edit here.
+const { PLATFORM_ADMIN_ROLES } = require("../middleware/lmAuth");
+const User = require("../../../models/usermanagement/user");
 
 // Reuses the platform's existing nodemailer transport rather than configuring
 // a second one — same SMTP credentials, same "from" identity.
@@ -65,16 +70,17 @@ const absoluteLink = (link, base) => {
  * carry its own lighter markup, which read as coming from somewhere else
  * entirely.
  *
- * `banner` defaults to the platform wordmark the other mails use; the invite
- * greets the person instead, since for many of them it is the first XCEED
- * Learning mail they have ever received.
+ * `banner` names the product inside the frame — this is Learning module mail,
+ * and "XCEED Learning" is what a student recognises on the class stream they
+ * were just posted to. The invite greets the person instead, since for many of
+ * them it is the first XCEED Learning mail they have ever received.
  *
  * `bodyHtml` is trusted HTML — every caller escapes its own interpolations.
  */
 const emailShell = ({
   heading,
   bodyHtml,
-  banner = "XCEED — NIT Jalandhar",
+  banner = "XCEED Learning",
   ctaLabel = "",
   ctaHref = "",
   chipLabel = "",
@@ -117,6 +123,40 @@ const emailShell = ({
 </div>`;
 
 /**
+ * Addresses to mail for a set of membership rows.
+ *
+ * The row carries a denormalised `email`, but it is only ever as good as the
+ * path that wrote it — a row enrolled before that field was populated, or one
+ * whose address was cleared, carries none. Such a student was simply absent
+ * from every class mail, with nothing anywhere to say so. Anything missing is
+ * resolved once, in bulk, from the account itself.
+ */
+async function addressesFor(members) {
+  const addresses = [];
+  const missing = [];
+
+  members.forEach((member) => {
+    if (member.email) addresses.push(member.email);
+    else if (member.userId) missing.push(member.userId);
+  });
+
+  if (missing.length) {
+    try {
+      const rows = await User.find({ _id: { $in: missing } }).select("email").lean();
+      rows.forEach((row) => {
+        // `email` is an array on the user schema; the first one is the primary.
+        const [primary] = (Array.isArray(row.email) ? row.email : [row.email]).filter(Boolean);
+        if (primary) addresses.push(primary);
+      });
+    } catch (error) {
+      console.error("[LearningModule] could not resolve member addresses:", error.message);
+    }
+  }
+
+  return [...new Set(addresses.map((a) => String(a).trim().toLowerCase()).filter(Boolean))];
+}
+
+/**
  * Fan a notification out to class members.
  *
  * @param {object} opts
@@ -140,6 +180,7 @@ async function notifyClass(opts) {
     email = false,
   } = opts;
 
+  let audience = [];
   try {
     // One query, one filter, for both halves. These used to be derived
     // separately: the targeted branch skipped `status`/`muted` entirely, so a
@@ -149,25 +190,34 @@ async function notifyClass(opts) {
     const members = await LmMembership.find({
       classId: klass._id,
       status: "active",
-      muted: false,
+      // Not `muted: false`. Mongo does not match a missing field against
+      // `false`, so every membership row written before `muted` existed was
+      // read as muted and dropped here — no notification, no mail, no trace.
+      muted: { $ne: true },
       ...(userIds ? { userId: { $in: userIds } } : {}),
     })
       .select("userId email")
       .lean();
 
-    const audience = members.filter(
+    audience = members.filter(
       (member) => member.userId && String(member.userId) !== String(excludeUserId),
     );
+  } catch (error) {
+    console.error("[LearningModule] could not resolve notification audience:", error.message);
+    return;
+  }
 
-    const finalRecipients = audience.map((member) => member.userId);
-    const emailAddresses = audience.map((member) => member.email).filter(Boolean);
-    if (!finalRecipients.length) return;
+  if (!audience.length) return;
+  const plainBody = toPlainExcerpt(body);
 
-    const plainBody = toPlainExcerpt(body);
-
+  // The in-app write and the mail are separate failures. They used to share one
+  // try block with the insert first, so a single rejected notification row —
+  // one bad classId, one validation slip — silently cancelled the whole class's
+  // email for that post.
+  try {
     await LmNotification.insertMany(
-      finalRecipients.map((userId) => ({
-        userId,
+      audience.map((member) => ({
+        userId: member.userId,
         classId: klass._id,
         className: klass.name,
         type,
@@ -177,34 +227,53 @@ async function notifyClass(opts) {
         actorName,
       })),
     );
+  } catch (error) {
+    console.error("[LearningModule] in-app notification failed:", error.message);
+  }
 
-    if (email && sendBulkMail && klass.settings?.emailNotifications && emailAddresses.length) {
-      // One message per batch, addresses in bcc — see sendBulkMail. This used
-      // to be a single send with every address joined into `to:`, which showed
-      // the whole class each other's addresses and, past the provider's
-      // recipient cap, was rejected outright: a large class quietly received
-      // nothing at all.
-      const href = absoluteLink(link);
-      const { failed } = await sendBulkMail(
-        emailAddresses,
-        `[${klass.name}] ${title}`,
-        emailShell({
-          heading: title,
-          bodyHtml: `<p style="margin:0;">${escapeHtml(plainBody)}</p>`,
-          ctaLabel: "Open in XCEED Learning",
-          ctaHref: href,
-          footnote: `Posted in <strong>${escapeHtml(klass.name)}</strong>. You can turn these emails off in the class settings.`,
-        }),
+  if (!email) return;
+
+  try {
+    if (!sendBulkMail) {
+      console.warn(`[LearningModule] no mailer: "${title}" not emailed to ${klass.name}`);
+      return;
+    }
+    // Checked against `false`, not for truthiness. A class document written
+    // before this preference existed — or read through a projection that did
+    // not ask for it — has no `settings.emailNotifications` at all, and every
+    // one of those classes had its mail silently switched off by the old
+    // truthy test. Absent means "never turned off", which means send.
+    if (klass.settings?.emailNotifications === false) return;
+
+    const emailAddresses = await addressesFor(audience);
+    if (!emailAddresses.length) {
+      console.warn(
+        `[LearningModule] "${title}" in ${klass.name}: ${audience.length} members, no address on any of them`,
       );
-      if (failed) {
-        console.error(
-          `[LearningModule] notification mail: ${failed}/${emailAddresses.length} recipients not reached in ${klass.name}`,
-        );
-      }
+      return;
+    }
+
+    const { sent, failed } = await sendBulkMail(
+      emailAddresses,
+      `[${klass.name}] ${title}`,
+      emailShell({
+        heading: title,
+        bodyHtml: `<p style="margin:0;">${escapeHtml(plainBody)}</p>`,
+        ctaLabel: "Open in XCEED Learning",
+        ctaHref: absoluteLink(link),
+        footnote: `Posted in <strong>${escapeHtml(klass.name)}</strong>. You can turn these emails off in the class settings.`,
+      }),
+    );
+
+    console.log(`[LearningModule] "${title}" in ${klass.name}: mailed ${sent}, failed ${failed}`);
+    if (failed) {
+      console.error(
+        `[LearningModule] notification mail: ${failed}/${emailAddresses.length} recipients not reached in ${klass.name}`,
+      );
     }
   } catch (error) {
     // Notifications are best-effort: never fail the originating request.
-    console.error("[LearningModule] notifyClass failed:", error.message);
+    console.error("[LearningModule] notification mail failed:", error.message);
   }
 }
 
@@ -288,4 +357,98 @@ async function sendInviteMail(to, klass, inviterName, base, enrolled = false) {
   }
 }
 
-module.exports = { notifyClass, notifyUser, sendInviteMail };
+/**
+ * Who hears about a new bug report or suggestion.
+ *
+ * Read from the user collection rather than a hard-coded list, so an account
+ * promoted to admin in user management starts receiving these without a deploy.
+ * `BUG_REPORT_EMAIL` (comma-separated) is added on top for the shared inbox
+ * that no single account owns — it is an addition, not an override, because a
+ * mistyped env var must not silently stop the whole queue being seen.
+ */
+async function bugReportRecipients() {
+  const extra = String(process.env.BUG_REPORT_EMAIL || "")
+    .split(",")
+    .map((address) => address.trim())
+    .filter(Boolean);
+
+  let admins = [];
+  try {
+    const rows = await User.find({ role: { $in: PLATFORM_ADMIN_ROLES } })
+      .select("email")
+      .lean();
+    // `email` is an array on the user schema; an account may hold more than one.
+    admins = rows.flatMap((row) => (Array.isArray(row.email) ? row.email : [row.email]));
+  } catch (error) {
+    console.error("[LearningModule] could not resolve bug report admins:", error.message);
+  }
+
+  return [...new Set([...admins, ...extra].map((a) => String(a || "").trim()).filter(Boolean))];
+}
+
+/**
+ * Mail every platform admin the moment something is reported.
+ *
+ * The whole report travels in the body — title, description, page, reporter —
+ * so a defect can be read, and often understood, without signing in. The link
+ * is for acting on it, not for finding out what it says.
+ *
+ * Best-effort, like every other notification here: a report that was written
+ * down must never fail because the SMTP box was unreachable.
+ */
+async function sendBugReportMail(report) {
+  try {
+    if (!sendBulkMail) return;
+
+    const recipients = await bugReportRecipients();
+    if (!recipients.length) {
+      console.warn("[LearningModule] new bug report but no admin address to send it to");
+      return;
+    }
+
+    const isSuggestion = report.kind === "suggestion";
+    const label = isSuggestion ? "Suggestion" : "Bug report";
+    const heading = `New ${label.toLowerCase()}: ${report.title}`;
+
+    // Every value below is user-supplied — the description is plain text from a
+    // textarea, but it still gets escaped before it lands in email markup.
+    const row = (name, value) =>
+      value
+        ? `<p style="margin:0 0 6px;"><strong>${escapeHtml(name)}:</strong> ${escapeHtml(value)}</p>`
+        : "";
+
+    const bodyHtml = `
+      ${row("Reported by", `${report.reporterName || "Unknown"} (${report.reporterEmail || "no address"})`)}
+      ${row("Acting as", report.reporterRole || "user")}
+      ${row("Class", report.className || "not class-specific")}
+      ${row("Page", report.pageUrl)}
+      <p style="margin:16px 0 6px;"><strong>What they said:</strong></p>
+      <div style="white-space:pre-wrap;background:#f7f9fc;border:1px solid #e4e8f5;border-radius:8px;padding:12px;font-size:13px;color:#333;">${
+        escapeHtml(report.description) || "<em style=\"color:#888;\">No further detail given.</em>"
+      }</div>`;
+
+    const { failed } = await sendBulkMail(
+      recipients,
+      `[XCEED ${label}] ${toPlainExcerpt(report.title, 120)}`,
+      emailShell({
+        heading,
+        bodyHtml,
+        ctaLabel: "Review in Super Admin",
+        ctaHref: absoluteLink("/superadmin/bugs"),
+        footnote: isSuggestion
+          ? "Adopting a suggestion awards the person who sent it."
+          : "Confirming a report awards the reporter, once.",
+      }),
+    );
+
+    if (failed) {
+      console.error(
+        `[LearningModule] bug report mail: ${failed}/${recipients.length} admins not reached`,
+      );
+    }
+  } catch (error) {
+    console.error("[LearningModule] sendBugReportMail failed:", error.message);
+  }
+}
+
+module.exports = { notifyClass, notifyUser, sendInviteMail, sendBugReportMail };

@@ -114,10 +114,13 @@ exports.createDiscussion = async (req, res) => {
     body,
     link: `/learning/class/${req.lmClass._id}/discussions/${discussion._id}`,
     actorName: req.lmUser.name,
-    // Deliberately no email. A class of two hundred each starting a thread a
-    // week is two hundred emails; the in-app notification is enough for a
-    // conversation nobody is graded on.
-    email: false,
+    // Mailed like any other post. This was in-app only, on the reasoning that a
+    // thread nobody is graded on does not merit an email — but a discussion is
+    // still something posted to the class, and students who do not open the
+    // stream daily never learned it existed. The volume this was guarding
+    // against is bounded by the weekly per-student limit enforced above, and a
+    // class that finds it too much can turn class mail off in its settings.
+    email: true,
   });
 
   return res.status(201).json(forClient(discussion, req));

@@ -2,10 +2,11 @@ const LmBugReport = require("../models/lmBugReport");
 const LmClass = require("../models/lmClass");
 const LmMembership = require("../models/lmMembership");
 const game = require("../services/gamification");
-const { notifyUser } = require("../services/notifyService");
+const { notifyUser, sendBugReportMail } = require("../services/notifyService");
 
 /**
- * "Something is broken" — from the sidebar, for anyone.
+ * "Something is broken" — or "this would be better if" — from the sidebar, for
+ * anyone.
  *
  * Deliberately outside the class router: most bugs are not about a class, and
  * making somebody navigate into one first is how a bug goes unreported.
@@ -14,12 +15,16 @@ const { notifyUser } = require("../services/notifyService");
 const MAX_TITLE = 160;
 const MAX_DESCRIPTION = 4000;
 
+const KINDS = ["bug", "suggestion"];
+const STATUSES = ["open", "acknowledged", "duplicate", "rejected", "fixed"];
+
 // A reporter cannot open an unbounded number of tickets. Generous enough that
 // nobody hits it in good faith, low enough that the queue stays readable.
 const OPEN_LIMIT = 10;
 
 const forReporter = (report) => ({
   _id: report._id,
+  kind: report.kind || "bug",
   title: report.title,
   description: report.description,
   pageUrl: report.pageUrl,
@@ -36,6 +41,10 @@ exports.createBugReport = async (req, res) => {
   const title = String(req.body.title || "").trim().slice(0, MAX_TITLE);
   const description = String(req.body.description || "").trim().slice(0, MAX_DESCRIPTION);
   if (!title) return res.status(400).json({ message: "Say briefly what went wrong." });
+
+  // Anything unrecognised is treated as a bug: the queue is read defect-first,
+  // and a defect miscategorised as a suggestion is the costlier mistake.
+  const kind = KINDS.includes(req.body.kind) ? req.body.kind : "bug";
 
   const open = await LmBugReport.countDocuments({ reporterId: req.lmUser.id, status: "open" });
   if (open >= OPEN_LIMIT) {
@@ -64,6 +73,7 @@ exports.createBugReport = async (req, res) => {
     reporterName: req.lmUser.name,
     reporterEmail: req.lmUser.email,
     reporterRole: req.lmUser.roles?.[0] || "",
+    kind,
     title,
     description,
     pageUrl: String(req.body.pageUrl || "").slice(0, 500),
@@ -71,6 +81,12 @@ exports.createBugReport = async (req, res) => {
     className: klass?.name || "",
     session: klass?.session || "",
   });
+
+  // Not awaited: mailing every admin walks the user collection and then the
+  // SMTP pool, and the person who just pressed "Send" should not be made to
+  // wait for it — nor should their report be lost if the mail box is down.
+  // sendBugReportMail swallows its own failures.
+  sendBugReportMail(report);
 
   return res.status(201).json(forReporter(report));
 };
@@ -92,18 +108,28 @@ exports.listAllBugReports = async (req, res) => {
   if (!req.lmUser.isAdmin) return res.status(403).json({ message: "Forbidden" });
 
   const filter = {};
-  if (req.query.status) filter.status = String(req.query.status);
+  if (STATUSES.includes(req.query.status)) filter.status = String(req.query.status);
+  // Legacy rows predate `kind` and carry no value at all; asking for bugs has
+  // to include them, or the queue would appear to empty itself on upgrade.
+  if (req.query.kind === "bug") filter.kind = { $in: ["bug", null] };
+  else if (req.query.kind === "suggestion") filter.kind = "suggestion";
 
   const reports = await LmBugReport.find(filter)
     .sort({ status: 1, created_at: -1 })
     .limit(500)
     .lean();
 
-  const counts = await LmBugReport.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]);
+  const [statusCounts, kindCounts] = await Promise.all([
+    LmBugReport.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
+    LmBugReport.aggregate([
+      { $group: { _id: { $ifNull: ["$kind", "bug"] }, count: { $sum: 1 } } },
+    ]),
+  ]);
 
   return res.json({
-    reports,
-    counts: Object.fromEntries(counts.map((row) => [row._id, row.count])),
+    reports: reports.map((report) => ({ ...report, kind: report.kind || "bug" })),
+    counts: Object.fromEntries(statusCounts.map((row) => [row._id, row.count])),
+    kindCounts: Object.fromEntries(kindCounts.map((row) => [row._id, row.count])),
   });
 };
 
@@ -123,7 +149,7 @@ exports.reviewBugReport = async (req, res) => {
   if (!req.lmUser.isAdmin) return res.status(403).json({ message: "Forbidden" });
 
   const status = String(req.body.status || "");
-  if (!["open", "acknowledged", "duplicate", "rejected", "fixed"].includes(status)) {
+  if (!STATUSES.includes(status)) {
     return res.status(400).json({ message: "Unknown status." });
   }
 
@@ -142,13 +168,18 @@ exports.reviewBugReport = async (req, res) => {
   await report.save();
 
   if (firstAcknowledgement) {
+    const suggestion = report.kind === "suggestion";
     await game.onBugAcknowledged({ report });
     await notifyUser({
       userId: report.reporterId,
       klass: report.classId ? { _id: report.classId, name: report.className } : null,
       type: "bug",
-      title: `Your bug report was confirmed: ${report.title}`,
-      body: `Thanks — that was a real one. ${game.POINTS.bugReport} points added.`,
+      title: suggestion
+        ? `Your suggestion was approved: ${report.title}`
+        : `Your bug report was confirmed: ${report.title}`,
+      body: suggestion
+        ? `Thanks — we are taking that one up. ${game.POINTS.bugReport} points added.`
+        : `Thanks — that was a real one. ${game.POINTS.bugReport} points added.`,
       link: "/learning/bugs",
       actorName: report.reviewedByName,
     });

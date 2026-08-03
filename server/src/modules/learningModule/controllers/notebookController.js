@@ -181,14 +181,16 @@ exports.publishNotebook = async (req, res) => {
     coursework.instructions = notebook.description;
     coursework.dueDate = notebook.dueDate;
     coursework.status = 'published';
-    // Backfills rows written before notebooks were linked, so an existing
-    // exercise starts pointing at itself on the next publish.
+    // Backfills rows written before notebooks were linked and typed, so an
+    // existing exercise starts pointing at itself — and stops calling itself an
+    // assignment — on the next publish.
     coursework.notebookId = notebook._id;
+    coursework.workType = 'coding';
     await coursework.save();
   } else {
     coursework = await LmCoursework.create({
       classId: req.lmClass._id,
-      workType: 'assignment',
+      workType: 'coding',
       title: notebook.title,
       instructions: notebook.description,
       dueDate: notebook.dueDate,

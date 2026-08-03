@@ -28,7 +28,7 @@ import RichText from '../components/RichText';
 import RichTextEditor from '../components/RichTextEditor';
 import { isRichTextEmpty } from '../richTextUtils';
 import { DueBadge, EmptyState, ErrorState, Loading, StateBadge, buttonTextStyles } from '../components/common';
-import { WORK_TYPE_META, relativeTime } from '../format';
+import { courseworkLink, courseworkMeta, relativeTime } from '../format';
 
 function Composer({ classId, onPosted }) {
   const [open, setOpen] = useState(false);
@@ -263,11 +263,13 @@ function AnnouncementCard({ item, classId, isTeacher, me, onChanged }) {
 }
 
 function CourseworkStreamCard({ item, classId }) {
-  const meta = WORK_TYPE_META[item.workType] || WORK_TYPE_META.assignment;
+  const meta = courseworkMeta(item);
   return (
     <Box
       as={RouterLink}
-      to={`/learning/class/${classId}/work/${item._id}`}
+      // A coding card opens the exercise; /work/:id is its gradebook row, which
+      // has no code on it and nowhere to go from there.
+      to={courseworkLink({ ...item, classId })}
       display="block"
       bg="white"
       borderWidth="1px"

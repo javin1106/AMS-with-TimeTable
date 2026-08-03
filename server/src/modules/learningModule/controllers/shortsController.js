@@ -494,6 +494,9 @@ exports.startSession = async (req, res) => {
     body: `Join with code ${session.joinCode}.`,
     link: `/learning/short/join/${session.joinCode}`,
     actorName: req.lmUser.name,
+    // The one notification in this module with a deadline attached — the
+    // session is running now — so it goes by mail too, not only in-app.
+    email: true,
   });
 
   return res.status(201).json({

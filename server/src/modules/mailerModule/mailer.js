@@ -27,60 +27,70 @@ const sendMail = async (to, subject, message, attachments) => {
   }
 };
 
-// Providers cap how many recipients one message may carry (Gmail is the
-// tightest of the ones this box talks to). Over the cap the *whole* message is
-// rejected, so a class digest either reaches everyone or nobody — which is how
-// a big class silently stopped receiving anything.
-const BULK_BATCH_SIZE = 50;
+// The transport pool is shared with the rest of the platform, so a class fan-out
+// runs a few connections wide rather than all at once — a burst is exactly what
+// trips a provider's flood protection. The pool's own rateLimit does the rest.
+const MAX_PARALLEL_SENDS = 4;
 
 /**
- * One message to many people, without disclosing the list.
+ * One message per person, addressed to them.
  *
- * Recipients go in `bcc`, not `to`. The old digest joined every member's
- * address into a single `to:` header, so a class of two hundred handed each
- * student two hundred addresses — and the header alone could exceed what the
- * relay would accept.
+ * This used to send one message per batch of fifty with every student in `bcc`
+ * and the `to:` pointing back at the sending account. Two things were wrong
+ * with that, and between them they are why class mail stopped arriving:
  *
- * Batches are sent one after another rather than in parallel: the transport
- * pool is shared with the rest of the platform, and a burst is exactly what
- * trips a provider's flood protection.
+ *  - A message whose only visible recipient is the sender, carrying fifty
+ *    hidden ones, is the shape consumer spam filters score hardest. It was
+ *    accepted by the relay — so nothing here failed, and nothing was logged —
+ *    and then filed as junk or dropped at the far end.
+ *  - One unroutable address failed the whole batch, taking forty-nine
+ *    deliverable ones down with it.
+ *
+ * Per-recipient sends cost more messages, and are worth it: each student gets a
+ * mail addressed to them, still sees nobody else's address, and one bad address
+ * costs exactly one delivery. Failures are logged per address so a delivery
+ * problem is visible in the log rather than inferred from silence.
  *
  * @returns {Promise<{sent: number, failed: number}>} recipients, not messages
  */
 const sendBulkMail = async (recipients, subject, message) => {
   const user = process.env.MAIL_USER || '';
-  const list = [
+  const queue = [
     ...new Set(
       (recipients || [])
         .map((address) => String(address || '').trim().toLowerCase())
         .filter(Boolean),
     ),
   ];
-  if (!list.length) return { sent: 0, failed: 0 };
+  const total = queue.length;
+  if (!total) return { sent: 0, failed: 0 };
 
   let sent = 0;
   let failed = 0;
 
-  for (let start = 0; start < list.length; start += BULK_BATCH_SIZE) {
-    const batch = list.slice(start, start + BULK_BATCH_SIZE);
-    try {
-      // Some relays refuse a message with no `to` at all; addressing it to the
-      // sender is the usual "undisclosed recipients" shape.
-      // eslint-disable-next-line no-await-in-loop
-      await sendMailWithRetry({
-        from: `"xceed@nitj.ac.in" <${user}>`,
-        to: user,
-        bcc: batch,
-        subject,
-        html: message,
-      });
-      sent += batch.length;
-    } catch (e) {
-      // One bad batch must not cost the rest of the class their mail.
-      failed += batch.length;
-      console.error(`[mailer] bulk batch of ${batch.length} failed:`, e.message);
+  const worker = async () => {
+    while (queue.length) {
+      const to = queue.shift();
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await sendMailWithRetry({
+          from: `"xceed@nitj.ac.in" <${user}>`,
+          to,
+          subject,
+          html: message,
+        });
+        sent += 1;
+      } catch (e) {
+        // One unreachable address must not cost anybody else their mail.
+        failed += 1;
+        console.error(`[mailer] could not reach ${to}:`, e.message);
+      }
     }
-  }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(MAX_PARALLEL_SENDS, total) }, () => worker()),
+  );
 
   return { sent, failed };
 };

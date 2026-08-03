@@ -224,6 +224,7 @@ module.exports = {
   asyncRoute,
   isPlatformAdmin,
   hasLearningRole,
+  PLATFORM_ADMIN_ROLES,
   TEACHER_PLATFORM_ROLES,
   STUDENT_PLATFORM_ROLES,
 };

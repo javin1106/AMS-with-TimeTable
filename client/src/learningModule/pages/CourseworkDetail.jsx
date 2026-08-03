@@ -24,7 +24,7 @@ import CommentThread from '../components/CommentThread';
 import MaterialModal from '../components/MaterialModal';
 import RichText from '../components/RichText';
 import { DueBadge, ErrorState, Loading, SectionCard, StateBadge } from '../components/common';
-import { WORK_TYPE_META, formatDateTime } from '../format';
+import { courseworkMeta, formatDateTime } from '../format';
 
 /** The student's "Your work" panel — draft, turn in, unsubmit, see the grade. */
 function YourWork({ classId, coursework, submission, onChanged }) {
@@ -204,7 +204,7 @@ export default function CourseworkDetail() {
   if (error) return <ErrorState error={error} onRetry={load} />;
   if (!item) return null;
 
-  const meta = WORK_TYPE_META[item.workType] || WORK_TYPE_META.assignment;
+  const meta = courseworkMeta(item);
 
   // Material has its own tab; everything else reached this page from the stream.
   const isMaterial = item.workType === 'material';

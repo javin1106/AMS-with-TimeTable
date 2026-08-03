@@ -173,6 +173,14 @@ const STUDENT_REACHABLE = [
   [`GET ${C}/discussions/:discussionId`, 'class-visible thread'],
   [`DELETE ${C}/discussions/:discussionId`, 'author-only while unanswered; staff otherwise — checked in the handler'],
   [`GET ${C}/my-points`, "scoped to the caller's own studentId"],
+  // Open on purpose: badges are meant to be seen, and the table already says
+  // how many each person holds. The handler narrows the *response* rather than
+  // refusing it — a classmate gets the badges without the ledger behind them,
+  // because a row reads `Sat "Midterm" — 42%`.
+  [
+    `GET ${C}/students/:studentId/points`,
+    'badges are class-visible; the handler withholds the ledger from everybody but the owner and staff',
+  ],
   [`GET ${C}/notebooks`, 'unpublished notebooks filtered out of the query'],
   [`GET ${C}/notebooks/:notebookId/attempt`, '403 unless published; seeds the caller their own copy'],
   [`GET ${C}/notebook-attempts/:attemptId`, 'ownership checked in the handler'],

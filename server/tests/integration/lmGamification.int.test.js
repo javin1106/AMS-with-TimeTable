@@ -267,6 +267,101 @@ describe("leaderboard", () => {
     expect(res.body.history).toHaveLength(1);
     expect(res.body.history[0]).toMatchObject({ points: 9, reason: "test" });
   });
+
+  it("gives staff one student's badges and the split of their points", async () => {
+    const { teacher, klass } = await seedClass();
+    const student = await seedStudent(klass, "asha");
+    await LmPoints.create({
+      classId: klass._id,
+      studentId: student._id,
+      studentName: student.name,
+      kind: "quiz",
+      points: 14,
+      reason: 'Sat "Midterm" — 70%',
+      weekKey: game.weekKeyOf(),
+    });
+    await pay(klass, student, 6);
+    await game.grantBadge({
+      classId: klass._id,
+      studentId: student._id,
+      studentName: student.name,
+      badge: "full-send",
+      detail: "every question answered",
+    });
+
+    const res = await request(app)
+      .get(`${BASE}/classes/${klass._id}/students/${student._id}/points`)
+      .set("Cookie", cookieFor(teacher, "FACULTY"));
+
+    expect(res.status).toBe(200);
+    expect(res.body.studentName).toBe("asha");
+    expect(res.body.points).toBe(20);
+    // The split has to add up to the number on the table, or it is worse than
+    // no split at all.
+    expect(res.body.byKind.reduce((sum, row) => sum + row.points, 0)).toBe(20);
+    expect(res.body.byKind).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "quiz", points: 14, awards: 1 }),
+        expect.objectContaining({ kind: "bonus", points: 6, awards: 1 }),
+      ]),
+    );
+    expect(res.body.badges).toEqual([
+      expect.objectContaining({ id: "full-send", detail: "every question answered" }),
+    ]);
+  });
+
+  it("shows a student a classmate's badges but not the ledger behind them", async () => {
+    const { klass } = await seedClass();
+    const asha = await seedStudent(klass, "asha");
+    const bala = await seedStudent(klass, "bala");
+    await LmPoints.create({
+      classId: klass._id,
+      studentId: bala._id,
+      studentName: bala.name,
+      kind: "quiz",
+      points: 28,
+      reason: 'Sat "Midterm" — 40%',
+      weekKey: game.weekKeyOf(),
+    });
+    await game.grantBadge({
+      classId: klass._id,
+      studentId: bala._id,
+      studentName: bala.name,
+      badge: "glow-up",
+      // The reason `detail` is withheld: it is a pair of marks.
+      detail: "38% → 61%",
+    });
+
+    const res = await request(app)
+      .get(`${BASE}/classes/${klass._id}/students/${bala._id}/points`)
+      .set("Cookie", cookieFor(asha, "STUDENT"));
+
+    expect(res.status).toBe(200);
+    expect(res.body.scope).toBe("badges");
+    expect(res.body.badges).toEqual([expect.objectContaining({ id: "glow-up" })]);
+    expect(res.body.badges[0].detail).toBeUndefined();
+    // The ledger names the quiz and the score it paid for, and the split gives
+    // the same away for anybody who has sat one quiz.
+    expect(res.body.history).toBeUndefined();
+    expect(res.body.byKind).toBeUndefined();
+    // The total is already on the table, so withholding it here would fool
+    // nobody.
+    expect(res.body.points).toBe(28);
+  });
+
+  it("gives a student their own ledger from the same endpoint", async () => {
+    const { klass } = await seedClass();
+    const asha = await seedStudent(klass, "asha");
+    await pay(klass, asha, 11);
+
+    const res = await request(app)
+      .get(`${BASE}/classes/${klass._id}/students/${asha._id}/points`)
+      .set("Cookie", cookieFor(asha, "STUDENT"));
+
+    expect(res.status).toBe(200);
+    expect(res.body.scope).toBe("full");
+    expect(res.body.history).toHaveLength(1);
+  });
 });
 
 /**
