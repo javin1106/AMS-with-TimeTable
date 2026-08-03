@@ -62,6 +62,8 @@ app.use(
       "http://127.0.0.1:5173",
       "https://nitjtt.netlify.app",
       "http://localhost:8010",
+      "http://xceed.learning.app",
+      "capacitor://xceed.learning.app",
       //for chemcon
       "http://localhost:5174","https://chemcon2024.com",
   //for eaic2025
