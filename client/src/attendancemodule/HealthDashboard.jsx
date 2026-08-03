@@ -261,7 +261,7 @@ export default function HealthDashboard() {
         status={svc.erp}
         details={[
           svc.erp === 'not_configured'
-            ? 'Not configured (ERP_API_URL unset)'
+            ? 'Not configured (ERP_PORTAL_KEY unset)'
             : `Latency: ${healthData?.services?.erp?.latency ? healthData.services.erp.latency + 'ms' : '—'}`,
         ]}
         action={{ label: 'Manage ERP Sync', onClick: () => navigate('/attendance/erp-sync') }}

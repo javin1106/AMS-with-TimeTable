@@ -79,9 +79,10 @@ function erpPushConfigured() {
     return !!(ERP_ATTENDANCE_PUSH_URL.trim() && ERP_PUSH_SECRET.trim());
 }
 
-// classId mirrors erpSyncController.js's erpSubjectKey convention (semester +
-// subject abbreviation, uppercased, no spaces — e.g. "6DE") so the same class
-// identifier scheme is used across roster fetch and attendance posting.
+// classId is the outbound push's own class identifier: semester + subject
+// abbreviation, uppercased, no spaces (e.g. "6DE"). It is independent of the
+// roster fetch, which addresses subjects by the ERP's degree/department/
+// semester/abbreviation payload instead (see erpSyncController.buildErpPayload).
 function buildClassId(report) {
     const sem = String(report.semester || '').trim();
     const abbrev = String(report.subjectMeta?.subName || report.subject || '')

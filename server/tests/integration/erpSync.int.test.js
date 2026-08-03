@@ -45,7 +45,7 @@ describe("erp-sync settings singleton", () => {
   });
 });
 
-describe("ERP not configured (ERP_API_URL unset in test env)", () => {
+describe("ERP not configured (ERP_PORTAL_KEY unset in test env)", () => {
   it("rejects /fetch-rolls with 503", async () => {
     const res = await request(app)
       .post(`${BASE}/fetch-rolls`)
@@ -69,7 +69,7 @@ describe("GET /subjects", () => {
     expect(res.status).toBe(400);
   });
 
-  it("reports erpConfigured:false in the response when ERP_API_URL is unset", async () => {
+  it("reports erpConfigured:false in the response when ERP_PORTAL_KEY is unset", async () => {
     const res = await request(app)
       .get(`${BASE}/subjects?dept=CSE`)
       .set("Cookie", authCookie());

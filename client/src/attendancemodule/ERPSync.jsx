@@ -1,6 +1,8 @@
 // client/src/attendancemodule/ERPSync.jsx
 // ERP Sync — fetch each subject's enrolled roll numbers from the external
-// ERP server (keyed by semester + subject abbreviation, e.g. "6DE") and
+// ERP server (which addresses a class by degree + department + semester +
+// subject abbreviation, e.g. B.Tech / Electronics and Communication
+// Engineering / B.Tech-ECE-5 / AWP(ECE)) and
 // generate that subject's embeddings for every model (InsightFace mean +
 // top-K, AdaFace mean + top-K, subject PKLs for both spaces) using the same
 // stateless generation pipeline as the Embedding Generation page.
@@ -10,7 +12,7 @@
 // (otherwise restricted to the selected dept), live SSE per-student progress.
 
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { theme, styles, cssReset } from './config';
+import { theme, styles, cssReset, ERP_DEGREES } from './config';
 import getEnvironment from '../getenvironment';
 import { useDepartments } from './useDepartments';
 
@@ -60,6 +62,9 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
   const { departments, deptLoading, deptError } = useDepartments();
   const [dept, setDept] = useState(fixedDepartment || '');
   const [semester, setSemester] = useState('');
+  // '' = send whatever degree each Subject record carries; anything else
+  // overrides it for every ERP request made from this page.
+  const [degree, setDegree] = useState('');
   const [availableSems, setAvailableSems] = useState([]);
   const [semsLoading, setSemsLoading] = useState(false);
   const [instituteWise, setInstituteWise] = useState(false);
@@ -130,7 +135,7 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
       const res = await fetch(`${ERP_SYNC_API}/fetch-rolls`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subjectId: subject._id, instituteWise }),
+        body: JSON.stringify({ subjectId: subject._id, instituteWise, degree }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'ERP fetch failed');
@@ -294,17 +299,18 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
       <div style={{ marginBottom: embedded ? 14 : 24 }}>
         {!embedded && <div style={styles.heading}>ERP Sync</div>}
         <div style={{ ...styles.subheading, marginBottom: 0 }}>
-          Fetch each subject&rsquo;s enrolled roll numbers from the ERP server (key: semester +
-          subject abbreviation) and generate embeddings for every model — InsightFace, top-K
-          galleries and AdaFace — over the fetched roster.
+          Fetch each subject&rsquo;s enrolled roll numbers from the ERP server (looked up by degree,
+          department, semester and subject abbreviation) and generate embeddings for every model —
+          InsightFace, top-K galleries and AdaFace — over the fetched roster.
         </div>
       </div>
 
       {!erpConfigured && (
         <div style={{ ...styles.card, marginBottom: 16, borderLeft: `4px solid ${theme.warning}`, fontSize: 13 }}>
-          ⚠ <strong>ERP_API_URL is not configured on the server.</strong> Subject listing works, but
-          fetching rolls from the ERP will fail until the env vars (ERP_API_URL, optional
-          ERP_API_KEY / ERP_ROLLS_PATH) are set on the Node server.
+          ⚠ <strong>ERP_PORTAL_KEY is not configured on the server.</strong> Subject listing works, but
+          fetching rolls from the ERP will fail until the portal key (ERP_PORTAL_KEY, or its
+          PORTAL_KEY alias — plus an optional ERP_STUDENTS_API_URL override) is set on the Node
+          server and the server is restarted.
         </div>
       )}
 
@@ -334,6 +340,19 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
               <option value="">{!dept ? 'Select Dept First' : semsLoading ? 'Loading...' : 'All semesters'}</option>
               {dept && <option value={FIRST_YEAR_SENTINEL}>First Year</option>}
               {availableSems.map((sem) => <option key={sem} value={sem}>{sem}</option>)}
+            </select>
+          </div>
+          <div style={{ minWidth: 150, flex: '1 1 150px' }}>
+            <label style={styles.label}>Degree (ERP)</label>
+            <select
+              value={degree}
+              onChange={(e) => setDegree(e.target.value)}
+              style={styles.select}
+              disabled={busy}
+              title="Degree sent to the ERP. Auto uses whatever each subject record carries."
+            >
+              <option value="">Auto (from subject)</option>
+              {ERP_DEGREES.map((d) => <option key={d} value={d}>{d}</option>)}
             </select>
           </div>
           <label
@@ -386,7 +405,7 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
           <table className="ams-table" style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ background: theme.surfaceAlt || '#f8fafc' }}>
-                {['Subject', 'ERP key', 'Faculty (ERP)', 'Enrolled', 'Missing GT', 'Embedding file', 'Last synced', 'Actions'].map((h) => (
+                {['Subject', 'ERP lookup', 'Faculty (ERP)', 'Enrolled', 'Missing GT', 'Embedding file', 'Last synced', 'Actions'].map((h) => (
                   <th key={h} style={{ textAlign: 'left', padding: '10px 12px', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em', color: theme.textMuted, borderBottom: `1px solid ${theme.border}` }}>{h}</th>
                 ))}
               </tr>
@@ -449,7 +468,17 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
                         </div>
                         <div style={{ fontSize: 10, color: theme.textMuted }}>{s.subCode} · {s.type}</div>
                       </td>
-                      <td style={{ padding: '9px 12px', fontFamily: theme.fontMono, fontWeight: 600 }}>{s.erpKey}</td>
+                      {/* Exactly what gets POSTed to the ERP for this row —
+                          degree/department are shown on hover to keep the
+                          column narrow. */}
+                      <td
+                        style={{ padding: '9px 12px', fontFamily: theme.fontMono, fontWeight: 600 }}
+                        title={s.erpLookup ? `degree: ${degree || s.erpLookup.degree}\ndepartment: ${s.erpLookup.department}` : undefined}
+                      >
+                        {s.erpLookup?.semester || s.sem}
+                        <span style={{ color: theme.textMuted }}> / </span>
+                        {s.erpLookup?.abbreviation || s.subName}
+                      </td>
                       <td style={{ padding: '9px 12px', fontSize: 11 }}>
                         {s.erpFaculty ? (
                           <span>

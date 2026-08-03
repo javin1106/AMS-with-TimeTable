@@ -7,19 +7,38 @@
 // itself is NOT here — the page reuses POST /attendancemodule/embeddings/
 // generate with the fetched roster (see embeddingController.js).
 //
+// ── The ERP request ─────────────────────────────────────────────────────────
+// One endpoint, one shape — the NITJ ERP's student-roster API:
+//
+//   POST <ERP_STUDENTS_API_URL>
+//   Content-Type: application/json
+//   { portalKey, degree, department, semester, abbreviation }
+//
+//   e.g. { degree: "B.Tech",
+//          department: "Electronics and Communication Engineering",
+//          semester: "B.Tech-ECE-5",
+//          abbreviation: "AWP(ECE)" }
+//
+// The four non-secret fields come off the Subject document (see
+// buildErpPayload); portalKey is a server-side secret and must never be sent
+// to the browser, echoed in a response, or written to a log.
+//
 // ── Configuration (env) ──────────────────────────────────────────────────────
-//   ERP_API_URL    required — base URL of the ERP server, e.g. https://erp.example.edu/api
-//   ERP_API_KEY    optional — sent as both `Authorization: Bearer <key>` and `x-api-key`
-//   ERP_ROLLS_PATH optional — path template appended to ERP_API_URL. Default:
-//                  /rollnos/{key}
-//                  Placeholders: {key} {subCode} {sem} {dept} {subjectName}
-//                  {key} is the ERP's subject key: semester + subject
-//                  abbreviation concatenated (e.g. sem "6" + subName "DE"
-//                  → "6DE"), spaces stripped, uppercased.
+//   ERP_PORTAL_KEY       required — the ERP portal key. `PORTAL_KEY` is
+//                        accepted as an alias. Without it the ERP is treated
+//                        as unconfigured and every fetch route answers 503.
+//   ERP_STUDENTS_API_URL optional — overrides the built-in NITJ endpoint URL.
+//
+// Both are captured at module load, so changing .env needs a server restart.
 //
 // ── Expected ERP response (parsed defensively) ──────────────────────────────
-//   { rollNos: ["21CS001", ...], faculty: "Dr. X" } | { data: [...] } | [...]
-//   or arrays of objects carrying a rollNo / roll_no / rollno / regno field.
+//   The endpoint is PHP and its exact JSON shape is not contractually fixed,
+//   so parseErpResponse accepts anything reasonable: a bare array, or an
+//   object carrying the list under rollNos / roll_nos / data / students /
+//   student_list / rows / result — with items that are either plain strings
+//   or objects with a roll field (rollNo / roll_no / rollno / rollNumber /
+//   roll_number / RollNo / roll / regno / registration_no, else any key
+//   matching /roll|regn?o/i).
 //   Faculty name keys tried: faculty / facultyName / faculty_name / teacher /
 //   instructor (top level). The ERP faculty is matched against the timetable
 //   module's faculty for the same sem+abbreviation (LockSem slotData).
@@ -64,12 +83,16 @@ async function getFirstYearCodes() {
 
 const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'ground_truth');
 
-const ERP_API_URL    = process.env.ERP_API_URL || '';
-const ERP_API_KEY    = process.env.ERP_API_KEY || '';
-const ERP_ROLLS_PATH = process.env.ERP_ROLLS_PATH || '/rollnos/{key}';
+const ERP_STUDENTS_API_URL = process.env.ERP_STUDENTS_API_URL
+    || 'https://v1.nitj.ac.in/erp/modules/academic/faculty/exam_dec_2026_att_portal/get_students_api.php';
+// PORTAL_KEY is accepted as an alias so a .env written against the ERP team's
+// own sample script works unchanged.
+const ERP_PORTAL_KEY = process.env.ERP_PORTAL_KEY || process.env.PORTAL_KEY || '';
 
+// The endpoint URL has a built-in default, so what actually gates the ERP is
+// whether we hold a portal key.
 function erpConfigured() {
-    return !!ERP_API_URL.trim();
+    return !!(ERP_PORTAL_KEY.trim() && ERP_STUDENTS_API_URL.trim());
 }
 
 // Which student semester (1 or 2) first-year subjects are running in right
@@ -81,26 +104,38 @@ function firstYearStudentSem() {
     return (new Date().getMonth() + 1) >= 8 ? 1 : 2;
 }
 
-// The ERP's subject key: semester + subject abbreviation concatenated
-// (e.g. sem "6" + subName "DE" → "6DE"), spaces stripped, uppercased.
-// First-year subjects use the derived student semester (1/2) instead of
-// their section-string sem field.
-function erpSubjectKey(subject, isFirstYear = false) {
-    const sem = isFirstYear ? String(firstYearStudentSem()) : String(subject.sem || '').trim();
-    const abbrev = String(subject.subName || subject.subCode || '')
-        .replace(/\s+/g, '').toUpperCase();
-    return `${sem}${abbrev}`;
+// Maps a Subject document onto the ERP request's four non-secret fields.
+//   degree      — the Degree dropdown wins, else Subject.degree, else the
+//                 sem string's own prefix ("B.Tech-ECE-5" → "B.Tech").
+//   department  — the client sends dept underscore-separated
+//                 ("Electronics_and_Communication_Engineering"); the ERP wants
+//                 the full spaced name.
+//   semester    — Subject.sem verbatim; it is already stored in the ERP's
+//                 format ("B.Tech-ECE-5").
+//   abbreviation— Subject.subName ("AWP(ECE)"), falling back to subCode.
+function buildErpPayload(subject, degreeOverride = null) {
+    const semester     = String(subject.sem || '').trim();
+    const department   = String(subject.dept || '').replace(/_/g, ' ').trim();
+    const abbreviation = String(subject.subName || subject.subCode || '').trim();
+    const degree = String(degreeOverride || '').trim()
+        || String(subject.degree || '').trim()
+        || semester.split('-')[0].trim();
+    return { degree, department, semester, abbreviation };
 }
 
-function buildErpUrl(subject, isFirstYear = false) {
-    const semForKey = isFirstYear ? String(firstYearStudentSem()) : String(subject.sem || '');
-    const fill = (tpl) => tpl
-        .replace('{key}',         encodeURIComponent(erpSubjectKey(subject, isFirstYear)))
-        .replace('{subCode}',     encodeURIComponent(subject.subCode || ''))
-        .replace('{sem}',         encodeURIComponent(semForKey))
-        .replace('{dept}',        encodeURIComponent(subject.dept || ''))
-        .replace('{subjectName}', encodeURIComponent(subject.subjectFullName || subject.subName || ''));
-    return ERP_API_URL.replace(/\/$/, '') + fill(ERP_ROLLS_PATH);
+// Which of the four the ERP cannot do without — reported up front so an
+// incomplete Subject record fails with an actionable message instead of an
+// opaque ERP-side error.
+function missingPayloadFields(payload) {
+    return ['degree', 'department', 'semester', 'abbreviation']
+        .filter((field) => !String(payload[field] || '').trim());
+}
+
+// Last resort for a student object whose roll field uses a spelling we don't
+// know yet — any key that reads like a roll/registration number.
+function pickRollLikeValue(item) {
+    const key = Object.keys(item).find((k) => /roll|regn?o/i.test(k));
+    return key ? item[key] : '';
 }
 
 // Accepts every response shape listed in the header comment; returns
@@ -112,7 +147,8 @@ function parseErpResponse(payload) {
     if (list && typeof list === 'object' && !Array.isArray(list)) {
         faculty = list.faculty ?? list.facultyName ?? list.faculty_name
                ?? list.teacher ?? list.instructor ?? null;
-        list = list.rollNos || list.roll_nos || list.data || list.students || [];
+        list = list.rollNos || list.roll_nos || list.data || list.students
+            || list.student_list || list.rows || list.result || [];
     }
     if (!Array.isArray(list)) list = [];
 
@@ -120,7 +156,9 @@ function parseErpResponse(payload) {
     for (const item of list) {
         let value = item;
         if (item && typeof item === 'object') {
-            value = item.rollNo ?? item.roll_no ?? item.rollno ?? item.regno ?? '';
+            value = item.rollNo ?? item.roll_no ?? item.rollno ?? item.rollNumber
+                 ?? item.roll_number ?? item.RollNo ?? item.roll ?? item.regno
+                 ?? item.registration_no ?? pickRollLikeValue(item);
         }
         const roll = String(value ?? '').trim().toUpperCase();
         if (roll.length > 3) rolls.push(roll);
@@ -131,15 +169,41 @@ function parseErpResponse(payload) {
     };
 }
 
-async function fetchRollsFromErp(subject, isFirstYear = false) {
-    const url = buildErpUrl(subject, isFirstYear);
-    const headers = {};
-    if (ERP_API_KEY) {
-        headers['Authorization'] = `Bearer ${ERP_API_KEY}`;
-        headers['x-api-key']     = ERP_API_KEY;
+// POSTs the roster request and returns { rollNos, faculty, payload } — payload
+// echoed back (portalKey-free) so callers can show what was actually asked.
+// The response is read as raw text and parsed here rather than by axios: the
+// endpoint is PHP and answers a bad request with an HTML error page, which
+// axios' JSON parsing would surface as an unhelpful SyntaxError.
+async function fetchRollsFromErp(subject, degreeOverride = null) {
+    const payload = buildErpPayload(subject, degreeOverride);
+    const missing = missingPayloadFields(payload);
+    if (missing.length) {
+        throw new Error(
+            `Cannot query ERP for "${subject.subjectFullName || subject.subName}" — `
+            + `missing ${missing.join(', ')} on the subject record.`);
     }
-    const res = await axios.get(url, { headers, timeout: 15000 });
-    return parseErpResponse(res.data);
+
+    const res = await axios.post(
+        ERP_STUDENTS_API_URL,
+        { portalKey: ERP_PORTAL_KEY, ...payload },
+        {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 20000,
+            responseType: 'text',
+            transformResponse: [(data) => data],
+        },
+    );
+
+    let data;
+    try {
+        data = JSON.parse(res.data);
+    } catch {
+        // Never interpolate the request — the snippet is response-side only,
+        // so the portal key cannot leak into the error or the logs.
+        const snippet = String(res.data || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+        throw new Error(`ERP returned a non-JSON response (HTTP ${res.status}): ${snippet}`);
+    }
+    return { ...parseErpResponse(data), payload };
 }
 
 // ── Timetable faculty lookup (sem + abbreviation) ────────────────────────────
@@ -250,9 +314,9 @@ function computeMissedGroundTruth(rollNos, dept, instituteWise) {
     return missed;
 }
 
-async function syncSubjectRolls(subject, instituteWise, isFirstYear = false) {
+async function syncSubjectRolls(subject, instituteWise, isFirstYear = false, degreeOverride = null) {
     const previousRollNos = subject.enrolledRollNos || [];
-    const { rollNos, faculty: erpFaculty } = await fetchRollsFromErp(subject, isFirstYear);
+    const { rollNos, faculty: erpFaculty } = await fetchRollsFromErp(subject, degreeOverride);
     if (rollNos.length === 0) {
         return { subjectId: subject._id, subject: subject.subjectFullName,
                  ok: false, error: 'ERP returned no roll numbers' };
@@ -403,7 +467,7 @@ async function listSubjects(req, res) {
                 type:             s.type,
                 sem:              s.sem,
                 dept:             s.dept,
-                erpKey:           erpSubjectKey(s, !!s.__isFirstYear),
+                erpLookup:        buildErpPayload(s),
                 rollCount:        (s.enrolledRollNos || []).length,
                 missedCount:      (s.missedGroundTruth || []).length,
                 missedGroundTruth: s.missedGroundTruth || [],
@@ -421,13 +485,14 @@ async function listSubjects(req, res) {
     }
 }
 
-// POST /erp-sync/fetch-rolls  { subjectId, instituteWise }
+// POST /erp-sync/fetch-rolls  { subjectId, instituteWise, degree? }
+// degree comes from the page's Degree dropdown and overrides Subject.degree.
 async function fetchRolls(req, res) {
     try {
         if (!erpConfigured()) {
-            return res.status(503).json({ error: 'ERP_API_URL not configured on the server.' });
+            return res.status(503).json({ error: 'ERP_PORTAL_KEY not configured on the server.' });
         }
-        const { subjectId, instituteWise } = req.body;
+        const { subjectId, instituteWise, degree } = req.body;
         if (!subjectId) return res.status(400).json({ error: 'subjectId is required' });
 
         const subject = await Subject.findById(subjectId).lean();
@@ -435,7 +500,7 @@ async function fetchRolls(req, res) {
 
         const firstYearCodes = await getFirstYearCodes();
         const isFirstYear = firstYearCodes.has(subject.code);
-        const result = await syncSubjectRolls(subject, !!instituteWise, isFirstYear);
+        const result = await syncSubjectRolls(subject, !!instituteWise, isFirstYear, degree);
         res.json(result);
     } catch (err) {
         const status = err.response?.status;
@@ -445,15 +510,15 @@ async function fetchRolls(req, res) {
     }
 }
 
-// POST /erp-sync/fetch-rolls-bulk  { dept, sem?, instituteWise }
+// POST /erp-sync/fetch-rolls-bulk  { dept, sem?, instituteWise, degree? }
 // sem optional — omitted syncs every semester's subjects for the department.
 // Sequential on purpose — kinder to the ERP server than a parallel burst.
 async function fetchRollsBulk(req, res) {
     try {
         if (!erpConfigured()) {
-            return res.status(503).json({ error: 'ERP_API_URL not configured on the server.' });
+            return res.status(503).json({ error: 'ERP_PORTAL_KEY not configured on the server.' });
         }
-        const { dept, sem, instituteWise } = req.body;
+        const { dept, sem, instituteWise, degree } = req.body;
         if (!dept) return res.status(400).json({ error: 'dept is required' });
 
         // Same subject set the tab lists — dept-owned subjects plus
@@ -463,7 +528,8 @@ async function fetchRollsBulk(req, res) {
         const results = [];
         for (const subject of subjects) {
             try {
-                results.push(await syncSubjectRolls(subject, !!instituteWise, !!subject.__isFirstYear));
+                results.push(await syncSubjectRolls(
+                    subject, !!instituteWise, !!subject.__isFirstYear, degree));
             } catch (err) {
                 results.push({
                     subjectId: subject._id,
@@ -479,8 +545,87 @@ async function fetchRollsBulk(req, res) {
     }
 }
 
+// POST /attendancemodule/embeddings/erp-rolls
+//   { subjectId?, degree?, department?, semester?, abbreviation?, instituteWise? }
+//
+// Backs the Embedding Generation page's Manual Generation tab, which uses it
+// to fill the roll-number textarea from the ERP. The four ERP fields default
+// off the Subject record and any supplied in the body override them — the tab
+// exposes them as editable inputs so a mismatch with the ERP's own spelling
+// can be corrected without a DB edit.
+//
+// When subjectId names a real Subject this runs the SAME syncSubjectRolls the
+// ERP Sync page's Fetch button runs, so the roster it pulls is persisted
+// (enrolledRollNos / missedGroundTruth / erpSyncedAt / faculty) and the two
+// pages stay in step. An ad-hoc payload with no subjectId has nothing to
+// persist against, so those rolls are returned for the textarea only.
+//
+// Mounted on the embeddings router rather than /erp-sync because that tab sits
+// behind the embeddings menu, not the erpSync one.
+async function previewRolls(req, res) {
+    try {
+        if (!erpConfigured()) {
+            return res.status(503).json({ error: 'ERP_PORTAL_KEY not configured on the server.' });
+        }
+        const { subjectId, degree, department, semester, abbreviation, instituteWise } = req.body;
+
+        // Overrides ride on a copy of the Subject so buildErpPayload sees them,
+        // while _id (and so the persistence target) stays intact.
+        const applyOverrides = (subject) => ({
+            ...subject,
+            dept:    department   || subject.dept,
+            sem:     semester     || subject.sem,
+            subName: abbreviation || subject.subName,
+        });
+
+        let subject = null;
+        if (subjectId) {
+            const found = await Subject.findById(subjectId).lean();
+            if (!found) return res.status(404).json({ error: 'Subject not found' });
+            subject = applyOverrides(found);
+        } else {
+            subject = { dept: department, sem: semester, subName: abbreviation };
+        }
+
+        const payload = buildErpPayload(subject, degree);
+        const missing = missingPayloadFields(payload);
+        if (missing.length) {
+            return res.status(400).json({
+                error: `Cannot query ERP — missing ${missing.join(', ')}.`,
+            });
+        }
+
+        // payload carries no portalKey — safe to echo back so the page can show
+        // exactly what was asked of the ERP.
+        if (!subjectId) {
+            const { rollNos, faculty } = await fetchRollsFromErp(subject, degree);
+            return res.json({ rollNos, total: rollNos.length, faculty, payload, persisted: false });
+        }
+
+        const firstYearCodes = await getFirstYearCodes();
+        const isFirstYear = firstYearCodes.has(subject.code);
+        const result = await syncSubjectRolls(subject, !!instituteWise, isFirstYear, degree);
+        if (!result.ok) return res.status(502).json({ error: result.error });
+
+        res.json({
+            rollNos: result.rollNos,
+            total:   result.total,
+            faculty: result.erpFaculty,
+            missedGroundTruth: result.missedGroundTruth,
+            missedCount: result.missedCount,
+            payload,
+            persisted: true,
+        });
+    } catch (err) {
+        const status = err.response?.status;
+        res.status(502).json({
+            error: `ERP fetch failed${status ? ` (HTTP ${status})` : ''}: ${err.message}`,
+        });
+    }
+}
+
 // GET /erp-sync/settings — on/off state of the nightly auto-sync scheduler
-// (erpAutoSyncScheduler.js). Independent of ERP_API_URL being configured —
+// (erpAutoSyncScheduler.js). Independent of ERP_PORTAL_KEY being configured —
 // the toggle can be flipped either way regardless of reachability.
 async function getSettings(req, res) {
     try {
@@ -512,15 +657,18 @@ async function updateSettings(req, res) {
 }
 
 module.exports = {
-    listSubjects, fetchRolls, fetchRollsBulk, FIRST_YEAR_SENTINEL,
+    listSubjects, fetchRolls, fetchRollsBulk, previewRolls, FIRST_YEAR_SENTINEL,
     getSettings, updateSettings,
     // Exported for erpAutoSyncScheduler.js — the nightly change-detected sync
     // reuses the exact same per-subject logic the manual Fetch/Generate
     // buttons use, rather than duplicating it.
     syncSubjectRolls, getFirstYearCodes, resolveFirstYearTeachingDepts,
     firstYearStudentSem, rollSetsEqual, erpConfigured,
-    // Exported for healthRoutes.js — the header health bar's ERP reachability
-    // check hits this same base URL directly (no dedicated ERP health route
-    // is assumed to exist on the ERP server).
-    ERP_API_URL,
+    // Exported for the unit tests — the Subject → ERP-request mapping and the
+    // defensive response parsing are the two pieces worth pinning down.
+    buildErpPayload, parseErpResponse,
+    // Exported for healthRoutes.js / uptimeDigestScheduler.js — the ERP
+    // reachability probes hit this URL directly (no dedicated ERP health
+    // route is assumed to exist on the ERP server).
+    ERP_STUDENTS_API_URL,
 };

@@ -5,7 +5,7 @@ const axios = require("axios");
 const mlClient = require("../controllers/mlServiceClient");
 const alertNotifier = require("../controllers/alertNotifier");
 const nodeLogBuffer = require("../../../nodeLogBuffer");
-const { erpConfigured, ERP_API_URL } = require("../controllers/erpSyncController");
+const { erpConfigured, ERP_STUDENTS_API_URL } = require("../controllers/erpSyncController");
 
 let prevMlStatus = "online";
 let mlAlertInProgress = false;
@@ -80,11 +80,13 @@ async function getHealthStatus() {
   // ERP reachability check — a plain HTTP reachability probe, not an
   // auth/data check. Any HTTP response (even 404/401) means the ERP server
   // process answered, so it counts as online; only a network-level failure
-  // (timeout, DNS, connection refused) counts as offline.
+  // (timeout, DNS, connection refused) counts as offline. The roster endpoint
+  // only serves POST, so this GET is expected to come back as an error status
+  // — that is fine, validateStatus accepts anything.
   if (erpConfigured()) {
     const erpStart = Date.now();
     try {
-      await axios.get(ERP_API_URL, { timeout: 5000, validateStatus: () => true });
+      await axios.get(ERP_STUDENTS_API_URL, { timeout: 5000, validateStatus: () => true });
       response.services.erp.status = "online";
       response.services.erp.latency = Date.now() - erpStart;
       // Recovery: only mail if we had previously alerted that it went down.

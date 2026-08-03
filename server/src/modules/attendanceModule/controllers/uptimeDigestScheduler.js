@@ -17,7 +17,7 @@ const cron = require("node-cron");
 const axios = require("axios");
 const mlClient = require("./mlServiceClient");
 const alertNotifier = require("./alertNotifier");
-const { erpConfigured, ERP_API_URL } = require("./erpSyncController");
+const { erpConfigured, ERP_STUDENTS_API_URL } = require("./erpSyncController");
 const Allotment = require("../../../models/allotment");
 
 const CLIENT_HEALTH_URL = 'https://nitjtt.onrender.com';
@@ -62,7 +62,9 @@ async function probeErp() {
   if (!erpConfigured()) {
     return { name: "ERP Server", target: "", status: "not_configured", error: "" };
   }
-  return probeUrl("ERP Server", ERP_API_URL);
+  // Reachability only — the roster endpoint is POST-only, so any HTTP answer
+  // to this GET (including an error status) means the ERP is up.
+  return probeUrl("ERP Server", ERP_STUDENTS_API_URL);
 }
 
 // The ML service needs a real 200 from /health (a reverse proxy answering
