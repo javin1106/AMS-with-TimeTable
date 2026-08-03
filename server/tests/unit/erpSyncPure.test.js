@@ -104,7 +104,26 @@ describe("buildErpPayload (Subject → ERP request fields)", () => {
   });
 });
 
-describe("parseErpResponse (undocumented ERP response shapes)", () => {
+describe("parseErpResponse (ERP response shapes)", () => {
+  // The shape the NITJ portal actually returns. The roster key is all
+  // lowercase `rollnos` — camelCase `rollNos` is a different key in JS and
+  // reading the wrong one yields an empty roster, so this is pinned.
+  it("reads the portal's real payload", () => {
+    const out = parseErpResponse({
+      status: "success",
+      degree: "B.Tech",
+      department: "Electronics and Communication Engineering",
+      semester: "B.Tech-ECE-5",
+      abbreviation: "AWP(ECE)",
+      subject_code: "ECDC0301",
+      subject_name: "Antenna and Wave Propagation",
+      total_students: 3,
+      rollnos: ["23104006", "24104001", "24104002"],
+    });
+    expect(out.rollNos).toEqual(["23104006", "24104001", "24104002"]);
+    expect(out.faculty).toBeNull();
+  });
+
   it("reads a bare array of roll strings", () => {
     expect(parseErpResponse(["21ECE001", "21ECE002"]).rollNos)
       .toEqual(["21ECE001", "21ECE002"]);

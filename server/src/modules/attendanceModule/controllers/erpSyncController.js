@@ -31,17 +31,30 @@
 //
 // Both are captured at module load, so changing .env needs a server restart.
 //
-// ── Expected ERP response (parsed defensively) ──────────────────────────────
-//   The endpoint is PHP and its exact JSON shape is not contractually fixed,
-//   so parseErpResponse accepts anything reasonable: a bare array, or an
-//   object carrying the list under rollNos / roll_nos / data / students /
-//   student_list / rows / result — with items that are either plain strings
-//   or objects with a roll field (rollNo / roll_no / rollno / rollNumber /
-//   roll_number / RollNo / roll / regno / registration_no, else any key
-//   matching /roll|regn?o/i).
-//   Faculty name keys tried: faculty / facultyName / faculty_name / teacher /
-//   instructor (top level). The ERP faculty is matched against the timetable
-//   module's faculty for the same sem+abbreviation (LockSem slotData).
+// ── ERP response ────────────────────────────────────────────────────────────
+//   The observed shape — note the all-lowercase `rollnos` key:
+//
+//     { "status": "success",
+//       "degree": "B.Tech", "department": "Electronics and Communication Engineering",
+//       "semester": "B.Tech-ECE-5", "abbreviation": "AWP(ECE)",
+//       "subject_code": "ECDC0301", "subject_name": "Antenna and Wave Propagation",
+//       "total_students": 88,
+//       "rollnos": ["23104006", "24104001", ...] }
+//
+//   Failures are reported IN BAND — `status` comes back as something other
+//   than "success" while the HTTP status stays 200 — so the status field is
+//   checked before the roster is read.
+//
+//   parseErpResponse stays permissive beyond that shape: a bare array, or an
+//   object carrying the list under rollnos / rollNos / roll_nos / data /
+//   students / student_list / rows / result — with items that are either
+//   plain strings or objects with a roll field (rollNo / roll_no / rollno /
+//   rollNumber / roll_number / RollNo / roll / regno / registration_no, else
+//   any key matching /roll|regn?o/i).
+//   No faculty is present in the observed response, so erpFaculty is normally
+//   null; faculty / facultyName / faculty_name / teacher / instructor are
+//   still read if the ERP ever adds one. When present it is matched against
+//   the timetable module's faculty for the same sem+abbreviation (LockSem).
 
 const fs    = require('fs');
 const path  = require('path');
@@ -147,8 +160,10 @@ function parseErpResponse(payload) {
     if (list && typeof list === 'object' && !Array.isArray(list)) {
         faculty = list.faculty ?? list.facultyName ?? list.faculty_name
                ?? list.teacher ?? list.instructor ?? null;
-        list = list.rollNos || list.roll_nos || list.data || list.students
-            || list.student_list || list.rows || list.result || [];
+        // `rollnos` is the key the ERP actually sends — the camelCase variants
+        // below are only tolerated alternatives.
+        list = list.rollnos || list.rollNos || list.roll_nos || list.data
+            || list.students || list.student_list || list.rows || list.result || [];
     }
     if (!Array.isArray(list)) list = [];
 
@@ -203,7 +218,28 @@ async function fetchRollsFromErp(subject, degreeOverride = null) {
         const snippet = String(res.data || '').replace(/\s+/g, ' ').trim().slice(0, 200);
         throw new Error(`ERP returned a non-JSON response (HTTP ${res.status}): ${snippet}`);
     }
-    return { ...parseErpResponse(data), payload };
+
+    // The ERP reports failures in band, with HTTP 200 and a non-success
+    // status — without this check a rejected request would look like a
+    // subject that simply has no students enrolled.
+    const status = (data && typeof data === 'object') ? String(data.status ?? '').trim() : '';
+    if (status && !/^(success|ok|true)$/i.test(status)) {
+        const detail = data.message || data.error || data.msg || status;
+        throw new Error(`ERP request rejected: ${detail}`);
+    }
+
+    const parsed = parseErpResponse(data);
+
+    // The ERP states its own count; a disagreement means the roster was
+    // parsed wrongly, which would otherwise show up as a silently short
+    // roster and, downstream, students missing from attendance.
+    const claimed = Number(data?.total_students);
+    if (Number.isFinite(claimed) && claimed !== parsed.rollNos.length) {
+        console.warn(`[ErpSync] ${payload.semester}/${payload.abbreviation}: ERP reported `
+            + `${claimed} students but ${parsed.rollNos.length} roll numbers were parsed.`);
+    }
+
+    return { ...parsed, payload };
 }
 
 // ── Timetable faculty lookup (sem + abbreviation) ────────────────────────────
