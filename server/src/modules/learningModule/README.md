@@ -326,10 +326,15 @@ attempt** for the teacher to review, and the enforcement decision is the
 server's, not the browser's.
 
 - `preventMobile` — checked server-side from the User-Agent when starting.
-- `allowTabChange` / `maxTabSwitches` / `autoSubmitOnTabLimit` — tab and window
-  blur is counted; passing the budget warns, or ends the attempt if configured.
+- `allowTabChange` / `maxTabSwitches` / `autoSubmitOnTabLimit` — leaving the
+  test is counted; passing the budget warns, or ends the attempt if configured.
+  Tab and window blur always count, and a fullscreen exit counts too when the
+  paper required fullscreen, which is what the brief promises the student.
+  Events landing within two seconds of each other are one departure: a browser
+  that drops fullscreen as it blurs would otherwise charge twice for one Escape.
 - `requireFullscreen` — the sitting is gated behind fullscreen, and exits are
-  recorded.
+  recorded. The client watches `fullscreenchange` for the whole sitting, in both
+  delivery modes, so the gate cannot be bypassed by a stale "still fullscreen".
 - `disableCopyPaste`, `disableRightClick`.
 
 Every event lands in `attempt.violations` with a timestamp, and terminated

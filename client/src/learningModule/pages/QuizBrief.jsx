@@ -411,14 +411,19 @@ export default function QuizBrief() {
                 <List spacing={1} fontSize="xs">
                   {!settings.allowTabChange && (
                     <ListItem>
-                      • Leaving this tab or window is recorded. You may do so at most{' '}
-                      {settings.maxTabSwitches} time(s)
+                      • Leaving this tab or window
+                      {settings.requireFullscreen ? ', or leaving fullscreen,' : ''} is recorded. You may
+                      do so at most {settings.maxTabSwitches} time(s)
                       {settings.autoSubmitOnTabLimit
                         ? ' — beyond that your test is submitted automatically.'
                         : '.'}
                     </ListItem>
                   )}
-                  {settings.requireFullscreen && <ListItem>• The test runs in fullscreen.</ListItem>}
+                  {settings.requireFullscreen && (
+                    <ListItem>
+                      • The test runs in fullscreen — leaving it stops the paper until you return.
+                    </ListItem>
+                  )}
                   {settings.disableCopyPaste && <ListItem>• Copy and paste are disabled.</ListItem>}
                   {settings.disableRightClick && <ListItem>• Right-click is disabled.</ListItem>}
                   {settings.preventMobile && <ListItem>• Mobile devices are not permitted.</ListItem>}

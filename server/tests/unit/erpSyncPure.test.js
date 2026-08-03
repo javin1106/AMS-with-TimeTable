@@ -2,6 +2,8 @@ const {
   rollSetsEqual,
   buildErpPayload,
   parseErpResponse,
+  semMatches,
+  deptAliasPatterns,
 } = require("../../src/modules/attendanceModule/controllers/erpSyncController");
 
 describe("rollSetsEqual", () => {
@@ -157,6 +159,83 @@ describe("parseErpResponse (ERP response shapes)", () => {
   it("returns an empty roster rather than throwing on an unexpected shape", () => {
     expect(parseErpResponse({ status: "error", message: "bad key" }))
       .toEqual({ rollNos: [], faculty: null });
+  });
+});
+
+describe("deptAliasPatterns (dropdown department → Subject.dept spellings)", () => {
+  // The dropdown always sends the timetable's full department name, while
+  // Subject.dept holds abbreviations and truncations. A department matches
+  // when ANY of the returned patterns does.
+  const matches = (dept, stored) =>
+    deptAliasPatterns(dept).some((re) => re.test(stored));
+
+  it("matches the full name, in either underscore or space spelling", () => {
+    expect(matches("Computer_Science_and_Engineering", "Computer Science and Engineering")).toBe(true);
+    expect(matches("Computer Science and Engineering", "Computer_Science_and_Engineering")).toBe(true);
+  });
+
+  it("matches the initials, skipping stopwords", () => {
+    expect(matches("Computer_Science_and_Engineering", "CSE")).toBe(true);
+    expect(matches("Electronics_and_Communication_Engineering", "ECE")).toBe(true);
+    expect(matches("Instrumentation_and_Control_Engineering", "ICE")).toBe(true);
+    expect(matches("Information_Technology", "IT")).toBe(true);
+  });
+
+  it("matches a truncated department name", () => {
+    expect(matches("Mechanical_Engineering", "Mechanical")).toBe(true);
+    expect(matches("Civil_Engineering", "Civil")).toBe(true);
+    expect(matches("Industrial_and_Production_Engineering", "Industrial and Production")).toBe(true);
+    expect(matches("Mathematics_&_Computing", "Mathematics")).toBe(true);
+  });
+
+  it("tolerates surrounding whitespace and case in the stored value", () => {
+    expect(matches("Chemistry", " chemistry ")).toBe(true);
+    expect(matches("Computer_Science_and_Engineering", "Computer Science and Engineering ")).toBe(true);
+  });
+
+  it("does not match a different department", () => {
+    expect(matches("Computer_Science_and_Engineering", "Civil Engineering")).toBe(false);
+    expect(matches("Civil_Engineering", "CSE")).toBe(false);
+    expect(matches("Mechanical_Engineering", "Mechatronics")).toBe(false);
+  });
+
+  it("does not produce a prefix ending on a stopword", () => {
+    expect(matches("Industrial_and_Production_Engineering", "Industrial and")).toBe(false);
+  });
+
+  it("returns nothing for a blank department", () => {
+    expect(deptAliasPatterns("")).toEqual([]);
+  });
+});
+
+describe("semMatches (Semester dropdown value → Subject.sem)", () => {
+  it("accepts every subject when no semester is selected", () => {
+    expect(semMatches("B.Tech-ECE-5", "")).toBe(true);
+    expect(semMatches("B.Tech-ECE-5", undefined)).toBe(true);
+  });
+
+  it("matches the same string regardless of case and padding", () => {
+    expect(semMatches(" B.Tech-ECE-5 ", "b.tech-ece-5")).toBe(true);
+  });
+
+  it("matches a bare-number dropdown value against an ERP-formatted sem", () => {
+    expect(semMatches("B.Tech-ECE-5", "5")).toBe(true);
+    expect(semMatches("5", "B.Tech-ECE-5")).toBe(true);
+  });
+
+  it("does not collapse two differently-formatted sems sharing a number", () => {
+    expect(semMatches("B.Tech-ECE-5", "M.Tech-ECE-5")).toBe(false);
+    expect(semMatches("B.Tech-ECE-5", "B.Tech-CSE-5")).toBe(false);
+  });
+
+  it("rejects a different semester number", () => {
+    expect(semMatches("B.Tech-ECE-5", "6")).toBe(false);
+    expect(semMatches("5", "6")).toBe(false);
+  });
+
+  it("rejects a subject with no semester at all", () => {
+    expect(semMatches("", "5")).toBe(false);
+    expect(semMatches("B.Tech-CH+VLSI-SectionB6", "5")).toBe(false);
   });
 });
 

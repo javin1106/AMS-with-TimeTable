@@ -257,9 +257,24 @@ export default function QuizAttempt() {
 
   /* ---------------------------- proctoring ----------------------------- */
 
+  /**
+   * Whether a paper is live on screen.
+   *
+   * Not `attempt.status` alone: one-at-a-time delivery never hands back an
+   * attempt document while it runs — the question endpoint is the whole
+   * response — so an attempt-only test left the sequential mode, the one the
+   * "Exam" preset uses and the one that turns every proctoring option on,
+   * entirely unproctored: right-click worked, and leaving fullscreen was
+   * neither reported nor noticed.
+   */
+  const sitting =
+    !finishedRef.current &&
+    !result &&
+    (sequential ? Boolean(current) : attempt?.status === 'in_progress');
+
   const proctoring = useProctoring({
     settings: settings || {},
-    active: Boolean(attempt) && attempt.status === 'in_progress' && !finishedRef.current,
+    active: sitting,
     onViolation: (type) => lmApi.recordViolation(classId, attemptId, type),
     onTerminated: async () => {
       finishedRef.current = true;
@@ -526,7 +541,7 @@ export default function QuizAttempt() {
             <HStack>
               {proctoring.remaining !== null && proctoring.remaining !== undefined && (
                 <Badge colorScheme={proctoring.remaining > 0 ? 'orange' : 'red'}>
-                  {proctoring.remaining} tab switch(es) left
+                  {proctoring.remaining} exit(s) left
                 </Badge>
               )}
               {remaining !== null && (
@@ -606,15 +621,19 @@ export default function QuizAttempt() {
         </Box>
 
         {/* The paper does not demand fullscreen — the gate above never fires —
-            but it still counts leaving, so dropping out of fullscreen has to
-            say what it costs rather than pass silently. Not dismissible: it is
-            true for exactly as long as they are out. */}
-        {!inFullscreen && leftFullscreenCost && (
+            but pressing Escape still drops the student out of the screen they
+            were told to sit the test on, so it is said out loud rather than
+            passing silently, with what it costs when it costs something. Not
+            dismissible: it is true for exactly as long as they are out. */}
+        {!inFullscreen && (
           <Alert status="warning" borderRadius="md" mb={4}>
             <AlertIcon />
             <Box flex="1">
               <Text fontWeight="600">You are no longer in fullscreen</Text>
-              <Text fontSize="sm">{leftFullscreenCost}</Text>
+              <Text fontSize="sm">
+                {leftFullscreenCost ||
+                  'Your clock is still running. Go back to fullscreen to carry on with the test on a clean screen.'}
+              </Text>
             </Box>
             <Button size="xs" colorScheme="orange" onClick={requestQuizFullscreen}>
               Back to fullscreen
