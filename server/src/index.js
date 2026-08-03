@@ -254,7 +254,7 @@ mongoose
       // ── ERP Auto-Sync Scheduler ───────────────────────────────
       // Nightly: re-fetches every subject's ERP roster and regenerates
       // embeddings ONLY for subjects whose roster actually changed since
-      // last sync (no-op until ERP_API_URL is configured; toggle on/off
+      // last sync (no-op until ERP_PORTAL_KEY is configured; toggle on/off
       // from the ERP Sync page — see ErpSyncSettings).
       const { startErpAutoSyncScheduler } = require('./modules/attendanceModule/controllers/erpAutoSyncScheduler');
       startErpAutoSyncScheduler();
@@ -277,7 +277,7 @@ mongoose
       // consolidated Server Down digest if any are unreachable. Distinct
       // from the edge-triggered 30s health monitor in healthRoutes.js —
       // recipients come from the same serverDown opt-in. Probe targets are
-      // CLIENT_HEALTH_URL / SERVER_HEALTH_URL (plus ML_SERVICE_URL / ERP_API_URL).
+      // CLIENT_HEALTH_URL / SERVER_HEALTH_URL (plus ML_SERVICE_URL / ERP_STUDENTS_API_URL).
       const { startUptimeDigestScheduler } = require('./modules/attendanceModule/controllers/uptimeDigestScheduler');
       startUptimeDigestScheduler();
 
