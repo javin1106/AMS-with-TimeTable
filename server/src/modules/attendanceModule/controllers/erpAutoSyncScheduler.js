@@ -41,7 +41,7 @@ async function resolveGenerateParams(subject, isFirstYear) {
 
 async function runErpAutoSync() {
   if (!erpConfigured()) {
-    console.log("[ErpAutoSync] ERP_API_URL not configured — skipping run.");
+    console.log("[ErpAutoSync] ERP_PORTAL_KEY not configured — skipping run.");
     return;
   }
   const settings = await ErpSyncSettings.getSettings();

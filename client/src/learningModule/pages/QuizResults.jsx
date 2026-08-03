@@ -361,7 +361,7 @@ export default function QuizResults() {
                           <Td>
                             {attempt.tabSwitches > 0 && (
                               <Badge colorScheme="orange" fontSize="0.6rem" mr={1}>
-                                {attempt.tabSwitches} switch
+                                {attempt.tabSwitches}× away
                               </Badge>
                             )}
                             {(attempt.violations || []).some((v) => v.type === 'fullscreen_exit') && (

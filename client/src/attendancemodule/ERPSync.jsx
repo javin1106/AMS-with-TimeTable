@@ -1,6 +1,8 @@
 // client/src/attendancemodule/ERPSync.jsx
 // ERP Sync — fetch each subject's enrolled roll numbers from the external
-// ERP server (keyed by semester + subject abbreviation, e.g. "6DE") and
+// ERP server (which addresses a class by degree + department + semester +
+// subject abbreviation, e.g. B.Tech / Electronics and Communication
+// Engineering / B.Tech-ECE-5 / AWP(ECE)) and
 // generate that subject's embeddings for every model (InsightFace mean +
 // top-K, AdaFace mean + top-K, subject PKLs for both spaces) using the same
 // stateless generation pipeline as the Embedding Generation page.
@@ -37,6 +39,13 @@ function embeddingStatus(s) {
   return 'current';
 }
 
+// Identifies a table row. A subject the timetable schedules but the Subject
+// collection never got has no _id, so it is keyed by what does identify it to
+// the ERP: its semester and abbreviation.
+function rowKey(s) {
+  return s._id ? String(s._id) : `tt:${s.erpLookup?.semester || s.sem}:${s.subName}`;
+}
+
 function StatusBadge({ status }) {
   const cfg = {
     done:       { bg: '#dcfce7', color: '#16a34a', label: 'done' },
@@ -67,6 +76,16 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
   const [subjects, setSubjects] = useState([]);
   const [erpConfigured, setErpConfigured] = useState(true);
   const [subjectsLoading, setSubjectsLoading] = useState(false);
+  // How the server resolved the subject set (which join key produced what) —
+  // rendered when the list comes back empty, since the three keys involved
+  // fail silently and independently.
+  const [diagnostics, setDiagnostics] = useState(null);
+  // rowKey → { rollNos, missedGroundTruth, error }. Holds this session's fetch
+  // result for every row: it IS the roster for rows with no Subject record
+  // (nothing persisted it), and for the rest it records that a fetch happened
+  // and how it went, which is what lets the table say "Not available" rather
+  // than showing an indistinguishable zero.
+  const [rosters, setRosters] = useState({});
 
   const [fetchingId, setFetchingId] = useState(null);
   const [bulkFetching, setBulkFetching] = useState(false);
@@ -111,6 +130,7 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to load subjects');
       setSubjects(data.subjects || []);
+      setDiagnostics(data.diagnostics || null);
       setErpConfigured(data.erpConfigured !== false);
     } catch (err) {
       showToast(err.message, 'error');
@@ -121,24 +141,87 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
 
   useEffect(() => { loadSubjects(); }, [loadSubjects]);
 
+  // The roster in force for a row: the persisted one when a Subject record
+  // holds it, otherwise whatever this session fetched.
+  const rollsFor = useCallback((s) => {
+    const fetched = rosters[rowKey(s)];
+    if (fetched?.rollNos?.length) return fetched.rollNos;
+    return s.enrolledRollNos || [];
+  }, [rosters]);
+
+  const missedFor = useCallback((s) => {
+    const fetched = rosters[rowKey(s)];
+    if (fetched?.rollNos?.length) return fetched.missedGroundTruth || [];
+    return s.missedGroundTruth || [];
+  }, [rosters]);
+
+  // What the Enrolled column shows: a count, "Not available" once a fetch came
+  // back empty or failed, or "—" when nothing has been asked for yet.
+  const rollStatus = useCallback((s) => {
+    const count = rollsFor(s).length;
+    if (count > 0) return { count };
+    const fetched = rosters[rowKey(s)];
+    if (fetched) return { unavailable: true, error: fetched.error };
+    return {};
+  }, [rollsFor, rosters]);
+
   // subject param carries the live row so fetchingId reflects real per-subject
   // progress — used both for the single "Fetch from ERP" button and, looped
   // sequentially, for "Fetch all from ERP" below.
+  //
+  // Rows without a Subject record (a subject the timetable schedules but the
+  // Subject collection never got) come back unpersisted, so their roster is
+  // kept here in `rosters` for the session — enough to display it and to
+  // generate embeddings from it.
   const fetchRolls = async (subject, { silent = false } = {}) => {
-    setFetchingId(subject._id);
+    const key = rowKey(subject);
+    setFetchingId(key);
+    const label = subject.subName || subject.subjectFullName;
     try {
       const res = await fetch(`${ERP_SYNC_API}/fetch-rolls`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subjectId: subject._id, instituteWise }),
+        // Degree is not sent: the server derives it from the subject record,
+        // or from the semester prefix ("B.Tech-ECE-5" → "B.Tech").
+        //
+        // dept + sem + abbreviation are always sent. They back the ERP
+        // request's department/semester/abbreviation when no Subject record
+        // does — the same three fields the Manual Generation tab posts — and
+        // the timetable's semester string is the one the ERP understands.
+        body: JSON.stringify({
+          subjectId: subject._id || undefined,
+          dept,
+          sem: subject.erpLookup?.semester || subject.sem,
+          abbreviation: subject.erpLookup?.abbreviation || subject.subName,
+          instituteWise,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'ERP fetch failed');
-      if (!silent) showToast(`${subject.subName || subject.subjectFullName}: ${data.total} rolls (${data.missedCount} missing GT)`);
-      await loadSubjects();
+
+      // The ERP answers "no such class" as a 200 with an empty roster, so an
+      // unsuccessful result is a normal response, not an exception.
+      if (data.ok === false) {
+        setRosters((prev) => ({ ...prev, [key]: { rollNos: [], error: data.error || 'No roll numbers' } }));
+        if (!silent) showToast(`${label}: ${data.error || 'no roll numbers'}`, 'error');
+        return false;
+      }
+
+      setRosters((prev) => ({
+        ...prev,
+        [key]: {
+          rollNos: data.rollNos || [],
+          missedGroundTruth: data.missedGroundTruth || [],
+          error: null,
+        },
+      }));
+      if (!silent) showToast(`${label}: ${data.total} rolls (${data.missedCount} missing GT)`);
+      // Only a persisted fetch changes what the server would return.
+      if (data.persisted) await loadSubjects();
       return true;
     } catch (err) {
-      showToast(`${subject.subName || subject.subjectFullName}: ${err.message}`, 'error');
+      setRosters((prev) => ({ ...prev, [key]: { rollNos: [], error: err.message } }));
+      showToast(`${label}: ${err.message}`, 'error');
       return false;
     } finally {
       setFetchingId(null);
@@ -166,7 +249,8 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
   // (Subject bookkeeping) and rosterExact (PKL contains exactly this roster).
   // skipConfirm: true when Generate-all already asked one blanket confirmation.
   const generateForSubject = async (subject, skipConfirm = false) => {
-    if (!subject.enrolledRollNos?.length) {
+    const rollNos = rollsFor(subject);
+    if (!rollNos.length) {
       showToast('Fetch rolls from ERP first', 'error');
       return false;
     }
@@ -177,7 +261,7 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
       );
       if (!ok) return false;
     }
-    setGeneratingId(subject._id);
+    setGeneratingId(rowKey(subject));
     setProgressSubject(subject.subjectFullName || subject.subName);
     setProgressRows([]);
     setDoneSummary(null);
@@ -192,11 +276,13 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
           subject: subject.subjectFullName,
           dept,
           subjectCode: subject.subCode || '',
-          rollNos: subject.enrolledRollNos,
+          rollNos,
           // Institute-wide is automatic for first-year subjects — their
           // students' GT folders live under other departments' batches.
           instituteWise: instituteWise || !!subject.isFirstYear,
-          subjectId: subject._id,
+          // Absent for a timetable-only subject — there is no document to do
+          // the bookkeeping on. The .pkl is still written either way.
+          subjectId: subject._id || undefined,
           rosterExact: true,
         }),
       });
@@ -249,7 +335,7 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
   };
 
   const generateAll = async () => {
-    const ready = subjects.filter((s) => (s.rollCount || 0) > 0);
+    const ready = subjects.filter((s) => rollsFor(s).length > 0);
     if (!ready.length) { showToast('No subjects with ERP rolls yet', 'error'); return; }
 
     // One blanket confirmation for every subject whose embeddings would be
@@ -294,17 +380,18 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
       <div style={{ marginBottom: embedded ? 14 : 24 }}>
         {!embedded && <div style={styles.heading}>ERP Sync</div>}
         <div style={{ ...styles.subheading, marginBottom: 0 }}>
-          Fetch each subject&rsquo;s enrolled roll numbers from the ERP server (key: semester +
-          subject abbreviation) and generate embeddings for every model — InsightFace, top-K
-          galleries and AdaFace — over the fetched roster.
+          Fetch each subject&rsquo;s enrolled roll numbers from the ERP server (looked up by degree,
+          department, semester and subject abbreviation) and generate embeddings for every model —
+          InsightFace, top-K galleries and AdaFace — over the fetched roster.
         </div>
       </div>
 
       {!erpConfigured && (
         <div style={{ ...styles.card, marginBottom: 16, borderLeft: `4px solid ${theme.warning}`, fontSize: 13 }}>
-          ⚠ <strong>ERP_API_URL is not configured on the server.</strong> Subject listing works, but
-          fetching rolls from the ERP will fail until the env vars (ERP_API_URL, optional
-          ERP_API_KEY / ERP_ROLLS_PATH) are set on the Node server.
+          ⚠ <strong>ERP_PORTAL_KEY is not configured on the server.</strong> Subject listing works, but
+          fetching rolls from the ERP will fail until the portal key (ERP_PORTAL_KEY, or its
+          PORTAL_KEY alias — plus an optional ERP_STUDENTS_API_URL override) is set on the Node
+          server and the server is restarted.
         </div>
       )}
 
@@ -315,7 +402,7 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
             <label style={styles.label}>Department</label>
             <select
               value={dept}
-              onChange={(e) => { setDept(e.target.value); setSubjects([]); }}
+              onChange={(e) => { setDept(e.target.value); setSubjects([]); setRosters({}); }}
               style={styles.select}
               disabled={deptLoading || !!fixedDepartment || busy}
             >
@@ -327,7 +414,7 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
             <label style={styles.label}>Semester</label>
             <select
               value={semester}
-              onChange={(e) => { setSemester(e.target.value); setSubjects([]); }}
+              onChange={(e) => { setSemester(e.target.value); setSubjects([]); setRosters({}); }}
               style={styles.select}
               disabled={!dept || semsLoading || busy}
             >
@@ -336,6 +423,10 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
               {availableSems.map((sem) => <option key={sem} value={sem}>{sem}</option>)}
             </select>
           </div>
+          {/* No Degree control — the ERP request's degree is derived from the
+              subject record, falling back to its semester prefix
+              ("B.Tech-ECE-5" → "B.Tech"). The per-row ERP lookup tooltip shows
+              what was derived. */}
           <label
             title={semester === FIRST_YEAR_SENTINEL ? 'First-year subjects always search institute-wide' : undefined}
             style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: theme.text, paddingBottom: 8, cursor: semester === FIRST_YEAR_SENTINEL ? 'not-allowed' : 'pointer' }}
@@ -358,13 +449,31 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
           </button>
           <button
             onClick={generateAll}
-            disabled={!dept || busy || subjects.every((s) => !s.rollCount)}
+            disabled={!dept || busy || subjects.every((s) => !rollsFor(s).length)}
             style={{ ...styles.btnPrimary, background: theme.success, opacity: (!dept || busy) ? 0.6 : 1, whiteSpace: 'nowrap' }}
           >
             {bulkGenerating ? 'Generating all…' : 'Generate all'}
           </button>
         </div>
         <div style={{ marginTop: 8, fontSize: 11, color: theme.textMuted }}>
+          {/* There is no subject picker here — department + semester resolves
+              the subject set, and every one of them gets its own ERP roster
+              request. Stating the count makes that set visible before a
+              bulk run is started. */}
+          {dept && !subjectsLoading && (
+            <div style={{ marginBottom: 4 }}>
+              <strong>{subjects.length}</strong> subject{subjects.length !== 1 ? 's' : ''} resolved for{' '}
+              {dept.replace(/_/g, ' ')}
+              {semester === FIRST_YEAR_SENTINEL
+                ? ' · First Year'
+                : semester ? ` · semester ${semester}` : ' · all semesters'}
+              {subjects.length > 0 && ' — Fetch all sends one ERP roster request per subject.'}
+              {subjects.some((s) => s.hasSubjectRecord === false) && (
+                <> Subjects marked <strong>NO SUBJECT RECORD</strong> are fetched and generated the same
+                way, but their roster is not saved.</>
+              )}
+            </div>
+          )}
           Institute Wise widens ground-truth lookup across all departments; unchecked restricts it
           to {dept ? dept.replace(/_/g, ' ') : 'the selected department'} and this semester.
         </div>
@@ -379,14 +488,45 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
         ) : subjectsLoading ? (
           <div style={{ padding: 32, textAlign: 'center', color: theme.textMuted, fontSize: 13 }}>Loading subjects…</div>
         ) : subjects.length === 0 ? (
-          <div style={{ padding: 32, textAlign: 'center', color: theme.textMuted, fontSize: 13 }}>
-            No subjects found for this department{semester ? '/semester' : ''}.
+          // An empty set is the one failure this page cannot act on, so it
+          // reports which of the three join keys came up short rather than
+          // just saying "none" — see collectSubjectsForDept.
+          <div style={{ padding: 32, color: theme.textMuted, fontSize: 13 }}>
+            <div style={{ textAlign: 'center', fontWeight: 600, marginBottom: diagnostics ? 14 : 0 }}>
+              No subjects found for this department{semester ? '/semester' : ''}.
+            </div>
+            {diagnostics && (
+              <div style={{ maxWidth: 620, margin: '0 auto', fontSize: 12, lineHeight: 1.7 }}>
+                <div>
+                  Timetables matched for this department:{' '}
+                  <strong>{diagnostics.timetableCodes?.length || 0}</strong>
+                  {diagnostics.timetableCodes?.length > 0 && (
+                    <span style={{ fontFamily: theme.fontMono }}> ({diagnostics.timetableCodes.join(', ')})</span>
+                  )}
+                </div>
+                <div>
+                  Subjects in the locked timetable for{' '}
+                  {semester === FIRST_YEAR_SENTINEL ? 'First Year' : semester ? `semester ${semester}` : 'all semesters'}:{' '}
+                  <strong>{diagnostics.timetableSubjectNames?.length || 0}</strong>
+                </div>
+                <div>
+                  Subject records considered: <strong>{diagnostics.subjectCollectionCandidates || 0}</strong>
+                </div>
+                {(diagnostics.timetableCodes?.length || 0) === 0
+                  && (diagnostics.timetableSubjectNames?.length || 0) === 0 && (
+                  <div style={{ marginTop: 10 }}>
+                    No timetable was matched for this department at all — check that a timetable exists
+                    for it (and is marked as the current session).
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         ) : (
           <table className="ams-table" style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ background: theme.surfaceAlt || '#f8fafc' }}>
-                {['Subject', 'ERP key', 'Faculty (ERP)', 'Enrolled', 'Missing GT', 'Embedding file', 'Last synced', 'Actions'].map((h) => (
+                {['Subject', 'ERP lookup', 'Faculty (ERP)', 'Enrolled', 'Missing GT', 'Embedding file', 'Last synced', 'Actions'].map((h) => (
                   <th key={h} style={{ textAlign: 'left', padding: '10px 12px', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em', color: theme.textMuted, borderBottom: `1px solid ${theme.border}` }}>{h}</th>
                 ))}
               </tr>
@@ -417,11 +557,22 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
                       </tr>
                     );
                   }
+                  const key = rowKey(s);
+                  const roll = rollStatus(s);
+                  const missed = missedFor(s);
                   rows.push(
-                    <tr key={s._id} style={{ borderBottom: `1px solid ${theme.border}` }}>
+                    <tr key={key} style={{ borderBottom: `1px solid ${theme.border}` }}>
                       <td style={{ padding: '9px 12px' }}>
                         <div style={{ fontWeight: 600 }}>
                           {s.subjectFullName}
+                          {s.hasSubjectRecord === false && (
+                            <span
+                              title="Scheduled in the timetable but absent from the Subject collection. Its roster can be fetched and its embeddings generated, but the roster is not saved — it is kept only until this page is reloaded."
+                              style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, padding: '1px 6px', borderRadius: 999, background: '#f1f5f9', color: '#64748b', verticalAlign: 'middle' }}
+                            >
+                              NO SUBJECT RECORD
+                            </span>
+                          )}
                           {s.isFirstYear && (
                             <span
                               title="First-year (Basic Sciences) subject — ground-truth search runs institute-wide automatically"
@@ -449,7 +600,17 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
                         </div>
                         <div style={{ fontSize: 10, color: theme.textMuted }}>{s.subCode} · {s.type}</div>
                       </td>
-                      <td style={{ padding: '9px 12px', fontFamily: theme.fontMono, fontWeight: 600 }}>{s.erpKey}</td>
+                      {/* Exactly what gets POSTed to the ERP for this row —
+                          degree/department are shown on hover to keep the
+                          column narrow. */}
+                      <td
+                        style={{ padding: '9px 12px', fontFamily: theme.fontMono, fontWeight: 600 }}
+                        title={s.erpLookup ? `degree: ${s.erpLookup.degree}\ndepartment: ${s.erpLookup.department}` : undefined}
+                      >
+                        {s.erpLookup?.semester || s.sem}
+                        <span style={{ color: theme.textMuted }}> / </span>
+                        {s.erpLookup?.abbreviation || s.subName}
+                      </td>
                       <td style={{ padding: '9px 12px', fontSize: 11 }}>
                         {s.erpFaculty ? (
                           <span>
@@ -463,24 +624,42 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
                           </span>
                         ) : <span style={{ color: theme.textMuted }}>—</span>}
                       </td>
-                      <td style={{ padding: '9px 12px', fontFamily: theme.fontMono }}>{s.rollCount || 0}</td>
+                      {/* Enrolled — a count, or an explicit "Not available"
+                          once the ERP has been asked and had no roster for
+                          this class. A bare 0 could not tell the two apart. */}
+                      <td style={{ padding: '9px 12px', fontFamily: theme.fontMono }}>
+                        {fetchingId === key ? (
+                          <span style={{ color: theme.accent, fontWeight: 700, fontFamily: theme.fontBody }}>⏳</span>
+                        ) : roll.count ? (
+                          roll.count
+                        ) : roll.unavailable ? (
+                          <span
+                            title={roll.error || 'The ERP returned no roll numbers for this subject'}
+                            style={{ color: theme.danger, fontWeight: 700, fontFamily: theme.fontBody, fontSize: 11 }}
+                          >
+                            Not available
+                          </span>
+                        ) : (
+                          <span style={{ color: theme.textMuted }}>—</span>
+                        )}
+                      </td>
                       <td style={{ padding: '9px 12px' }}>
-                        {s.missedCount > 0 ? (
+                        {missed.length > 0 ? (
                           <button
-                            onClick={() => setExpandedMissing(expandedMissing === s._id ? null : s._id)}
+                            onClick={() => setExpandedMissing(expandedMissing === key ? null : key)}
                             style={{ background: 'transparent', border: 'none', color: theme.warning, fontWeight: 700, cursor: 'pointer', fontSize: 12, padding: 0 }}
                           >
-                            {s.missedCount} {expandedMissing === s._id ? '▲' : '▼'}
+                            {missed.length} {expandedMissing === key ? '▲' : '▼'}
                           </button>
-                        ) : (s.rollCount > 0 ? <span style={{ color: theme.success, fontWeight: 700 }}>0</span> : '—')}
-                        {expandedMissing === s._id && (
+                        ) : (roll.count ? <span style={{ color: theme.success, fontWeight: 700 }}>0</span> : '—')}
+                        {expandedMissing === key && (
                           <div style={{ marginTop: 6, fontFamily: theme.fontMono, fontSize: 10, color: theme.textMuted, maxWidth: 260, wordBreak: 'break-word' }}>
-                            {s.missedGroundTruth.join(', ')}
+                            {missed.join(', ')}
                           </div>
                         )}
                       </td>
                       <td style={{ padding: '9px 12px', fontFamily: theme.fontMono, fontSize: 11 }}>
-                        {generatingId === s._id ? (
+                        {generatingId === key ? (
                           <span style={{ color: theme.accent, fontWeight: 700, fontFamily: theme.fontBody }}>⏳ Generating…</span>
                         ) : embeddingStatus(s) === 'current' ? (
                           <span title="Embeddings up to date with the last sync">
@@ -495,13 +674,17 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
                         )}
                       </td>
                       <td style={{ padding: '9px 12px', fontSize: 11, color: theme.textMuted }}>
-                        {fetchingId === s._id ? (
+                        {fetchingId === key ? (
                           <span style={{ color: theme.accent, fontWeight: 700 }}>⏳ Syncing…</span>
                         ) : s.erpSyncedAt ? (
                           <span>
                             <span style={{ color: theme.success, fontWeight: 700 }}>✓ </span>
                             {new Date(s.erpSyncedAt).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
                           </span>
+                        ) : rosters[key] ? (
+                          // Fetched this session but nothing was written back —
+                          // there is no Subject record to record a sync time on.
+                          <span title="Fetched this session; not saved (no subject record)">this session</span>
                         ) : 'never'}
                       </td>
                       <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>
@@ -510,15 +693,15 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
                           disabled={busy || !erpConfigured}
                           style={{ padding: '5px 10px', marginRight: 6, borderRadius: 6, border: `1px solid ${theme.accent}`, background: 'transparent', color: theme.accent, fontSize: 11, fontWeight: 700, cursor: busy ? 'not-allowed' : 'pointer' }}
                         >
-                          {fetchingId === s._id ? 'Fetching…' : 'Fetch from ERP'}
+                          {fetchingId === key ? 'Fetching…' : 'Fetch from ERP'}
                         </button>
                         <button
                           onClick={() => generateForSubject(s)}
-                          disabled={busy || !s.rollCount}
+                          disabled={busy || !roll.count}
                           title={s.embeddingFile ? 'Embeddings exist — will ask before replacing' : undefined}
-                          style={{ padding: '5px 10px', borderRadius: 6, border: 'none', background: s.rollCount ? theme.success : theme.border, color: '#fff', fontSize: 11, fontWeight: 700, cursor: (busy || !s.rollCount) ? 'not-allowed' : 'pointer' }}
+                          style={{ padding: '5px 10px', borderRadius: 6, border: 'none', background: roll.count ? theme.success : theme.border, color: '#fff', fontSize: 11, fontWeight: 700, cursor: (busy || !roll.count) ? 'not-allowed' : 'pointer' }}
                         >
-                          {generatingId === s._id ? 'Generating…' : s.embeddingFile ? 'Regenerate' : 'Generate'}
+                          {generatingId === key ? 'Generating…' : s.embeddingFile ? 'Regenerate' : 'Generate'}
                         </button>
                       </td>
                     </tr>

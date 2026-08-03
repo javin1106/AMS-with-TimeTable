@@ -79,36 +79,99 @@ function ChoiceBars({ results, size }) {
   );
 }
 
+// Colours are per-word, not per-frequency: a cloud where every word is the same
+// blue reads as a paragraph. Both lists are picked for contrast against the card
+// behind them, so a word is legible from the back of the room in either mode.
+const CLOUD_COLOURS_LIGHT = [
+  'blue.600', 'purple.600', 'teal.600', 'orange.600',
+  'pink.600', 'cyan.700', 'green.600', 'red.500',
+];
+const CLOUD_COLOURS_DARK = [
+  'blue.300', 'purple.300', 'teal.300', 'orange.300',
+  'pink.300', 'cyan.300', 'green.300', 'red.300',
+];
+
+/**
+ * Stable per-word variation. Frequency alone cannot drive the look, because in a
+ * live room most answers are given exactly once — keyed on count only, every
+ * word comes out the same size and the same colour.
+ */
+const hashOf = (text) => {
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) hash = (hash * 31 + text.charCodeAt(index)) >>> 0;
+  return hash;
+};
+
+/**
+ * Deals the words into rows so the cloud fills a block instead of running as one
+ * long line. The server sends them sorted by count, so dealing round-robin from
+ * the middle row outwards puts the most-mentioned words in the centre, and the
+ * per-row re-sort breaks the big-to-small run that would otherwise be visible
+ * along each line.
+ */
+function toRows(words) {
+  const rowCount = Math.min(3, Math.max(1, Math.ceil(words.length / 4)));
+  const rows = Array.from({ length: rowCount }, () => []);
+  const middleFirst = rows
+    .map((_, index) => index)
+    .sort((a, b) => Math.abs(a - (rowCount - 1) / 2) - Math.abs(b - (rowCount - 1) / 2));
+
+  words.forEach((word, index) => rows[middleFirst[index % rowCount]].push(word));
+  return rows.map((row) => [...row].sort((a, b) => hashOf(a.text) - hashOf(b.text)));
+}
+
 function WordCloud({ results, size }) {
   const big = size === 'lg';
-  const max = results.maxCount || 1;
+  const palette = useColorModeValue(CLOUD_COLOURS_LIGHT, CLOUD_COLOURS_DARK);
   const words = results.words || [];
 
   if (!words.length) return <Text opacity={0.6}>No words yet.</Text>;
 
+  const tallies = [...new Set(words.map((word) => word.count))].sort((a, b) => a - b);
+  const most = tallies[tallies.length - 1];
+  // Words said the same number of times must not render as the same word twice,
+  // but size still has to rank by frequency. So the per-word wobble is capped at
+  // well under the smallest gap between two different counts, which keeps the
+  // ordering intact. A single distinct count means there is no ranking left to
+  // protect — the room agreed on nothing — and the hash takes the whole range.
+  const tied = tallies.length === 1;
+  const wobble = tied
+    ? 0
+    : 0.4 * (Math.min(...tallies.slice(1).map((count, index) => count - tallies[index])) / most);
+
+  const floor = big ? 20 : 12;
+  const span = big ? 64 : 22;
+
   return (
-    <Wrap spacing={big ? 5 : 3} justify="center" align="center">
-      {words.map((word) => {
-        // Font size tracks frequency, floored so a one-vote word is still
-        // legible from the back of the room rather than shrinking to nothing.
-        const weight = word.count / max;
-        const min = big ? 20 : 12;
-        const span = big ? 64 : 22;
-        return (
-          <WrapItem key={word.text}>
-            <Text
-              fontSize={`${Math.round(min + weight * span)}px`}
-              lineHeight="1.1"
-              fontWeight={weight > 0.6 ? '800' : '600'}
-              color={weight > 0.6 ? 'blue.500' : weight > 0.3 ? 'blue.400' : 'gray.500'}
-              title={`${word.count} ${word.count === 1 ? 'mention' : 'mentions'}`}
-            >
-              {word.text}
-            </Text>
-          </WrapItem>
-        );
-      })}
-    </Wrap>
+    <VStack align="stretch" spacing={big ? 3 : 1}>
+      {toRows(words).map((row) => (
+        <Wrap key={row.map((word) => word.text).join('|')} spacing={big ? 6 : 3} justify="center" align="center">
+          {row.map((word) => {
+            const hash = hashOf(word.text);
+            const fraction = (hash % 1000) / 1000;
+            const weight = tied
+              ? fraction
+              : Math.min(1, Math.max(0, word.count / most + (fraction - 0.5) * wobble));
+            return (
+              <WrapItem key={word.text}>
+                <Text
+                  fontSize={`${Math.round(floor + weight * span)}px`}
+                  lineHeight="1.1"
+                  fontWeight={weight > 0.66 ? '800' : weight > 0.33 ? '700' : '600'}
+                  color={palette[hash % palette.length]}
+                  // The rare words recede rather than disappear — still readable
+                  // on a projector, but not competing with the room's answer.
+                  opacity={0.75 + 0.25 * weight}
+                  title={`${word.count} ${word.count === 1 ? 'mention' : 'mentions'}`}
+                >
+                  {word.text}
+                </Text>
+              </WrapItem>
+            );
+          })}
+        </Wrap>
+      ))}
+    </VStack>
   );
 }
 
