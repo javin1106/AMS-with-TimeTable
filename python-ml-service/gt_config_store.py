@@ -26,9 +26,16 @@ DEFAULTS = {
     "nms_iou_thresh":          0.35,
     "det_score_floor":         0.5,
     "new_person_timeout":      60,
-    "camera_switch_sec":       30,
+    # GT acquisition only — see the note in state.py. Renamed from the old
+    # "camera_switch_sec": that key was shared with the live attendance
+    # pipeline but only ever honoured there, so a value saved here silently
+    # did nothing for GT. The rename means a stale camera_switch_sec in an
+    # existing gt_config.json is dropped by the known-keys filter below
+    # instead of suddenly shortening GT sub-runs to it.
+    "gt_camera_switch_sec":    300,
     "top_n":                   10,
     "embed_n":                 5,
+    "max_imgs_per_run":        0,
 }
 
 
@@ -43,7 +50,11 @@ def load_gt_config():
             with open(CONFIG_PATH) as f:
                 saved = json.load(f)
             with state.gt_config_lock:
-                merged = {**DEFAULTS, **saved}
+                # Only keys still in DEFAULTS survive — a retired key left in an
+                # older gt_config.json (e.g. the pre-split camera_switch_sec) is
+                # dropped rather than carried forward forever.
+                merged = {**DEFAULTS, **{k: v for k, v in saved.items() if k in DEFAULTS}}
+                state.gt_config.clear()
                 state.gt_config.update(merged)
             logger.info(f"[GTConfig] Loaded from {CONFIG_PATH}: {state.gt_config}")
             return

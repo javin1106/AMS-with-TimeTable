@@ -7,22 +7,36 @@ import FrameVerification from '../attendancemodule/FrameVerification';
 import EmbeddingGeneration from '../attendancemodule/EmbeddingGeneration';
 import ConfidenceMonitor from '../attendancemodule/confidenceMonitor';
 
+const gtRollDepartments = ({ batchDepartments, batchDepartment }) => {
+    const assigned = (batchDepartments || []).filter(Boolean);
+    return assigned.length ? assigned : [batchDepartment].filter(Boolean);
+};
+
 export function DeptLiveRTSP() {
-    const { department, batchDepartment, fullAccess, loading } = useOutletContext();
+    const context = useOutletContext();
+    const { fullAccess, loading } = context;
     if (loading) return null;
     if (fullAccess) return <GroundTruthRTSP />;
-    const deptToUse = batchDepartment || department;
-    if (!deptToUse) return null;
-    return <GroundTruthRTSP fixedDepartment={deptToUse} fixedRoomDepartment={department || deptToUse} />;
+    const departments = gtRollDepartments(context);
+    if (!departments.length) return null;
+    const fixedDepartment = departments.length === 1 ? departments[0] : '';
+    return (
+        <GroundTruthRTSP
+            fixedDepartment={fixedDepartment}
+            departmentRestricted
+        />
+    );
 }
 
 export function DeptAssignRolls() {
-    const { department, batchDepartment, fullAccess, loading } = useOutletContext();
+    const context = useOutletContext();
+    const { fullAccess, loading } = context;
     if (loading) return null;
     if (fullAccess) return <RollAssign />;
-    const deptToUse = batchDepartment || department;
-    if (!deptToUse) return null;
-    return <RollAssign fixedDepartment={deptToUse} />;
+    const departments = gtRollDepartments(context);
+    if (!departments.length) return null;
+    const fixedDepartment = departments.length === 1 ? departments[0] : '';
+    return <RollAssign fixedDepartment={fixedDepartment} />;
 }
 
 export function DeptGroundTruthUpload() {

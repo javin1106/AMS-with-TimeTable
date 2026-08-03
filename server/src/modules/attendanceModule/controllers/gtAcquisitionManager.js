@@ -29,7 +29,7 @@ const mongoose   = require('mongoose');
 
 const ClusterMatch = require('../../../models/attendanceModule/clusterMatch');
 const { buildExistingFoldersPayload } = require('./embeddingSyncHelper');
-const { batchBelongsToDepartment }    = require('../middleware/attendanceAccess');
+const { batchBelongsToAnyDepartment } = require('../middleware/attendanceAccess');
 
 // The ML service may run on a separate machine — resolve from ML_SERVICE_URL,
 // same as every other integration point.
@@ -42,7 +42,12 @@ const GT_BASE_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'gro
 // forwarding to the browser.
 const GT_INTERNAL = new Set(['mkdir_batch', 'mkdir', 'crop_save', 'info_save', 'file_delete']);
 
-const SWITCH_INTERVAL_SEC = 300;              // Combined/Room: seconds per camera
+// Combined/Room: seconds per camera. The live value comes from the ML service's
+// gt_config ("gt_camera_switch_sec", ML Fine Tuning → GT Acquisition → Behaviour
+// & Storage); this is only the fallback for when that fetch fails. Live
+// attendance runs switch on their own interval — see attendanceThresholds
+// .camera_switch_sec on the AcquisitionControl model.
+const SWITCH_INTERVAL_SEC = 300;
 const MAX_DURATION_MS     = 60 * 60 * 1000;   // hard 60-minute ceiling
 const GRACE_MS            = 5 * 60 * 1000;     // keep a finished job this long for late viewers
 const LOG_MAX             = 120;
@@ -97,7 +102,16 @@ function handleGroundTruthEvent(event, batch, pythonFolderMap) {
         } else if (event.type === 'info_save') {
             const folderPath = path.join(batchDir, event.folder);
             fs.mkdirSync(folderPath, { recursive: true });
-            fs.writeFileSync(path.join(folderPath, '_info.json'), JSON.stringify(event.info, null, 2));
+            
+            const infoPath = path.join(folderPath, '_info.json');
+            let existingInfo = {};
+            if (fs.existsSync(infoPath)) {
+                try { existingInfo = JSON.parse(fs.readFileSync(infoPath, 'utf8')); } catch (_) {}
+            }
+            // Preserve approved_files and other keys that Python might not send
+            const newInfo = { ...existingInfo, ...event.info };
+            
+            fs.writeFileSync(infoPath, JSON.stringify(newInfo, null, 2));
 
             const oidStr = pythonFolderMap[event.folder];
             if (oidStr && event.info) {
@@ -311,10 +325,28 @@ function runSubRun(job, camera, subDeadlineMs) {
     });
 }
 
+// Read the per-camera dwell time from the ML service's persisted gt_config.
+// Fetched once per job rather than per sub-run so an edit made mid-acquisition
+// can't stretch or shorten a camera that is already recording. Any failure
+// (ML service down, old build without the key) falls back to the constant.
+async function resolveSwitchIntervalSec() {
+    try {
+        const { data } = await axios.get(`${ML_SERVICE_URL}/gt-config`, { timeout: 5000 });
+        const sec = Number(data && data.gt_camera_switch_sec);
+        if (Number.isFinite(sec) && sec >= 30 && sec <= 1800) return sec;
+    } catch (_) { /* fall through to the default */ }
+    return SWITCH_INTERVAL_SEC;
+}
+
 async function runAcquisition(job) {
     const deadline  = job.startedAt + job.maxDurationMs;
     const isCycling = job.mode !== 'single';
     let idx = 0;
+
+    if (isCycling) {
+        job.switchIntervalSec = await resolveSwitchIntervalSec();
+        pushLog(job, `Camera switch interval: ${job.switchIntervalSec}s`, '#9ca3af');
+    }
 
     try {
         while (!job.stopRequested && Date.now() < deadline && job.cameras.length) {
@@ -446,10 +478,10 @@ async function stopAcquisition(acquisitionId) {
     return { ok: true };
 }
 
-function listJobs({ department, fullAccess } = {}) {
+function listJobs({ departments, fullAccess } = {}) {
     const out = [];
     for (const job of jobs.values()) {
-        if (!fullAccess && department && !batchBelongsToDepartment(job.batch, department)) continue;
+        if (!fullAccess && !batchBelongsToAnyDepartment(job.batch, departments)) continue;
         out.push(summarize(job));
     }
     return out.sort((a, b) => b.startedAt - a.startedAt);

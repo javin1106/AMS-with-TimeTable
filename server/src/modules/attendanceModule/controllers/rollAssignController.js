@@ -7,12 +7,42 @@ const axios      = require('axios');
 
 const ClusterMatch = require('../../../models/attendanceModule/clusterMatch');
 const erpSync       = require('./erpEmbeddingSyncHelper');
-const { batchBelongsToDepartment } = require('../middleware/attendanceAccess');
+const {
+    batchBelongsToDepartment,
+    batchBelongsToAnyDepartment,
+} = require('../middleware/attendanceAccess');
+const { reconcileAfterPhotoDelete } = require('./groundTruthPhotoOps');
 
 const ML_SERVICE_URL   = process.env.ML_SERVICE_URL || 'http://localhost:8500';
 const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'ground_truth');
-const ERP_PHOTOS_DIR   = process.env.ERP_PHOTOS_DIR ||
-                          path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'erp_photos');
+const ERP_PHOTOS_DIR   = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'erp_photos');
+
+const imageExtRegex = /\.(jpg|jpeg|png|webp)$/i;
+
+const rollNoFromImage = (file) =>
+    path.basename(String(file || ''), path.extname(String(file || ''))).trim().toUpperCase();
+
+const readImageRollNos = async (dir) => {
+    try {
+        const files = await fsPromises.readdir(dir);
+        return files
+            .filter((file) => imageExtRegex.test(file))
+            .map(rollNoFromImage)
+            .filter(Boolean);
+    } catch (_) {
+        return [];
+    }
+};
+
+// Strictly reads photos inside ml-data/erp_photos/<batch>/ directory
+const getErpRollNosForBatch = async (batch) => {
+    const rollNos = new Set();
+    const batchDir = path.join(ERP_PHOTOS_DIR, batch);
+    for (const rollNo of await readImageRollNos(batchDir)) {
+        rollNos.add(rollNo);
+    }
+    return rollNos;
+};
 
 // Minimum confidence to treat an ERP match as genuine (same dept).
 // Below this we fall back to matching against approved ground truth clusters.
@@ -306,6 +336,14 @@ class RollAssignController {
             await ClusterMatch.findByIdAndUpdate(id, {
                 $pull: { imageFiles: safeFilename, embeddingFiles: safeFilename, previewFiles: safeFilename },
                 $inc:  { imageCount: -1 },
+            });
+            // …and from _info.json, plus the embedding/PKL rebuild the DB update
+            // alone never triggered — see groundTruthPhotoOps.
+            await reconcileAfterPhotoDelete({
+                batch:      record.batch,
+                rollNo:     record.rollNo || folder,
+                studentDir: path.join(GROUND_TRUTH_DIR, record.batch, folder),
+                filename:   safeFilename,
             });
             res.json({ ok: true, deleted: safeFilename });
         } catch (err) {
@@ -628,8 +666,41 @@ class RollAssignController {
             const batchPath = path.join(GROUND_TRUTH_DIR, batch);
             const matchMap  = {};
             const repairs   = [];
+            // Every folder name already spoken for by a DB record — under any of
+            // the three names a record can go by. An approved record keeps
+            // folderName "person_012" while its folder on disk is the rollNo, so
+            // matching on folderName alone would re-adopt it as a duplicate.
+            const tracked   = new Set();
 
             for (const r of records) {
+                // ── Automated Cleanup: delete invalid ghost records from DB ──
+                if (r.folderName === null) {
+                    repairs.push(ClusterMatch.findByIdAndDelete(r._id));
+                    
+                    // Force the *valid* record for this student to sync its image count from disk, 
+                    // since the ghost record might have held the updated count.
+                    if (r.rollNo) {
+                        const rollFolder = path.join(batchPath, r.rollNo);
+                        repairs.push(
+                            readFolderFiles(rollFolder).then(destData => 
+                                ClusterMatch.findOneAndUpdate(
+                                    { batch, rollNo: r.rollNo, folderName: { $ne: null } },
+                                    {
+                                        $set: {
+                                            imageFiles:     destData.imageFiles,
+                                            embeddingFiles: destData.embeddingFiles,
+                                            previewFiles:   destData.imageFiles.slice(0, 6),
+                                            imageCount:     destData.imageFiles.length,
+                                            updated_at:     new Date(),
+                                        }
+                                    }
+                                )
+                            ).catch(() => {})
+                        );
+                    }
+                    continue;
+                }
+
                 let currentFolder = r.currentFolder || r.folderName;
 
                 // ── Self-healing: folder was already renamed but DB wasn't updated ──
@@ -677,12 +748,75 @@ class RollAssignController {
                     imageCount:    r.imageCount    || 0,
                     error:         r.error         || null,
                 };
+
+                for (const name of [r.folderName, currentFolder, r.rollNo]) {
+                    if (name) tracked.add(name);
+                }
+            }
+
+            // ── Adopt roll-number folders that have no DB record ─────────────
+            // The Approved list is built from these records alone, so a folder
+            // sitting in ground_truth/<batch>/ with nothing pointing at it is
+            // invisible in the UI — and no other path can recover it:
+            // listClusters/listAllClusters only ever backfill person_NNN.
+            // Folders land in this state when a batch's ml-data is restored
+            // without its clustermatches, or when an approve-merge half-failed.
+            // A folder named after a roll number is by definition already
+            // assigned, so adopt it as approved.
+            if (fs.existsSync(batchPath)) {
+                const entries = await fsPromises.readdir(batchPath, { withFileTypes: true });
+                for (const entry of entries) {
+                    if (!entry.isDirectory() || entry.name.startsWith('_')) continue;
+                    if (/^person_\d+$/i.test(entry.name)) continue;   // listClusters owns these
+                    if (tracked.has(entry.name)) continue;
+
+                    const { imageFiles, embeddingFiles } = await readFolderFiles(
+                        path.join(batchPath, entry.name),
+                    );
+                    // An empty folder is leftover state, not an approved student.
+                    if (!imageFiles.length) continue;
+
+                    const doc = await ClusterMatch.findOneAndUpdate(
+                        { batch, folderName: entry.name },
+                        { $setOnInsert: {
+                            batch,
+                            folderName:     entry.name,
+                            currentFolder:  entry.name,
+                            rollNo:         entry.name,
+                            status:         'approved',
+                            approved:       true,
+                            imageFiles,
+                            embeddingFiles,
+                            previewFiles:   imageFiles.slice(0, 6),
+                            imageCount:     imageFiles.length,
+                        }},
+                        { upsert: true, new: true, setDefaultsOnInsert: true },
+                    ).lean();
+
+                    matchMap[doc.folderName] = {
+                        _id:            doc._id,
+                        folderName:     doc.folderName,
+                        currentFolder:  doc.currentFolder || doc.folderName,
+                        rollNo:         doc.rollNo,
+                        status:         doc.status,
+                        approved:       doc.approved,
+                        erpPhoto:       doc.erpPhoto      || null,
+                        confidence:     doc.confidence    || null,
+                        candidates:     doc.candidates    || [],
+                        imageFiles:     doc.imageFiles    || [],
+                        embeddingFiles: doc.embeddingFiles || [],
+                        previewFiles:   doc.previewFiles  || [],
+                        imageCount:     doc.imageCount    || 0,
+                        error:          doc.error         || null,
+                    };
+                    tracked.add(entry.name);
+                }
             }
 
             // Fire-and-forget DB repairs
             if (repairs.length) Promise.all(repairs).catch(() => {});
 
-            res.json({ batch, matchMap, total: records.length });
+            res.json({ batch, matchMap, total: Object.keys(matchMap).length });
         } catch (err) {
             res.status(500).json({ error: err.message });
         }
@@ -705,11 +839,6 @@ class RollAssignController {
 
             if (!finalRollNo) {
                 return res.status(400).json({ error: 'No roll number available — provide rollNo in body' });
-            }
-
-            if (!record) {
-                record = { batch, folderName, currentFolder: folderName, rollNo: finalRollNo,
-                           imageFiles: [], embeddingFiles: [] };
             }
 
             const currentFolder    = record.currentFolder || record.folderName;
@@ -794,23 +923,44 @@ class RollAssignController {
             }
             // ── Update DB record by ObjectId ──────────────────────────
             if (mergedIntoExisting) {
-                await ClusterMatch.findByIdAndDelete(id);
                 const allFinalFiles = fs.existsSync(folderPath) ? (await fsPromises.readdir(folderPath)).filter(f => /\.(jpg|jpeg|png|webp)$/i.test(f)).sort() : [];
-                await ClusterMatch.findOneAndUpdate(
-                    { batch, currentFolder: finalRollNo },
-                    {
-                        $set: {
-                            rollNo:        finalRollNo,
-                            status:        'approved',
-                            approved:      true,
-                            imageFiles:    allFinalFiles,
-                            imageCount:    allFinalFiles.length,
-                            previewFiles:  allFinalFiles.slice(0, 6),
-                            updated_at:    new Date(),
-                        }
-                    },
-                    { upsert: true }
-                );
+                
+                const merged = {
+                    rollNo:        finalRollNo,
+                    status:        'approved',
+                    approved:      true,
+                    imageFiles:    allFinalFiles,
+                    imageCount:    allFinalFiles.length,
+                    previewFiles:  allFinalFiles.slice(0, 6),
+                    updated_at:    new Date(),
+                };
+
+                // Which record already owns the destination folder? It may be
+                // keyed by currentFolder (approved earlier under a person_NNN
+                // folderName) or by folderName (adopted straight from disk).
+                const target = await ClusterMatch.findOne({
+                    batch,
+                    _id:  { $ne: id },
+                    $or:  [{ currentFolder: finalRollNo }, { folderName: finalRollNo }],
+                }).lean();
+
+                if (target) {
+                    // Fold into it, then drop the source — in that order, so a
+                    // failed write leaves the cluster recoverable rather than
+                    // orphaning a roll-number folder with no record at all.
+                    await ClusterMatch.findByIdAndUpdate(target._id, { $set: merged });
+                    await ClusterMatch.findByIdAndDelete(id);
+                } else {
+                    // Nothing else owns the destination: repoint this record at it,
+                    // exactly as the plain-rename branch below does. Upserting on
+                    // { batch, currentFolder } instead would insert a doc with no
+                    // folderName — it is required and half of the unique index, and
+                    // findOneAndUpdate skips validators — which then collides with
+                    // the next merge in the same batch.
+                    await ClusterMatch.findByIdAndUpdate(id, {
+                        $set: { ...merged, currentFolder: finalRollNo },
+                    });
+                }
             } else {
                 await ClusterMatch.findByIdAndUpdate(id, {
                     $set: {
@@ -856,8 +1006,14 @@ class RollAssignController {
             const safeBatch    = batch ? path.basename(batch) : null;
 
             // 1. batch-specific subfolder: erp_photos/<batch>/<filename>
+            // This page uppercases the whole batch string while the ERP Upload
+            // page keeps the DB's casing, so the folder on disk rarely matches
+            // safeBatch byte-for-byte. Without resolveOnDisk the lookup misses on
+            // a case-sensitive filesystem and falls through to step 3, which
+            // happily serves a same-named photo from a *different* batch.
             if (safeBatch) {
-                const batchPath = path.join(ERP_PHOTOS_DIR, safeBatch, safeFilename);
+                const batchDir  = erpSync.resolveOnDisk(ERP_PHOTOS_DIR, safeBatch);
+                const batchPath = path.join(ERP_PHOTOS_DIR, batchDir, safeFilename);
                 if (fs.existsSync(batchPath)) return res.sendFile(batchPath);
             }
 
@@ -885,17 +1041,21 @@ class RollAssignController {
     async erpEmbeddingStatus(req, res) {
         try {
             const { batch }  = req.params;
-            const parts      = batch.split('_');
-            const department = parts.slice(1, -1).join('_');
+            const department = erpSync.departmentFromBatch(batch);
 
             let pkgCheck = { available: false };
             try {
                 pkgCheck = await erpSync.checkErpEmbedding(batch, department);
             } catch (_) {}
 
-            // Count ERP photos as proxy for student count when ML doesn't provide it
-            const batchPhotoDir = path.join(ERP_PHOTOS_DIR, batch);
-            let studentCount = pkgCheck.student_count || pkgCheck.num_students || pkgCheck.count || 0;
+            // The count that matters is how many students are actually *in* the
+            // pkl — checkErpEmbedding gets it by inspecting the file. Photos in
+            // erp_photos/ are only a proxy: a photo whose face failed to embed
+            // still sits there, so counting files overstates the enrolment. Fall
+            // back to it only when the inspect could not run (ML service down),
+            // where roll_count is 0 but the pkl demonstrably exists.
+            const batchPhotoDir = erpSync.erpPhotoDir(batch);
+            let studentCount = pkgCheck.roll_count || 0;
             if (!studentCount && fs.existsSync(batchPhotoDir)) {
                 try {
                     studentCount = fs.readdirSync(batchPhotoDir)
@@ -922,25 +1082,24 @@ class RollAssignController {
                 return res.status(404).json({ error: 'Batch not found' });
             }
 
-            const parts      = batch.split('_');
-            const department = parts.slice(1, -1).join('_');
+            const department = erpSync.departmentFromBatch(batch);
 
             const ERP_PHOTOS_BASE = ERP_PHOTOS_DIR;
-            const batchPhotoDir   = path.join(ERP_PHOTOS_BASE, batch);
+            const batchPhotoDir   = erpSync.erpPhotoDir(batch);
             const erpPhotosDir    = fs.existsSync(batchPhotoDir) ? batchPhotoDir : ERP_PHOTOS_BASE;
 
-            // ── Check for pre-built pkl ───────────────────────────────────
-            let pkgCheck = { available: false };
-            try {
-                pkgCheck = await erpSync.checkErpEmbedding(batch, department);
-            } catch (_) {}
-
-            // Require pre-built pkl — block before starting SSE stream
-            if (!pkgCheck.available) {
+            // ── Require pre-built pkl — block before starting SSE stream ──
+            // findErpPkl, not checkErpEmbedding: the latter's roll count comes
+            // from an /erp-embedding/inspect call that base64s the whole pkl to
+            // the ML service, and this route discarded that count while going on
+            // to upload the very same bytes again in the match request below.
+            // Existence is all the gate needs.
+            const pklFile = erpSync.findErpPkl(batch, department);
+            if (!pklFile) {
                 return res.status(422).json({ noEmbedding: true, batch, department });
             }
 
-            const pklData = erpSync.readPklBase64(pkgCheck.pkl_path);
+            const pklData = erpSync.readPklBase64(pklFile);
 
             // ── Build ERP photo filename map (mirrors the old Python 3-tier
             // search: batch-specific dir, parent erp_photos/ root, siblings) ──
@@ -1200,29 +1359,188 @@ class RollAssignController {
         }
     }
 
+    // ─── Summary Endpoint (Includes deduplicated batch normalization) ────────
     async getSummary(req, res) {
-        const agg = await ClusterMatch.aggregate([
-            { $group: {
-                _id:        '$batch',
-                total:      { $sum: 1 },
-                approved:   { $sum: { $cond: [{ $eq: ['$approved', true] }, 1, 0] } },
-                pending:    { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'matched'] }, { $eq: ['$approved', false] }] }, 1, 0] } },
-                flagged:    { $sum: { $cond: [{ $eq: ['$status', 'flagged'] }, 1, 0] } },
-                unmatched:  { $sum: { $cond: [{ $eq: ['$status', 'unmatched'] }, 1, 0] } },
-                cross_dept: { $sum: { $cond: [{ $eq: ['$status', 'cross_dept'] }, 1, 0] } },
-            }},
-            { $project: { _id: 0, batch: '$_id', total: 1, approved: 1, pending: 1, flagged: 1, unmatched: 1, cross_dept: 1 } },
-            { $sort: { batch: 1 } },
-        ]);
-        // Dept-admins only ever see their own department's batches here —
-        // this route carries no batch/dept param for enforceAttendanceDepartment
-        // to check, so the scoping has to happen in the controller itself.
-        // Filtering post-aggregation is fine: the group above is one row per
-        // batch, a small result set, not per-document.
-        const scoped = req.attendanceFullAccess
-            ? agg
-            : agg.filter((row) => batchBelongsToDepartment(row.batch, req.attendanceDepartment));
-        res.json({ batches: scoped });
+        try {
+            // 1. Fetch DB metrics from ClusterMatch
+            const agg = await ClusterMatch.aggregate([
+                { $group: {
+                    _id:        '$batch',
+                    total:      { $sum: 1 },
+                    approved:   { $sum: { $cond: [{ $eq: ['$approved', true] }, 1, 0] } },
+                    pending: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $or: [
+                                        { $and: [{ $eq: ['$status', 'matched'] }, { $eq: ['$approved', false] }] },
+                                        { $eq: ['$status', 'merged_unapproved'] },
+                                        { $eq: ['$status', 'flagged'] },
+                                    ],
+                                },
+                                1,
+                                0,
+                            ],
+                        },
+                    },
+                    flagged:    { $sum: { $cond: [{ $eq: ['$status', 'flagged'] }, 1, 0] } },
+                    unmatched:  { $sum: { $cond: [{ $eq: ['$status', 'unmatched'] }, 1, 0] } },
+                    cross_dept: { $sum: { $cond: [{ $eq: ['$status', 'cross_dept'] }, 1, 0] } },
+                    unprocessed: {
+                        $sum: {
+                            $cond: [
+                                { $and: [{ $eq: ['$status', 'unmatched'] }, { $gt: ['$imageCount', 0] }] },
+                                1,
+                                0,
+                            ],
+                        },
+                    },
+                    acquiredRollNos: { $addToSet: '$rollNo' },
+                    approvedRollNos: {
+                        $addToSet: { $cond: [{ $eq: ['$approved', true] }, '$rollNo', null] },
+                    },
+                }},
+                { $project: {
+                    _id: 0, batch: '$_id', total: 1, approved: 1, pending: 1, flagged: 1,
+                    unmatched: 1, cross_dept: 1, unprocessed: 1, acquiredRollNos: 1, approvedRollNos: 1,
+                } },
+            ]);
+
+            // Canonical normalization key generator to merge alias batch strings
+            const getCanonicalKey = (batchStr) => {
+                const parts = String(batchStr || '').split('_').filter(Boolean);
+                if (parts.length < 3) return String(batchStr).toUpperCase().replace(/[\s_-]+/g, '');
+                const degree = parts[0].toUpperCase();
+                const year = parts[parts.length - 1].toUpperCase();
+                const rawDept = parts.slice(1, -1).join('_').toUpperCase().replace(/[\s_-]+/g, '');
+                let deptKey = rawDept;
+                if (deptKey === 'ECE') deptKey = 'ELECTRONICSANDCOMMUNICATIONENGINEERING';
+                if (deptKey === 'CSE') deptKey = 'COMPUTERSCIENCEANDENGINEERING';
+                if (deptKey === 'ME' || deptKey === 'MECHANICAL') deptKey = 'MECHANICALENGINEERING';
+                if (deptKey === 'CE' || deptKey === 'CIVIL') deptKey = 'CIVILENGINEERING';
+                return `${degree}|${deptKey}|${year}`;
+            };
+
+            const canonicalMap = new Map();
+
+            // Collect disk batch directories
+            const allDiskBatches = new Set();
+            if (fs.existsSync(ERP_PHOTOS_DIR)) {
+                try {
+                    const entries = await fsPromises.readdir(ERP_PHOTOS_DIR, { withFileTypes: true });
+                    for (const e of entries) if (e.isDirectory()) allDiskBatches.add(e.name);
+                } catch (_) {}
+            }
+            if (fs.existsSync(GROUND_TRUTH_DIR)) {
+                try {
+                    const entries = await fsPromises.readdir(GROUND_TRUTH_DIR, { withFileTypes: true });
+                    for (const e of entries) if (e.isDirectory()) allDiskBatches.add(e.name);
+                } catch (_) {}
+            }
+
+            // Group DB rows into canonical map
+            for (const row of agg) {
+                if (!row.batch) continue;
+                const cKey = getCanonicalKey(row.batch);
+                if (!canonicalMap.has(cKey)) {
+                    canonicalMap.set(cKey, {
+                        primaryBatch: row.batch,
+                        rawBatches: new Set([row.batch]),
+                        total: 0, approved: 0, pending: 0, flagged: 0,
+                        unmatched: 0, cross_dept: 0, unprocessed: 0,
+                        acquiredRollNos: new Set(),
+                        approvedRollNos: new Set(),
+                    });
+                }
+                const b = canonicalMap.get(cKey);
+                b.rawBatches.add(row.batch);
+                if (row.total > 0) b.primaryBatch = row.batch;
+                b.total += row.total || 0;
+                b.approved += row.approved || 0;
+                b.pending += row.pending || 0;
+                b.flagged += row.flagged || 0;
+                b.unmatched += row.unmatched || 0;
+                b.cross_dept += row.cross_dept || 0;
+                b.unprocessed += row.unprocessed || 0;
+                (row.acquiredRollNos || []).filter(Boolean).forEach(r => b.acquiredRollNos.add(String(r).trim().toUpperCase()));
+                (row.approvedRollNos || []).filter(Boolean).forEach(r => b.approvedRollNos.add(String(r).trim().toUpperCase()));
+            }
+
+            // Group disk batches into canonical map
+            for (const diskBatch of allDiskBatches) {
+                const cKey = getCanonicalKey(diskBatch);
+                if (!canonicalMap.has(cKey)) {
+                    canonicalMap.set(cKey, {
+                        primaryBatch: diskBatch,
+                        rawBatches: new Set([diskBatch]),
+                        total: 0, approved: 0, pending: 0, flagged: 0,
+                        unmatched: 0, cross_dept: 0, unprocessed: 0,
+                        acquiredRollNos: new Set(),
+                        approvedRollNos: new Set(),
+                    });
+                } else {
+                    canonicalMap.get(cKey).rawBatches.add(diskBatch);
+                }
+            }
+
+            // Filter canonical map by department access
+            const canonicalList = [...canonicalMap.values()].filter((item) => {
+                if (req.attendanceFullAccess) return true;
+                return [...item.rawBatches].some(bName => batchBelongsToDepartment(bName, req.attendanceDepartment));
+            });
+
+            // Process final summary for each deduplicated batch
+            const batches = await Promise.all(canonicalList.map(async (item) => {
+                const combinedErpRollNos = new Set();
+                const combinedAcquiredSet = new Set(item.acquiredRollNos);
+
+                for (const bName of item.rawBatches) {
+                    const erpRolls = await getErpRollNosForBatch(bName);
+                    erpRolls.forEach(r => combinedErpRollNos.add(r));
+
+                    const batchGtPath = path.join(GROUND_TRUTH_DIR, bName);
+                    if (fs.existsSync(batchGtPath)) {
+                        try {
+                            const entries = await fsPromises.readdir(batchGtPath, { withFileTypes: true });
+                            for (const entry of entries) {
+                                if (!entry.isDirectory()) continue;
+                                if (entry.name.startsWith('_')) continue;
+                                if (/^person_\d+$/i.test(entry.name)) continue;
+                                combinedAcquiredSet.add(entry.name.trim().toUpperCase());
+                            }
+                        } catch (_) {}
+                    }
+                }
+
+                let yetToBeAcquired = 0;
+                for (const rollNo of combinedErpRollNos) {
+                    if (!combinedAcquiredSet.has(rollNo)) yetToBeAcquired += 1;
+                }
+
+                return {
+                    batch:           item.primaryBatch,
+                    total:           item.total,
+                    approved:        item.approved,
+                    pending:         item.pending,
+                    flagged:         item.flagged,
+                    unmatched:       item.unmatched,
+                    cross_dept:      item.cross_dept,
+                    unprocessed:     item.unprocessed,
+                    erpPhotoCount:   combinedErpRollNos.size,
+                    erpPhotoTotal:   combinedErpRollNos.size, 
+                    yetToBeAcquired,
+                    unclustered:     yetToBeAcquired,
+                    approvedRollNos: [...item.approvedRollNos].sort(),
+                };
+            }));
+
+            batches.sort((a, b) => a.batch.localeCompare(b.batch));
+
+            res.json({ batches });
+        } catch (err) {
+            console.error('[RollAssign] getSummary error:', err);
+            res.status(500).json({ error: err.message });
+        }
     }
 }
 

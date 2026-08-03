@@ -4,6 +4,14 @@ const express = require("express");
 const router = express.Router();
 const AttendanceReportController = require("../controllers/attendanceReportController");
 const {
+  getCumulative,
+  getCumulativeStudents,
+} = require("../controllers/cumulativeAttendanceController");
+const {
+  listCommunications,
+  getPeriodHistory,
+} = require("../controllers/erpCommunicationLogController");
+const {
   attendanceRoleAccess,
   enforceAttendanceDepartment,
   requireAttendanceWriteAccess,
@@ -290,6 +298,43 @@ router.get("/export", ...attendanceRoleAccess, async (req, res) => {
 router.get("/export-options", ...attendanceRoleAccess, async (req, res) => {
   try {
     await ctrl.getExportOptions(req, res);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Dual cumulative view (XCEED vs ERP) ─────────────────────────────────────
+// Read-only aggregation over AttendanceReport (ours) and ErpAttendanceRecord
+// (theirs). Registered ahead of the "/:id" route below so "cumulative" is not
+// swallowed as a report id.
+router.get("/cumulative", ...attendanceRoleAccess, async (req, res) => {
+  try {
+    await getCumulative(req, res);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get("/cumulative/students", ...attendanceRoleAccess, async (req, res) => {
+  try {
+    await getCumulativeStudents(req, res);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── ERP communication audit trail (append-only, read-only here) ─────────────
+router.get("/erp-communications", ...attendanceRoleAccess, async (req, res) => {
+  try {
+    await listCommunications(req, res);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get("/erp-communications/period/:periodId", ...attendanceRoleAccess, async (req, res) => {
+  try {
+    await getPeriodHistory(req, res);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

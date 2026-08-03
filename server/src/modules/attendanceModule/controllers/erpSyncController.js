@@ -59,6 +59,7 @@
 const fs    = require('fs');
 const path  = require('path');
 const axios = require('axios');
+const mongoose = require('mongoose');
 const Subject = require('../../../models/subject');
 const LockSem = require('../../../models/locksem');
 const TimeTable = require('../../../models/timetable');
@@ -614,8 +615,17 @@ async function previewRolls(req, res) {
             subName: abbreviation || subject.subName,
         });
 
+        // The Manual Generation tab's subject dropdown can fall back to a
+        // synthetic entry (timetable-derived subject name, no real Subject
+        // doc yet) whose "_id" is just that name, not a Mongo ObjectId —
+        // Subject.findById would throw a CastError on that. Treat anything
+        // that isn't a real ObjectId the same as "no subjectId": fall through
+        // to the explicit ERP fields the tab already fills in, and skip
+        // persistence since there is no Subject doc to persist onto.
+        const hasRealSubject = subjectId && mongoose.Types.ObjectId.isValid(subjectId);
+
         let subject = null;
-        if (subjectId) {
+        if (hasRealSubject) {
             const found = await Subject.findById(subjectId).lean();
             if (!found) return res.status(404).json({ error: 'Subject not found' });
             subject = applyOverrides(found);
@@ -633,7 +643,7 @@ async function previewRolls(req, res) {
 
         // payload carries no portalKey — safe to echo back so the page can show
         // exactly what was asked of the ERP.
-        if (!subjectId) {
+        if (!hasRealSubject) {
             const { rollNos, faculty } = await fetchRollsFromErp(subject, degree);
             return res.json({ rollNos, total: rollNos.length, faculty, payload, persisted: false });
         }

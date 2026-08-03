@@ -86,6 +86,10 @@ const Timetable = () => {
   const [subjectData, setSubjectData] = useState([]);
   const [TTData, setTTData] = useState(null);
   const [showMessage, setShowMessage] = useState(true);
+  // In-flight guards: both lock and publish send faculty emails server-side, so
+  // a second click while the first request is running duplicates every email.
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [isLocking, setIsLocking] = useState(false);
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -388,6 +392,28 @@ const Timetable = () => {
     return initialData;
   };
 
+  // Kept at component scope (not inside the effect below) so it can also be
+  // called after publishing — otherwise TTData.publish stays stale `false` and
+  // the Publish button remains enabled, letting the user re-mail every faculty.
+  const fetchTTData = async (code) => {
+    try {
+      const response = await fetch(
+        `${apiUrl}/timetablemodule/timetable/alldetails/${code}`,
+        { credentials: 'include' }
+      );
+
+      if (!response.ok) {
+        console.error("TTData API failed:", response.status);
+        return;
+      }
+
+      const data = await response.json();
+      setTTData(data);
+    } catch (error) {
+      console.error('Error fetching TTdata:', error);
+    }
+  };
+
   // Fetch subject and TT data
   useEffect(() => {
     const fetchSubjectData = async (currentCode) => {
@@ -400,35 +426,16 @@ const Timetable = () => {
       }
     };
 
-  const fetchTTData = async (currentCode) => {
-  try {
-    const response = await fetch(
-      `${apiUrl}/timetablemodule/timetable/alldetails/${currentCode}`,
-      { credentials: 'include' }
-    );
-
-    if (!response.ok) {
-      console.error("TTData API failed:", response.status);
-      return;
-    }
-
-    const data = await response.json();
-    console.log("Fetched TTData:", data); 
-    setTTData(data);
-  } catch (error) {
-    console.error('Error fetching TTdata:', error);
-  }
-};
-
-
-
     fetchSubjectData(currentCode);
     fetchTTData(currentCode);
-    
+
   }, []);
   const handlePublishTT = async () => {
   const timetableId = TTData?._id;
 
+  // Ignore repeat clicks while a publish is in flight — the server mails every
+  // faculty member before responding, and a second click duplicates all of it.
+  if (isPublishing) return;
 
   if (!timetableId) {
     toast({
@@ -445,6 +452,7 @@ const Timetable = () => {
   const confirm = window.confirm("Are you sure you want to publish this timetable?");
   if (!confirm) return;
 
+  setIsPublishing(true);
   try {
     const response = await fetch(
       `${apiUrl}/timetablemodule/timetable/publish/${timetableId}`,
@@ -456,10 +464,15 @@ const Timetable = () => {
 
     if (!response.ok) throw new Error();
 
+    const data = await response.json().catch(() => ({}));
+
     await fetchTime(); // refresh timestamps
+    await fetchTTData(currentCode); // refresh publish status so the button locks
 
     toast({
-      title: "Timetable Published & Mail sent to all faculty",
+      title: data.alreadyPublished
+        ? "Already published — no mails re-sent"
+        : `Timetable Published & Mail sent to ${data.mailsSent ?? "all"} faculty member(s)`,
       status: "success",
       duration: 3000,
       isClosable: true,
@@ -473,6 +486,8 @@ const Timetable = () => {
       isClosable: true,
       position: "bottom",
     });
+  } finally {
+    setIsPublishing(false);
   }
 };
 
@@ -617,6 +632,11 @@ const Timetable = () => {
   };
 
 const handleLockTT = async () => {
+    // Ignore repeat clicks while a lock is in flight: the change diff is
+    // computed before the locked table is rewritten, so two overlapping
+    // requests would both mail the same set of changes.
+    if (isLocking) return;
+
     const isConfirmed = window.confirm(
       'Are you sure you want to lock the timetable?'
     );
@@ -626,6 +646,7 @@ const handleLockTT = async () => {
         'Do you want to inform the teachers about the timetable changes?'
       );
     if (isConfirmed) {
+      setIsLocking(true);
       setMessage('Data is being saved....');
       setMessage('Data saved. Commencing lock');
       setMessage('Data is being locked');
@@ -674,6 +695,8 @@ const handleLockTT = async () => {
         }
       } catch (error) {
         console.error('Error sending data to the backend:', error);
+      } finally {
+        setIsLocking(false);
       }
     } else {
       toast({
@@ -1057,6 +1080,8 @@ const handleLockTT = async () => {
                     size="sm"
                     borderRadius="lg"
                     boxShadow="sm"
+                    isLoading={isLocking}
+                    isDisabled={isLocking || isPublishing}
                   />
                 </Tooltip>
                 <Tooltip label="Publish Timetable" placement="bottom" hasArrow bg="green.600" fontSize="xs">
@@ -1066,7 +1091,8 @@ const handleLockTT = async () => {
                     colorScheme="green"
                     size="sm"
                     borderRadius="lg"
-                    isDisabled={TTData?.publish === true}
+                    isLoading={isPublishing}
+                    isDisabled={TTData?.publish === true || isPublishing || isLocking}
                   />
                 </Tooltip>
                 <Tooltip label="View Summary" placement="top" hasArrow bg="purple.600" fontSize="xs">

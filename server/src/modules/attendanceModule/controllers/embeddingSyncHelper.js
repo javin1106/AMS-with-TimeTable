@@ -65,9 +65,9 @@ async function updateStudentEmbedding(studentDir, rollNo, embeddingFiles, backup
     info.embedding_files = embeddingFiles.filter(f => allImgs.includes(f));
     
     if (backupFiles && Array.isArray(backupFiles)) {
-        info.backup_files = backupFiles.filter(f => allImgs.includes(f) && !info.embedding_files.includes(f)).slice(0, 10);
+        info.backup_files = backupFiles.filter(f => allImgs.includes(f) && !info.embedding_files.includes(f));
     } else {
-        info.backup_files = allImgs.filter(f => !info.embedding_files.includes(f)).slice(0, 10);
+        info.backup_files = allImgs.filter(f => !info.embedding_files.includes(f));
     }
 
     if (Array.isArray(result.mean_embedding)) info.mean_embedding = result.mean_embedding;

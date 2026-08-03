@@ -8,6 +8,11 @@ const axios = require('axios');
 
 
 const mlClient = require('../controllers/mlServiceClient');
+const {
+    getGpuMetricHistory,
+    getGpuMetricsCollectorInfo,
+    getLatestGpuMetric,
+} = require('../controllers/gpuMetricsCollector');
 const { processVideoFile } = require('../controllers/videoWatcher');
 const mlProcess = require('../controllers/mlProcessController');
 const AttendanceReportController = require('../controllers/attendanceReportController');
@@ -19,6 +24,7 @@ const { checkRole } = require('../../checkRole.middleware');
 const adminOnly = checkRole(['iams-admin']);
 const LockSem = require('../../../models/locksem');
 const TimeTable = require('../../../models/timetable');
+const AcquisitionControl = require('../../../models/acquisitionControl');
 const { saveAttendanceDailyData, listDailyDataFiles, readDailyDataFile } = require('../controllers/attendanceDailyDataSaver');
 const { saveFrameSnapshot } = require('../controllers/frameSnapshotWriter');
 const {
@@ -291,12 +297,47 @@ router.get('/target', (req, res) => {
 
 router.get('/gpu-metrics', adminOnly, async (req, res) => {
     try {
-        const result = await axios.get(`${ML_URL}/metrics/gpu`, { timeout: 5000 });
-        res.json(result.data);
+        const sample = await getLatestGpuMetric();
+        if (!sample) {
+            return res.status(503).json({
+                available: false,
+                error: 'GPU metrics collector has not recorded a sample yet',
+            });
+        }
+        res.json(sample);
     } catch (e) {
         res.status(503).json({
             available: false,
-            error: e.response?.data?.detail || e.message || 'GPU metrics unavailable',
+            error: e.message || 'GPU metrics unavailable',
+        });
+    }
+});
+
+router.get('/gpu-metrics/history', adminOnly, async (req, res) => {
+    try {
+        const from = req.query.from ? new Date(req.query.from) : null;
+        const to = req.query.to ? new Date(req.query.to) : null;
+        if ((from && Number.isNaN(from.getTime())) || (to && Number.isNaN(to.getTime()))) {
+            return res.status(400).json({ error: 'from and to must be valid date-time values' });
+        }
+        if (from && to && from > to) {
+            return res.status(400).json({ error: 'from must be earlier than to' });
+        }
+
+        const requestedMax = Number.parseInt(req.query.maxPoints, 10);
+        const maxPoints = Number.isInteger(requestedMax)
+            ? Math.max(2, Math.min(requestedMax, 5000))
+            : 2000;
+        const samples = await getGpuMetricHistory({ from, to, maxPoints });
+
+        res.json({
+            samples,
+            ...getGpuMetricsCollectorInfo(),
+        });
+    } catch (e) {
+        res.status(503).json({
+            samples: [],
+            error: e.message || 'GPU metrics history unavailable',
         });
     }
 });
@@ -933,8 +974,14 @@ router.post('/run-attendance-rtsp', async (req, res) => {
 
     console.log(`[AttendanceRTSP] Running with batch=${resolvedBatch} rtsp=${rtspUrl} duration=${durationSec}s`);
 
+    // Dual-camera dwell time is an admin setting, not a per-request one — take
+    // it from AcquisitionControl rather than trusting whatever the browser sent
+    // (it only reads the value to draw its countdown).
+    const acqCfg = await AcquisitionControl.findOne({ profileName: 'default' }).lean();
+
     const payload = {
         ...req.body,
+        cameraSwitchSec: acqCfg?.attendanceThresholds?.camera_switch_sec ?? 30,
         batch:     resolvedBatch,
         subject:   resolvedSubject,
         faculty:   resolvedFaculty,

@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { useLocation, useNavigate } from "react-router-dom";
 import FormHeader from './FormHeader'
 import getEnvironment from '../../getenvironment'
+import { redirectTargetFrom } from '../../authRedirect'
 import axios from 'axios'
 import {
   Button,
@@ -20,6 +21,7 @@ const LoginForm = () => {
   const [isLoading, setIsLoading] = useState(false)
   const apiUrl = getEnvironment()
   const navigate = useNavigate();
+  const location = useLocation();
   const [formValues, setFormValues] = useState({
     email:''
   });
@@ -74,7 +76,10 @@ const LoginForm = () => {
       }
 
       setMessage(responseData.message);
-      window.location.href = '/userroles';
+      // A full load rather than a client-side navigation: the platform navbar
+      // reads the session once on mount, so a router push would land on the
+      // target with a stale "signed out" navbar that bounces straight back.
+      window.location.href = redirectTargetFrom(location.search);
     } catch (error) {
       console.error('An error occurred', error)
       setMessage('An error occurred. Please try again.')
@@ -97,7 +102,7 @@ const LoginForm = () => {
       }}>
       <FormHeader />
       <form onSubmit={handleSubmit}>
-        <VStack spacing={4} width='100%'>
+        <VStack spacing={3} width='100%'>
           <FormControl>
             <FormLabel>Email</FormLabel>
 
@@ -118,7 +123,7 @@ const LoginForm = () => {
               isRequired
             />
           </FormControl>
-          <Text mt={2} textAlign="center" color="blue.500" cursor="pointer" onClick={handleForgotPassword}>
+          <Text textAlign="center" color="blue.500" cursor="pointer" onClick={handleForgotPassword}>
         Forgot Password ?
       </Text>
           <Button

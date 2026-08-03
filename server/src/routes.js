@@ -23,9 +23,6 @@ v1router.use("/upload", uploadModule);
 const attendanceModule = require("./modules/attendanceModule/routes/index");
 v1router.use("/attendancemodule", attendanceModule);
 
-const reviewModule = require("./modules/reviewModule/routes/index");
-v1router.use("/reviewmodule", reviewModule);
-
 const nirfModule = require("./modules/Nirf/routes/index");
 v1router.use("/nirf", nirfModule);
 
@@ -38,10 +35,6 @@ v1router.use("/user", newusermanagementModule);
 
 const platform = require("./modules/platform/routes")
 v1router.use("/platform", platform);
-
-// diabetics
-const diabeticsModule = require("./modules/diabeticsModule/routes/index");
-v1router.use("/diabeticsModule", diabeticsModule);
 
 // face recognition
 // Was mounted with zero auth middleware — any of the ~40 endpoints below
@@ -60,5 +53,13 @@ v1router.use("/ml/rejected-samples", ...attendanceRoleAccess, rejectedSamplesRou
 
 const guideModule = require("./modules/guideModule/routes/index");
 v1router.use("/guide", guideModule);
+
+// Learning module (Google-Classroom-style classes, coursework, grading, and
+// the AI Studio that turns attendance-module class recordings into notes,
+// tutorials and quizzes). Fully self-contained under modules/learningModule —
+// its own models, middleware and uploads directory; it only reads the shared
+// user collection and the existing mailer/ML service.
+const learningModule = require("./modules/learningModule/routes/index");
+v1router.use("/learningmodule", learningModule);
 
 module.exports = v1router;

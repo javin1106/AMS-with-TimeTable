@@ -157,11 +157,14 @@ function TimetableMasterView() {
     setSelectedSession(newSession);
   };
 
-  const handlePublish = async (code) => {
-    setPublishingCode(code);
+  const handlePublish = async (id) => {
+    // Ignore repeat clicks while a publish is in flight — each one would
+    // re-run the server's notification loop and duplicate every email.
+    if (publishingCode) return;
+    setPublishingCode(id);
     try {
       const response = await fetch(
-        `${apiUrl}/timetablemodule/timetable/publish/${code}`,
+        `${apiUrl}/timetablemodule/timetable/publish/${id}`,
         {
           method: 'PUT',
           credentials: 'include',
@@ -169,9 +172,14 @@ function TimetableMasterView() {
       );
 
       if (response.ok) {
+        const data = await response.json().catch(() => ({}));
         toast({
-          title: 'Published Successfully & Mail sent to all faculty members',
-          description: 'Timetable has been published.',
+          title: data.alreadyPublished
+            ? 'Already Published'
+            : `Published Successfully & Mail sent to ${data.mailsSent ?? 'all'} faculty member(s)`,
+          description: data.alreadyPublished
+            ? 'No notification emails were re-sent.'
+            : 'Timetable has been published.',
           status: 'success',
           duration: 3000,
           isClosable: true,
@@ -572,7 +580,12 @@ function TimetableMasterView() {
                                     colorScheme="green"
                                     leftIcon={<CheckIcon />}
                                     onClick={() => handlePublish(item._id)}
-                                    isLoading={publishingCode === item.code}
+                                    // Must compare against what handlePublish
+                                    // stores (_id). Comparing to item.code left
+                                    // the button live during the request, so
+                                    // extra clicks re-mailed every faculty.
+                                    isLoading={publishingCode === item._id}
+                                    isDisabled={publishingCode !== null}
                                     loadingText="Publishing..."
                                     fontSize="xs"
                                     px={3}

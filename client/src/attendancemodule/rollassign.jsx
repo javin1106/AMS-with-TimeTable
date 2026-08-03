@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Fragment } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { createPortal } from 'react-dom';
 import getEnvironment from '../getenvironment';
 import { DEGREES, theme, styles, cssReset } from './config';
@@ -76,7 +77,8 @@ export default function RollAssign({ fixedDepartment = '' }) {
     const { departments, deptLoading, deptError } = useDepartments();
     const { batchYears, batchYearsLoading } = useBatchYears();
 
-    const [activeTab,      setActiveTab]      = useState('assign');
+    const [searchParams] = useSearchParams();
+    const [activeTab,      setActiveTab]      = useState(()=> searchParams.get('tab')|| 'assign');
     const [summary,        setSummary]        = useState([]);
     const [summaryLoading, setSummaryLoading] = useState(false);
     const [summaryError,   setSummaryError]   = useState(null);
@@ -185,18 +187,28 @@ export default function RollAssign({ fixedDepartment = '' }) {
                 fetch(`${GT_BASE}/batches/${encodeURIComponent(batchName)}/students`),
             ]);
             const clusterData = clusterRes.ok ? await clusterRes.json() : { unprocessed: [] };
-            setUnprocessed(clusterData.unprocessed || []);
+            const unprocessedFromServer = clusterData.unprocessed || [];
 
             if (matchRes.ok) {
                 const { matchMap = {} } = await matchRes.json();
+                for (const u of unprocessedFromServer) {
+                    if (!matchMap[u.folderName]) matchMap[u.folderName] = u;
+                }
                 const records = Object.values(matchMap);
                 setPendingReview(records.filter(r => r.status === 'matched' && !r.approved));
                 // CHANGE 3: sort approved by rollNo
                 setApprovedItems(records.filter(r => r.approved).sort((a, b) => (a.rollNo || '').localeCompare(b.rollNo || '')));
-                setUnmatchedItems(records.filter(r => r.status === 'unmatched'));
+                
+                const allUnmatched = records.filter(r => r.status === 'unmatched');
+                const isUnprocessed = r => !r.error && r.imageCount > 0;
+                setUnprocessed(allUnmatched.filter(isUnprocessed));
+                setUnmatchedItems(allUnmatched.filter(r => !isUnprocessed(r)));
+                
                 setCrossDeptItems(records.filter(r => r.status === 'cross_dept'));
                 setFlaggedItems(records.filter(r => r.status === 'flagged'));
                 setMergedItems(records.filter(r => r.status === 'merged_unapproved'));
+            } else {
+                setUnprocessed(unprocessedFromServer);
             }
 
             if (studentsRes.ok) {
@@ -453,6 +465,26 @@ export default function RollAssign({ fixedDepartment = '' }) {
             if (!res.ok) throw new Error(data.error || 'Delete failed');
             showToast(`Deleted ${data.deleted.length} unmatched clusters`);
             setCrossDeptItems([]);
+            broadcastRefresh(batchName);
+        } catch (err) { showToast(err.message, 'error'); }
+        finally { setLoading(false); }
+    };
+
+    const deleteAllNoFace = async () => {
+        if (!unmatchedItems.length) return;
+        if (!window.confirm(`Delete ALL ${unmatchedItems.length} undetected face clusters permanently?\n\nThis cannot be undone.`)) return;
+        setLoading(true);
+        try {
+            const folders = unmatchedItems.map(c => c.folderName);
+            const res = await fetch(`${FLAG_BASE}/cluster-multiple/${encodeURIComponent(batchName)}`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ folders })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Delete failed');
+            showToast(`Deleted ${data.deleted.length} undetected clusters`);
+            setUnmatchedItems([]);
             broadcastRefresh(batchName);
         } catch (err) { showToast(err.message, 'error'); }
         finally { setLoading(false); }
@@ -940,7 +972,22 @@ export default function RollAssign({ fixedDepartment = '' }) {
                         ))}
                     </Section>
 
-                    <Section title="No Face Detected" count={unmatchedItems.length} accentColor={theme.textMuted} emptyText="No undetected clusters">
+                    <Section 
+                        title="No Face Detected" 
+                        count={unmatchedItems.length} 
+                        accentColor={theme.textMuted} 
+                        emptyText="No undetected clusters"
+                        rightElement={
+                            unmatchedItems.length > 0 && (
+                                <button 
+                                    onClick={deleteAllNoFace} 
+                                    style={{ fontSize: '11px', fontWeight: 600, padding: '4px 10px', borderRadius: 6, cursor: 'pointer', background: 'transparent', color: theme.danger, border: `1px solid ${theme.danger}`, outline: 'none' }}
+                                >
+                                    Delete All
+                                </button>
+                            )
+                        }
+                    >
                         {unmatchedItems.map(item => (
                             <ClusterCard key={item.folderName} item={item} batchName={batchName} photoUrl={photoUrl} erpPhotoUrl={erpPhotoUrl}
                                 isUnmatched
@@ -1040,6 +1087,8 @@ function parseBatch(batch) {
 }
 
 function SummaryPanel({ summary, summaryLoading, summaryError, fixedDepartment }) {
+    const [expandedRow, setExpandedRow] = useState(null); // batch name currently expanded, or null
+
     if (summaryLoading) return (
         <div style={{ textAlign: 'center', padding: '60px 20px', color: theme.textMuted, fontSize: '14px' }}>Loading summary…</div>
     );
@@ -1073,13 +1122,15 @@ function SummaryPanel({ summary, summaryLoading, summaryError, fixedDepartment }
                         .map(dept => {
                 const rows = groups[dept].slice().sort((a, b) => a.batch.localeCompare(b.batch));
                 const totals = rows.reduce((acc, r) => ({
-                    total:      acc.total     + r.total,
-                    approved:   acc.approved  + r.approved,
-                    pending:    acc.pending   + r.pending,
-                    flagged:    acc.flagged   + r.flagged,
-                    unmatched:  acc.unmatched + r.unmatched,
-                    cross_dept: acc.cross_dept + (r.cross_dept || 0),
-                }), { total: 0, approved: 0, pending: 0, flagged: 0, unmatched: 0, cross_dept: 0 });
+                    total:         acc.total         + r.total,
+                    approved:      acc.approved      + r.approved,
+                    pending:       acc.pending       + r.pending,
+                    flagged:       acc.flagged       + r.flagged,
+                    unmatched:     acc.unmatched     + r.unmatched,
+                    cross_dept:    acc.cross_dept    + (r.cross_dept || 0),
+                    unclustered:   acc.unclustered   + (r.unclustered || 0),
+                    erpPhotoTotal: acc.erpPhotoTotal + (r.erpPhotoTotal || 0),
+                }), { total: 0, approved: 0, pending: 0, flagged: 0, unmatched: 0, cross_dept: 0, unclustered: 0, erpPhotoTotal: 0 });
 
                 return (
                     <div key={dept} style={{ ...styles.card, marginBottom: 24, overflow: 'hidden', padding: 0 }}>
@@ -1092,39 +1143,73 @@ function SummaryPanel({ summary, summaryLoading, summaryError, fixedDepartment }
                                 <thead>
                                     <tr>
                                         <th>Batch</th>
+                                        <th style={{ textAlign: 'right' }}>ERP Photos</th>
                                         <th style={{ textAlign: 'right' }}>Total</th>
                                         <th style={{ textAlign: 'right', color: theme.success }}>Approved</th>
                                         <th style={{ textAlign: 'right', color: '#f59e0b' }}>Pending Review</th>
                                         <th style={{ textAlign: 'right', color: theme.warning }}>Flagged</th>
                                         <th style={{ textAlign: 'right', color: '#a78bfa' }}>Diff Dept</th>
                                         <th style={{ textAlign: 'right' }}>Unmatched</th>
+                                        <th style={{ textAlign: 'right', color: '#ef4444' }}>Unclustered</th>
+                                        <th></th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {rows.map(r => {
                                         const { degree, year } = parseBatch(r.batch);
+                                        const isExpanded = expandedRow === r.batch;
                                         return (
-                                            <tr key={r.batch}>
-                                                <td>{degree} {year}</td>
-                                                <td style={{ textAlign: 'right' }}>{r.total}</td>
-                                                <td style={{ textAlign: 'right' }}>{badge(r.approved,           theme.success)}</td>
-                                                <td style={{ textAlign: 'right' }}>{badge(r.pending,            '#f59e0b')}</td>
-                                                <td style={{ textAlign: 'right' }}>{badge(r.flagged,            theme.warning)}</td>
-                                                <td style={{ textAlign: 'right' }}>{badge(r.cross_dept || 0,   '#a78bfa')}</td>
-                                                <td style={{ textAlign: 'right', color: theme.textMuted }}>{r.unmatched}</td>
-                                            </tr>
+                                            <Fragment key={r.batch}>
+                                                <tr>
+                                                    <td>{degree} {year}</td>
+                                                    <td style={{ textAlign: 'right', color: theme.textMuted }}>{r.erpPhotoTotal ?? '—'}</td>
+                                                    <td style={{ textAlign: 'right' }}>{r.total}</td>
+                                                    <td style={{ textAlign: 'right' }}>{badge(r.approved,           theme.success)}</td>
+                                                    <td style={{ textAlign: 'right' }}>{badge(r.pending,            '#f59e0b')}</td>
+                                                    <td style={{ textAlign: 'right' }}>{badge(r.flagged,            theme.warning)}</td>
+                                                    <td style={{ textAlign: 'right' }}>{badge(r.cross_dept || 0,   '#a78bfa')}</td>
+                                                    <td style={{ textAlign: 'right', color: theme.textMuted }}>{r.unmatched}</td>
+                                                    <td style={{ textAlign: 'right' }}>{badge(r.unclustered || 0,  '#ef4444')}</td>
+                                                    <td style={{ textAlign: 'right' }}>
+                                                        <button
+                                                            onClick={() => setExpandedRow(isExpanded ? null : r.batch)}
+                                                            style={{
+                                                                padding: '3px 10px', fontSize: '11px', fontWeight: 600,
+                                                                borderRadius: 6, border: `1px solid ${theme.border}`,
+                                                                background: isExpanded ? theme.accent : 'transparent',
+                                                                color: isExpanded ? '#fff' : theme.accent, cursor: 'pointer',
+                                                            }}
+                                                        >
+                                                            Roll Nos {isExpanded ? '▲' : '▼'}
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                                {isExpanded && (
+                                                    <tr>
+                                                        <td colSpan={10} style={{ background: theme.bg, padding: '12px 18px' }}>
+                                                            <RollNoDropdown
+                                                                approvedRollNos={r.approvedRollNos || []}
+                                                                pendingRollNos={r.pendingRollNos || []}
+                                                            />
+                                                        </td>
+                                                    </tr>
+                                                )}
+                                            </Fragment>
                                         );
                                     })}
                                 </tbody>
                                 <tfoot>
                                     <tr>
                                         <td style={{ fontSize: '11px', color: theme.textMuted, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Total</td>
+                                        <td style={{ textAlign: 'right', color: theme.textMuted }}>{totals.erpPhotoTotal}</td>
                                         <td style={{ textAlign: 'right' }}>{totals.total}</td>
                                         <td style={{ textAlign: 'right' }}>{badge(totals.approved,   theme.success)}</td>
                                         <td style={{ textAlign: 'right' }}>{badge(totals.pending,    '#f59e0b')}</td>
                                         <td style={{ textAlign: 'right' }}>{badge(totals.flagged,    theme.warning)}</td>
                                         <td style={{ textAlign: 'right' }}>{badge(totals.cross_dept, '#a78bfa')}</td>
                                         <td style={{ textAlign: 'right', color: theme.textMuted }}>{totals.unmatched}</td>
+                                        <td style={{ textAlign: 'right' }}>{badge(totals.unclustered, '#ef4444')}</td>
+                                        <td></td>
                                     </tr>
                                 </tfoot>
                             </table>
@@ -1135,6 +1220,54 @@ function SummaryPanel({ summary, summaryLoading, summaryError, fixedDepartment }
         </div>
     );
 }
+
+function RollNoDropdown({ approvedRollNos, pendingRollNos }) {
+    const [tab, setTab] = useState('approved');
+    const list = tab === 'approved' ? approvedRollNos : pendingRollNos;
+    return (
+        <div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                <button
+                    onClick={() => setTab('approved')}
+                    style={{
+                        padding: '4px 12px', fontSize: '11px', fontWeight: 700, borderRadius: 999,
+                        border: `1px solid ${theme.success}`,
+                        background: tab === 'approved' ? theme.success : 'transparent',
+                        color: tab === 'approved' ? '#fff' : theme.success, cursor: 'pointer',
+                    }}
+                >
+                    Approved ({approvedRollNos.length})
+                </button>
+                <button
+                    onClick={() => setTab('pending')}
+                    style={{
+                        padding: '4px 12px', fontSize: '11px', fontWeight: 700, borderRadius: 999,
+                        border: '1px solid #f59e0b',
+                        background: tab === 'pending' ? '#f59e0b' : 'transparent',
+                        color: tab === 'pending' ? '#fff' : '#f59e0b', cursor: 'pointer',
+                    }}
+                >
+                    Pending ({pendingRollNos.length})
+                </button>
+            </div>
+            {list.length === 0 ? (
+                <div style={{ fontSize: '12px', color: theme.textMuted }}>None</div>
+            ) : (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, maxHeight: 160, overflowY: 'auto' }}>
+                    {list.map((rn) => (
+                        <span key={rn} style={{
+                            fontFamily: theme.fontMono, fontSize: '11px', padding: '3px 8px',
+                            borderRadius: 5, background: theme.surface, border: `1px solid ${theme.border}`,
+                        }}>
+                            {rn}
+                        </span>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+}
+
 
 // ─────────────────────────────────────────────────────────────────
 
@@ -1866,7 +1999,7 @@ function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRo
                                                     {c.erpPhoto && <img src={erpPhotoUrl(c.erpPhoto)} alt="" style={{ width: 34, height: 34, borderRadius: 4, objectFit: 'cover', flexShrink: 0, border: `2px solid ${confidenceColor(c.confidence)}` }} onError={e => { e.target.style.display = 'none'; }} />}
                                                     <div style={{ flex: 1, minWidth: 0 }}>
                                                         <div style={{ fontSize: '11px', fontWeight: 700, color: isSel ? theme.success : theme.text, fontFamily: theme.fontMono }}>{c.rollNo}</div>
-                                                        <div style={{ fontSize: '10px', color: confidenceColor(c.confidence), fontWeight: 600 }}>{confidenceLabel(c.confidence)} · {(c.confidence * 100).toFixed(1)}%</div>
+                                                        <div style={{ fontSize: '10px', color : confidenceColor(c.confidence), fontWeight: 600 }}>{confidenceLabel(c.confidence)} · {(c.confidence * 100).toFixed(1)}%</div>
                                                     </div>
                                                     {isSel && <span style={{ fontSize: '13px', color: theme.success, fontWeight: 900 }}>✓</span>}
                                                 </div>

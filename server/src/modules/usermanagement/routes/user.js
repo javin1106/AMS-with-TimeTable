@@ -8,9 +8,10 @@ const { upload } = require("../helper/multer.helper");
 const jwt = require("jsonwebtoken");
 const jwtSecret = process.env.JWT_SECRET;
 const { checkRole } = require("../../checkRole.middleware");
+const readAuthToken = require("../../readAuthToken");
 
 const verifyToken = (req, res, next) => {
-  const token = req.cookies.jwt;
+  const token = readAuthToken(req);
   // console.log(token)
 
   if (!token) {
@@ -87,7 +88,7 @@ userRouter.post("/deleterole", checkRole(['admin']), async (req, res) => {
   }
 });
 
-userRouter.put("/department", checkRole(['admin']), async (req, res) => {
+userRouter.put("/department", checkRole(['admin', 'iams-admin']), async (req, res) => {
   try {
     await UserController.updateDepartment(req, res);
   } catch (e) {

@@ -10,6 +10,11 @@ import {
   Icon,
   IconButton,
   Input,
+  Menu,
+  MenuButton,
+  MenuItemOption,
+  MenuList,
+  MenuOptionGroup,
   Select,
   Spinner,
   Table,
@@ -28,14 +33,41 @@ import getEnvironment from '../getenvironment';
 
 const apiUrl = getEnvironment();
 
+const departmentKey = (value) =>
+  String(value || '').trim().replace(/[\s_-]+/g, '').toUpperCase();
+
+const uniqueDepartments = (values) => {
+  const seen = new Set();
+  return (Array.isArray(values) ? values : [])
+    .map((value) => String(value || '').trim())
+    .filter((value) => {
+      const key = departmentKey(value);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+};
+
+const assignedDepartments = (user) =>
+  uniqueDepartments([user.dept, ...(user.attendanceDepartments || [])]);
+
+const sameDepartments = (left, right) => {
+  const leftKeys = uniqueDepartments(left).map(departmentKey).sort();
+  const rightKeys = uniqueDepartments(right).map(departmentKey).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index]);
+};
+
 const DeptAdminAssignPage = () => {
   const [email, setEmail] = useState('');
   const [dept, setDept] = useState('');
   const [departments, setDepartments] = useState([]);
   const [admins, setAdmins] = useState([]);
+  const [departmentDrafts, setDepartmentDrafts] = useState({});
   const [loadingAdmins, setLoadingAdmins] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [removing, setRemoving] = useState(null);
+  const [savingAccess, setSavingAccess] = useState(null);
   const toast = useToast();
   const navigate = useNavigate();
   const goBack = () => {
@@ -58,7 +90,11 @@ const DeptAdminAssignPage = () => {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to load department admins');
-      setAdmins(data.users || []);
+      const users = data.users || [];
+      setAdmins(users);
+      setDepartmentDrafts(
+        Object.fromEntries(users.map((user) => [user._id, assignedDepartments(user)])),
+      );
     } catch (err) {
       toast({ title: 'Could not load department admins', description: err.message, status: 'error', duration: 5000, isClosable: true });
     } finally {
@@ -115,6 +151,60 @@ const DeptAdminAssignPage = () => {
     }
   };
 
+  const setAccessDraft = (user, values) => {
+    setDepartmentDrafts((current) => ({
+      ...current,
+      [user._id]: uniqueDepartments([
+        user.dept,
+        ...(Array.isArray(values) ? values : [values]),
+      ]),
+    }));
+  };
+
+  const handleSaveAccess = async (user) => {
+    const attendanceDepartments = uniqueDepartments([
+      user.dept,
+      ...(departmentDrafts[user._id] || assignedDepartments(user)),
+    ]);
+    setSavingAccess(user._id);
+    try {
+      const res = await fetch(`${apiUrl}/user/getuser/department`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          userId: user._id,
+          dept: user.dept || '',
+          attendanceDepartments,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || data.message || 'Failed to update access');
+      setAdmins((current) =>
+        current.map((admin) => (admin._id === user._id ? data.user : admin)));
+      setDepartmentDrafts((current) => ({
+        ...current,
+        [user._id]: assignedDepartments(data.user),
+      }));
+      toast({
+        title: 'GT / Roll department access updated',
+        status: 'success',
+        duration: 4000,
+        isClosable: true,
+      });
+    } catch (err) {
+      toast({
+        title: 'Could not update department access',
+        description: err.message,
+        status: 'error',
+        duration: 6000,
+        isClosable: true,
+      });
+    } finally {
+      setSavingAccess(null);
+    }
+  };
+
   const handleRemove = async (user) => {
     setRemoving(user._id);
     try {
@@ -137,7 +227,7 @@ const DeptAdminAssignPage = () => {
 
   return (
     <Box bg={pageBg} minH="100vh" py={{ base: 8, md: 14 }}>
-      <Container maxW="4xl">
+      <Container maxW="6xl">
         <Flex align="center" gap={4} mb={{ base: 6, md: 10 }} flexWrap="wrap">
           <Flex align="center" justify="center" boxSize={12} borderRadius="lg" bg={iconBg} color={iconColor}>
             <Icon as={FiShield} boxSize={6} />
@@ -147,7 +237,7 @@ const DeptAdminAssignPage = () => {
               iLEED Department Admins
             </Heading>
             <Text color={subColor}>
-              Assign the department admin role by email — the account is created automatically if it doesn't exist.
+              Assign the role and control which departments appear in Ground Truth and Roll Assignment.
             </Text>
           </Box>
           <Button
@@ -211,7 +301,8 @@ const DeptAdminAssignPage = () => {
                 <Thead>
                   <Tr>
                     <Th>Email</Th>
-                    <Th>Department</Th>
+                    <Th>Primary Department</Th>
+                    <Th minW="260px">GT / Roll Departments</Th>
                     <Th width="1%">Remove</Th>
                   </Tr>
                 </Thead>
@@ -220,6 +311,51 @@ const DeptAdminAssignPage = () => {
                     <Tr key={user._id}>
                       <Td>{Array.isArray(user.email) ? user.email.join(', ') : user.email}</Td>
                       <Td>{user.dept || '—'}</Td>
+                      <Td>
+                        <Flex gap={2} align="center">
+                          <Menu closeOnSelect={false}>
+                            <MenuButton
+                              as={Button}
+                              size="sm"
+                              variant="outline"
+                              minW="170px"
+                              textAlign="left"
+                            >
+                              {(departmentDrafts[user._id] || assignedDepartments(user)).length}
+                              {' '}department(s)
+                            </MenuButton>
+                            <MenuList maxH="280px" overflowY="auto">
+                              <MenuOptionGroup
+                                type="checkbox"
+                                value={departmentDrafts[user._id] || assignedDepartments(user)}
+                                onChange={(values) => setAccessDraft(user, values)}
+                              >
+                                {uniqueDepartments([
+                                  ...departments,
+                                  ...assignedDepartments(user),
+                                ]).map((department) => (
+                                  <MenuItemOption key={department} value={department}>
+                                    {department}
+                                  </MenuItemOption>
+                                ))}
+                              </MenuOptionGroup>
+                            </MenuList>
+                          </Menu>
+                          <Button
+                            size="sm"
+                            colorScheme="cyan"
+                            variant="outline"
+                            isLoading={savingAccess === user._id}
+                            isDisabled={sameDepartments(
+                              departmentDrafts[user._id] || assignedDepartments(user),
+                              assignedDepartments(user),
+                            )}
+                            onClick={() => handleSaveAccess(user)}
+                          >
+                            Save
+                          </Button>
+                        </Flex>
+                      </Td>
                       <Td>
                         <IconButton
                           aria-label="Remove department admin role"

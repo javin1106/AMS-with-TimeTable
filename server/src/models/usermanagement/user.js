@@ -18,6 +18,12 @@ const UserSchema = new Mongoose.Schema({
     trim: true,
     default: "",
   },
+  // Additional department scopes shown only in Ground Truth Acquisition and
+  // Roll Assignment. `dept` remains the user's primary/dashboard department.
+  attendanceDepartments: [{
+    type: String,
+    trim: true,
+  }],
   email: [{
     type: String,
     required: true,

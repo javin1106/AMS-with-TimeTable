@@ -79,6 +79,7 @@ exports.register = async (req, res, next) => {
           password: hash,
           role: roles,
           dept: resolvedDepartment,
+          attendanceDepartments: resolvedDepartment ? [resolvedDepartment] : [],
           isEmailVerified: false,
           isFirstLogin: false,
         });

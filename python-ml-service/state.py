@@ -82,10 +82,19 @@ gt_config = {
     "det_score_floor":         0.5,   # minimum InsightFace det_score to accept a face
     # --- Session behaviour ---
     "new_person_timeout":      60,    # auto-stop after N seconds with no new person
-    "camera_switch_sec":       30,    # seconds on each camera before switching (2-camera sessions)
+    # Seconds on each camera before cycling to the next one, for GT acquisition
+    # ONLY. Read by Node (gtAcquisitionManager.js), which owns GT camera cycling
+    # — each camera is one bounded sub-run. Live attendance has its own,
+    # independent switch interval (AcquisitionControl.attendanceThresholds
+    # .camera_switch_sec in Mongo, arriving per-run as RTSPAttendanceRequest
+    # .cameraSwitchSec) because a GT sub-run pays a reconnect + final clustering
+    # pass on every switch and wants minutes, while an attendance run just
+    # re-opens the stream and wants seconds.
+    "gt_camera_switch_sec":    300,
     # --- Image storage ---
     "top_n":                   10,    # max images kept per person folder
     "embed_n":                 5,     # of top_n, how many are used for embeddings
+    "max_imgs_per_run":        0,     # per-camera-run cap per person (0 = unlimited)
 }
 gt_config_lock = threading.Lock()
 

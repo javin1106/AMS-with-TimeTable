@@ -6,6 +6,27 @@ const {
   getFacultyDepartmentByEmail,
 } = require("./facultyDepartment");
 
+const normalizeDepartment = (value) =>
+  String(value || "").trim().replace(/[\s_-]+/g, "").toUpperCase();
+
+const getAssignedDepartments = (user, primaryDepartment) => {
+  const values = [
+    primaryDepartment,
+    ...(Array.isArray(user.attendanceDepartments)
+      ? user.attendanceDepartments
+      : []),
+  ];
+  const seen = new Set();
+  return values
+    .map((value) => String(value || "").trim())
+    .filter((value) => {
+      const key = normalizeDepartment(value);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+};
+
 // Function to get user details based on the user ID
 async function getUserDetails(userId) {
   try {
@@ -22,6 +43,7 @@ async function getUserDetails(userId) {
       role: user.role,
       id: user.id,
       department,
+      departments: getAssignedDepartments(user, department),
     };
 
     return userDetails;

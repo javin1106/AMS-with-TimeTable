@@ -9,6 +9,8 @@ const fs         = require('fs');
 const fsPromises = require('fs').promises;
 
 const ClusterMatch = require('../../../models/attendanceModule/clusterMatch');
+const erpSync      = require('./erpEmbeddingSyncHelper');
+const { reconcileAfterPhotoDelete } = require('./groundTruthPhotoOps');
 
 const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'ground_truth');
 const ERP_PHOTOS_DIR   = process.env.ERP_PHOTOS_DIR ||
@@ -372,28 +374,34 @@ class FlagController {
                 await fsPromises.unlink(photoPath);
             }
 
-            // Clean _info.json references
-            const infoPath = path.join(GROUND_TRUTH_DIR, batch, safeFolder, '_info.json');
-            if (fs.existsSync(infoPath)) {
-                try {
-                    const info = JSON.parse(await fsPromises.readFile(infoPath, 'utf8'));
-                    const rm   = (arr) => (arr || []).filter(f => f !== safeFilename);
-                    info.embedding_files = rm(info.embedding_files);
-                    info.backup_files    = rm(info.backup_files);
-                    info.approved_files  = rm(info.approved_files);
-                    if (info.scores) delete info.scores[safeFilename];
-                    await fsPromises.writeFile(infoPath, JSON.stringify(info, null, 2));
-                } catch (_) {}
-            }
-
-            // Sync ClusterMatch.imageFiles
+            // Sync ClusterMatch.imageFiles. An approved record keeps folderName
+            // person_NNN while its folder on disk is the roll number, so matching
+            // on folderName alone silently missed every approved cluster.
+            let doc = null;
             try {
-                const doc = await ClusterMatch.findOne({ batch, folderName: safeFolder });
+                doc = await ClusterMatch.findOne({
+                    batch,
+                    $or: [{ folderName: safeFolder }, { currentFolder: safeFolder }],
+                });
                 if (doc) {
                     doc.imageFiles = (doc.imageFiles || []).filter(f => f !== safeFilename);
+                    doc.previewFiles = (doc.previewFiles || []).filter(f => f !== safeFilename);
+                    doc.embeddingFiles = (doc.embeddingFiles || []).filter(f => f !== safeFilename);
+                    doc.imageCount = doc.imageFiles.length;
                     await doc.save();
                 }
             } catch (_) {}
+
+            // Clean _info.json, recompute the mean embedding if this photo fed
+            // it, and rebuild the subject PKLs — same sequence the Ground Truth
+            // page runs, so a photo deleted from here doesn't keep influencing
+            // recognition until the next full rebuild.
+            await reconcileAfterPhotoDelete({
+                batch,
+                rollNo:     doc?.rollNo || safeFolder,
+                studentDir: path.join(GROUND_TRUTH_DIR, batch, safeFolder),
+                filename:   safeFilename,
+            });
 
             res.json({ ok: true, deleted: safeFilename });
         } catch (err) {
@@ -465,8 +473,14 @@ class FlagController {
             const safeFilename = path.basename(filename);
             const safeBatch    = batch ? path.basename(batch) : null;
 
+            // resolveOnDisk: the Roll Assignment page uppercases the batch string
+            // while the ERP Upload page keeps the DB's casing, so this rarely
+            // matches the folder byte-for-byte on a case-sensitive filesystem.
+            // Missing here falls through to the scan below, which can serve a
+            // same-named photo belonging to another batch.
             if (safeBatch) {
-                const batchPath = path.join(ERP_PHOTOS_DIR, safeBatch, safeFilename);
+                const batchDir  = erpSync.resolveOnDisk(ERP_PHOTOS_DIR, safeBatch);
+                const batchPath = path.join(ERP_PHOTOS_DIR, batchDir, safeFilename);
                 if (fs.existsSync(batchPath)) return res.sendFile(batchPath);
             }
 

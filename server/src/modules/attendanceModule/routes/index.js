@@ -8,6 +8,8 @@ const schedulerRoutes = require('./schedulerRoutes');
 const {
     attendanceRoleAccess,
     enforceAttendanceDepartment,
+    enforceAssignedAttendanceDepartments,
+    requireAttendanceWriteAccess,
     requireDeptMenu,
 } = require("../middleware/attendanceAccess");
 const deptAdminController = require("../controllers/deptAdminController");
@@ -48,19 +50,19 @@ router.get(
 router.use(
     '/ground-truth',
     ...attendanceRoleAccess,
-    enforceAttendanceDepartment,
+    enforceAssignedAttendanceDepartments,
     require("./groundTruthRoutes"),
 );
 router.use(
     '/roll-assign',
     ...attendanceRoleAccess,
-    enforceAttendanceDepartment,
+    enforceAssignedAttendanceDepartments,
     require("./rollAssignRoutes"),
 );
 router.use(
     '/flags',
     ...attendanceRoleAccess,
-    enforceAttendanceDepartment,
+    enforceAssignedAttendanceDepartments,
     require("./flagRoutes"),
 );
 
@@ -202,15 +204,26 @@ router.get('/ground-truth-photo-by-roll/:rollNo', async (req, res) => {
     }
 });
 
-// INTENTIONALLY LEFT UNAUTHENTICATED: called by the Python ML service itself
-// (clustering_service.py's _reject_uploader), not a browser session. Receives
-// liveness-rejected face crops as base64 and stores them in this server's
-// ml-data/liveness_rejected/ — the ML service keeps no local copy (it may run
-// on a separate machine). Write-only, strict filename whitelist, capped dir.
+// Called by the Python ML service itself (clustering_service.py's
+// _reject_uploader), not a browser session, so it authenticates the way every
+// other machine-posted endpoint in this module does — the shared
+// X-ML-Service-Key via requireAttendanceWriteAccess, exactly as
+// attendanceReportRoutes' POST /save.
+//
+// It was previously left open on the grounds that only the ML service calls it.
+// That is not a check: the path is guessable and the body is a base64 file
+// write, so anyone who could reach the server could fill this directory. The
+// Python upload is best-effort, so a deployment with no ML_SERVICE_SECRET set
+// stops collecting crops rather than accepting them from anybody.
+//
+// Receives liveness-rejected face crops as base64 and stores them in this
+// server's ml-data/liveness_rejected/ — the ML service keeps no local copy (it
+// may run on a separate machine). Write-only, strict filename whitelist,
+// capped dir.
 const LIVENESS_REJECTED_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'liveness_rejected');
 const LIVENESS_REJECTED_MAX = 2000;   // keep newest N crops; prune the rest
 
-router.post('/liveness-rejected', async (req, res) => {
+router.post('/liveness-rejected', requireAttendanceWriteAccess, async (req, res) => {
     try {
         const { filename, image } = req.body || {};
         // {ts_ms}_{DEPT?}_{method}{score}_det{score}.jpg — no separators/dots

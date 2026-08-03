@@ -57,6 +57,11 @@ import threading as _threading
 import requests as _requests
 
 NODE_SERVER_URL = os.environ.get("NODE_SERVER_URL", "http://localhost:8010")
+# The Node side guards /liveness-rejected with requireAttendanceWriteAccess, the
+# same shared-secret check every other machine-posted attendance endpoint uses.
+# Read at call time rather than captured here so a restart is not needed to pick
+# up a rotated secret.
+_ML_SERVICE_SECRET_ENV = "ML_SERVICE_SECRET"
 
 _reject_upload_q: "_queue.Queue" = _queue.Queue(maxsize=500)
 
@@ -65,9 +70,11 @@ def _reject_uploader():
     while True:
         payload = _reject_upload_q.get()
         try:
+            secret = os.environ.get(_ML_SERVICE_SECRET_ENV, "")
             _requests.post(
                 f"{NODE_SERVER_URL}/api/v1/attendancemodule/liveness-rejected",
                 json=payload, timeout=5,
+                headers={"X-ML-Service-Key": secret} if secret else None,
             )
         except Exception:
             pass  # best-effort; never disturb the capture pipeline
@@ -112,11 +119,7 @@ IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 # FIX-E — UI mask regions (CP IP Cam + RecForth, calibrated to 1080 p)
 # Format: (y1, y2, x1, x2)  in 1080 p reference pixels
 # ─────────────────────────────────────────────────────────────────────────────
-UI_MASK_REGIONS_1080P = [
-    (   0,  65,  870, 1920),   # timestamp banner  (top-right)
-    ( 610, 730,    0,  290),   # RecForth logo     (bottom-left)
-    (1000, 1080,   0, 1920),   # taskbar / progress bar (bottom strip)
-]
+UI_MASK_REGIONS_1080P = []
 
 
 def _build_ui_mask(H: int, W: int) -> np.ndarray:

@@ -14,6 +14,13 @@ const {
     buildBatchEmbeddingsPkl,
 } = require('./embeddingSyncHelper');
 const { checkAttendanceRunAllowed } = require('./timeWindowGuard');
+const {
+    batchBelongsToAnyDepartment,
+} = require('../middleware/attendanceAccess');
+const {
+    rebuildSubjectPklsForStudent,
+    reconcileAfterPhotoDelete,
+} = require('./groundTruthPhotoOps');
 
 const ML_SERVICE_URL   = process.env.ML_SERVICE_URL || 'http://localhost:8500';
 const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'ground_truth');
@@ -26,72 +33,8 @@ function ensureDir(dirPath) {
 ensureDir(GROUND_TRUTH_DIR);
 ensureDir(EMBEDDINGS_DIR);
 
-function findFileInDir(dir, filename) {
-    if (!fs.existsSync(dir)) return null;
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-            const found = findFileInDir(full, filename);
-            if (found) return found;
-        } else if (entry.name === filename) {
-            return full;
-        }
-    }
-    return null;
-}
-
-// ← ADD HERE
-async function rebuildSubjectPklsForStudent(rollNo, batch) {
-    const StudentEmbedding = require('../../../models/attendanceModule/studentEmbedding');
-    const subjectRecords = await StudentEmbedding.find({
-        rollNos: rollNo,
-        status: 'done',
-    }).lean();
-
-    console.log(`[rebuildSubjectPkls] ${rollNo} → ${subjectRecords.length} subject PKL(s) to rebuild`);
-
-    // Deduplicate: group records by their resolved pklPath so the same file is only rebuilt once
-const pklGroups = new Map(); // pklPath → { record, rollNos: Set }
-for (const record of subjectRecords) {
-    const pklPath = findFileInDir(EMBEDDINGS_DIR, record.embeddingFile);
-    if (!pklPath) {
-        console.warn(`[rebuildSubjectPkls] PKL not found on disk: ${record.embeddingFile}`);
-        continue;
-    }
-    if (!pklGroups.has(pklPath)) {
-        pklGroups.set(pklPath, { record, rollNos: new Set(record.rollNos) });
-    } else {
-        // merge rollNos from duplicate records pointing to the same file
-        for (const r of record.rollNos) pklGroups.get(pklPath).rollNos.add(r);
-    }
-}
-
-const batchDir = path.join(GROUND_TRUTH_DIR, batch);
-if (!fs.existsSync(batchDir)) return;
-
-for (const [pklPath, { record }] of pklGroups) {
-    try {
-        console.log(`[rebuildSubjectPkls] Rebuilding ${record.embeddingFile} …`);
-        const buildResult = await buildBatchEmbeddingsPkl(batchDir, pklPath);
-        if (buildResult.adaface_written) {
-            const StudentEmbedding = require('../../../models/attendanceModule/studentEmbedding');
-            await StudentEmbedding.updateMany(
-                { embeddingFile: record.embeddingFile },
-                { adafaceEmbeddingFile: record.embeddingFile },
-            );
-        }
-        // Bytes, not a path — the ML service may run on a separate machine.
-        const pklBytes = fs.readFileSync(pklPath);
-        await axios.post(`${ML_SERVICE_URL}/reload-embeddings`, {
-            pkl_data: pklBytes.toString('base64'),
-        }, { timeout: 30000 });
-        console.log(`[rebuildSubjectPkls] ✓ Done ${record.embeddingFile}`);
-    } catch (err) {
-        console.warn(`[rebuildSubjectPkls] Failed ${record.embeddingFile}:`, err.message);
-    }
-}
-}
-
+// findFileInDir + rebuildSubjectPklsForStudent moved to groundTruthPhotoOps.js
+// so the flags and roll-assign delete routes can run the same reconciliation.
 
 function mlError(err) {
     if (err.code === 'ECONNREFUSED')
@@ -165,14 +108,10 @@ class GroundTruthController {
                 if (!entry.isDirectory()) continue;
                 if (
                     !req.attendanceFullAccess
-                    && !req.attendanceDepartment
-                ) continue;
-                if (
-                    !req.attendanceFullAccess
-                    && !new RegExp(
-                        `^[^_]+_${req.attendanceDepartment.trim().replace(/[\s-]+/g, '_').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}_`,
-                        'i',
-                    ).test(entry.name)
+                    && !batchBelongsToAnyDepartment(
+                        entry.name,
+                        req.attendanceDepartments,
+                    )
                 ) continue;
                 const batchPath = path.join(GROUND_TRUTH_DIR, entry.name);
                 const students  = await fsPromises.readdir(batchPath, { withFileTypes: true });
@@ -336,36 +275,12 @@ class GroundTruthController {
         // Remove the deleted file from _info.json, and if it was a marked
         // embedding photo, recompute mean_embedding so stale data from the
         // deleted photo doesn't linger in subject PKLs.
-        const studentDir = path.join(GROUND_TRUTH_DIR, batch, rollNo);
-        const infoPath   = path.join(studentDir, '_info.json');
-        let needsRecompute = false;
-        let remainingEmbeddingFiles = [];
-        if (fs.existsSync(infoPath)) {
-            try {
-                const info = JSON.parse(await fsPromises.readFile(infoPath, 'utf8'));
-                needsRecompute = (info.embedding_files || []).includes(filename);
-                info.embedding_files = (info.embedding_files || []).filter(f => f !== filename);
-                info.backup_files    = (info.backup_files    || []).filter(f => f !== filename);
-                info.approved_files  = (info.approved_files  || []).filter(f => f !== filename);
-                remainingEmbeddingFiles = info.embedding_files;
-                if (needsRecompute && remainingEmbeddingFiles.length === 0) {
-                    delete info.mean_embedding;
-                    delete info.top_k_embeddings;
-                    delete info.adaface_mean_embedding;
-                    delete info.adaface_top_k_embeddings;
-                }
-                await fsPromises.writeFile(infoPath, JSON.stringify(info, null, 2));
-            } catch (_) {}
-        }
-
-        try {
-            if (needsRecompute && remainingEmbeddingFiles.length > 0) {
-                await syncUpdateStudentEmbedding(studentDir, rollNo, remainingEmbeddingFiles);
-            }
-            await rebuildSubjectPklsForStudent(rollNo, batch);
-        } catch (err) {
-            console.warn(`[deletePhoto] PKL rebuild failed:`, err.message);
-        }
+        await reconcileAfterPhotoDelete({
+            batch,
+            rollNo,
+            studentDir: path.join(GROUND_TRUTH_DIR, batch, rollNo),
+            filename,
+        });
 
 res.json({ message: `Removed ${filename}` });
     } catch (err) { res.status(500).json({ error: err.message }); }
@@ -427,49 +342,84 @@ res.json({ message: `Removed ${filename}` });
             try { info = JSON.parse(await fsPromises.readFile(infoPath, 'utf8')); } catch (_) {}
         }
 
+        let target_imgs_per_person = 15;
+        let embed_n = 5;
+        try {
+            const mlConfigRes = await axios.get(`${ML_SERVICE_URL}/gt-config`, { timeout: 3000 });
+            if (mlConfigRes.data) {
+                if (mlConfigRes.data.target_imgs_per_person) target_imgs_per_person = mlConfigRes.data.target_imgs_per_person;
+                if (mlConfigRes.data.embed_n) embed_n = mlConfigRes.data.embed_n;
+            }
+        } catch (_) {}
+
+        info.scores = info.scores || {};
+        for (const f of filenames) {
+            if (info.scores[f] === undefined) info.scores[f] = 0.5;
+        }
+
         const validFiles = filenames.filter(f => allFiles.includes(f));
-        const approvedSet  = new Set([...(info.approved_files  || []), ...validFiles]);
+        validFiles.sort((a, b) => (info.scores[b] || 0) - (info.scores[a] || 0));
+
         const embeddingSet = new Set(info.embedding_files || []);
         const backupSet    = new Set(info.backup_files    || []);
+        
+        const hadEmbedding = embeddingSet.size > 0;
+        let embeddingChanged = false;
 
-        const MAX_EMBEDDING_FILES = 5;
         for (const f of validFiles) {
-            backupSet.delete(f);
-            // Cap embedding_files at 5 — overflow goes to backup instead.
-            if (embeddingSet.has(f) || embeddingSet.size < MAX_EMBEDDING_FILES) {
+            if (embeddingSet.has(f) || backupSet.has(f)) continue;
+            
+            if (!hadEmbedding && embeddingSet.size < embed_n) {
                 embeddingSet.add(f);
+                embeddingChanged = true;
             } else {
                 backupSet.add(f);
             }
         }
 
-        info.approved_files  = [...approvedSet].filter(f => allFiles.includes(f));
+        let backupArray = [...backupSet];
+        backupArray.sort((a, b) => (info.scores[b] || 0) - (info.scores[a] || 0));
+        
+        const maxBackup = Math.max(0, target_imgs_per_person - embeddingSet.size);
+        const keptBackup = backupArray.slice(0, maxBackup);
+        const deletedBackup = backupArray.slice(maxBackup);
+
+        for (const f of deletedBackup) {
+            backupSet.delete(f);
+            delete info.scores[f];
+            try { await fsPromises.unlink(path.join(studentDir, f)); } catch (_) {}
+        }
+
         info.embedding_files = [...embeddingSet].filter(f => allFiles.includes(f));
-        info.backup_files    = [...backupSet].filter(f => allFiles.includes(f));
+        info.backup_files    = [...backupSet].filter(f => allFiles.includes(f) && !info.embedding_files.includes(f));
+
+        const approvedSet = new Set([...(info.approved_files || []), ...info.embedding_files, ...info.backup_files]);
+        for (const f of deletedBackup) {
+            approvedSet.delete(f);
+        }
+        info.approved_files = [...approvedSet].filter(f => allFiles.includes(f));
 
         await fsPromises.writeFile(infoPath, JSON.stringify(info, null, 2));
 
-        // ✅ Respond immediately — don't wait for ML
         res.json({
             ok: true,
             approvedCount:  info.approved_files.length,
             embeddingCount: info.embedding_files.length,
             backupCount:    info.backup_files.length,
-            embeddingStatus: 'queued',
+            embeddingStatus: embeddingChanged ? 'queued' : 'skipped',
         });
 
-        // 🔥 Rebuild embedding in background — fire and forget
-        // REPLACE WITH THIS:
-setImmediate(async () => {
-    try {
-        await syncUpdateStudentEmbedding(studentDir, rollNo, info.embedding_files);
-        console.log(`[approvePhotos] Base embedding updated for ${rollNo}`);
-        await rebuildSubjectPklsForStudent(rollNo, batch);
-    } catch (err) {
-        console.warn(`[approvePhotos] Background rebuild failed for ${rollNo}:`, err.message);
-    }
-});
-
+        if (embeddingChanged) {
+            setImmediate(async () => {
+                try {
+                    await syncUpdateStudentEmbedding(studentDir, rollNo, info.embedding_files, info.backup_files);
+                    console.log(`[approvePhotos] Base embedding updated for ${rollNo}`);
+                    await rebuildSubjectPklsForStudent(rollNo, batch);
+                } catch (err) {
+                    console.warn(`[approvePhotos] Background rebuild failed for ${rollNo}:`, err.message);
+                }
+            });
+        }
     } catch (err) { res.status(500).json({ error: err.message }); }
 }
 

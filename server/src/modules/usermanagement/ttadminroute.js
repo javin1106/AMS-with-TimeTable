@@ -2,11 +2,12 @@ const express = require("express");
 const router = express.Router();
 const jwt = require("jsonwebtoken");
 const getUserDetails = require("./controllers/dto");
+const readAuthToken = require("../readAuthToken");
 const jwtSecret = process.env.JWT_SECRET;
 
 // Middleware to protect the route and verify the token
 async function ttadminRoute(req, res, next) {
-  const token = req.cookies.jwt;
+  const token = readAuthToken(req);
   // console.log(token)
 
   if (!token) {

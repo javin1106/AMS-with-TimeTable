@@ -20,7 +20,9 @@ const rateLimit = require("express-rate-limit");
 require("./modules/attendanceModule/controllers/mlServiceAuth");
 const v1router = require("./routes");
 const { startAutoScheduler } = require('./modules/attendanceModule/controllers/autoAttendanceScheduler');
+const { startGpuMetricsCollector } = require('./modules/attendanceModule/controllers/gpuMetricsCollector');
 const alertNotifier = require("./modules/attendanceModule/controllers/alertNotifier");
+const cameraHealthScheduler = require("./modules/attendanceModule/controllers/cameraHealthScheduler");
 
 process.on('uncaughtException',  (err) => console.error('UNCAUGHT EXCEPTION:', err));
 process.on('unhandledRejection', (err) => console.error('UNHANDLED REJECTION:', err));
@@ -85,7 +87,10 @@ app.use(
     ], // Change this to your allowed origins or '*' to allow all origins
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
     optionsSuccessStatus: 204,
-    allowedHeaders: "Content-Type, Authorization",
+    // X-Short-Guest carries a live Short's guest identity for participants with
+    // no account. Omitting it here makes the browser fail the preflight, so an
+    // open Short would be unjoinable from any deployed origin.
+    allowedHeaders: "Content-Type, Authorization, X-Short-Guest",
     credentials: true, // Set to true if you need to allow credentials (e.g., cookies)
   })
 );
@@ -199,11 +204,17 @@ mongoose
       
       // Register lifecycle alerts (startup & shutdown)
       alertNotifier.setupServerLifecycleAlerts();
-      
+
+      // Checks the SMTP settings once, here, rather than per message — bad
+      // credentials or an unreachable host now show up in the boot log instead
+      // of as an invite that quietly went nowhere. Never throws.
+      require("./modules/mailerModule/transport").verifyTransport();
+
      // ── Auto Attendance Scheduler ─────────────────────────────
       // No args needed — rooms, periods, and run settings are now read
       // live from AcquisitionControl + the Camera Registry on every tick.
       startAutoScheduler();
+      cameraHealthScheduler.start();
       console.log('[AutoScheduler] Scheduler started — DB-driven (rooms, periods, embeddings).'); 
 
       // ── Frame Cleanup Scheduler (Task #1544) ──────────────────
@@ -269,6 +280,11 @@ mongoose
       // CLIENT_HEALTH_URL / SERVER_HEALTH_URL (plus ML_SERVICE_URL / ERP_STUDENTS_API_URL).
       const { startUptimeDigestScheduler } = require('./modules/attendanceModule/controllers/uptimeDigestScheduler');
       startUptimeDigestScheduler();
+
+      // ── Continuous GPU Metrics Collection (Issue #1739) ──────
+      // Samples the ML/GPU service independently of the View Metrics page.
+      // MongoDB TTL retention keeps the history bounded.
+      startGpuMetricsCollector();
 
     });
     server.setTimeout(600000); // 10 min — prevents Node killing long SSE connections
