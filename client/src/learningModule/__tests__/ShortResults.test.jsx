@@ -103,6 +103,48 @@ describe('learningModule <ShortResults />', () => {
     expect(common).toHaveAttribute('title', '4 mentions');
   });
 
+  it('still varies size and colour when every word was said exactly once', () => {
+    // The common shape in a live room: everyone types something different, so
+    // every count is 1. Keyed on frequency alone the cloud came out as one flat
+    // block of identical blue text, which is what made it unreadable.
+    const { container } = render(
+      <ShortResults
+        results={{
+          slideId: 's2b',
+          type: 'wordcloud',
+          totalResponses: 6,
+          gradable: false,
+          maxCount: 1,
+          words: ['entropy', 'enthalpy', 'gibbs', 'spontaneity', 'reversible', 'isotherm'].map((text) => ({
+            text,
+            count: 1,
+          })),
+        }}
+      />,
+    );
+
+    const words = ['entropy', 'enthalpy', 'gibbs', 'spontaneity', 'reversible', 'isotherm'];
+
+    const sizes = words.map((text) => window.getComputedStyle(screen.getByText(text)).fontSize);
+    expect(new Set(sizes).size).toBeGreaterThan(1);
+
+    // The colour is a theme token, which jsdom cannot resolve through
+    // getComputedStyle — the generated rule is where it actually lands.
+    const sheet = [...document.querySelectorAll('style')].map((tag) => tag.textContent || '').join('\n');
+    const colourOf = (text) => {
+      const node = screen.getByText(text);
+      const generated = [...node.classList].find((name) => sheet.includes(`.${name}{`));
+      return (sheet.match(new RegExp(`\\.${generated}\\{[^}]*[;{]color:([^;}]+)`)) || [])[1];
+    };
+    const colours = words.map(colourOf);
+    expect(colours.every(Boolean)).toBe(true);
+    expect(new Set(colours).size).toBeGreaterThan(1);
+
+    // Six words must not be strung along a single line — the cloud is dealt into
+    // rows so it fills a block the way a projector audience expects.
+    expect(container.querySelectorAll('.chakra-wrap').length).toBeGreaterThan(1);
+  });
+
   it('shows a scale average and median from the server rather than recomputing', () => {
     render(
       <ShortResults

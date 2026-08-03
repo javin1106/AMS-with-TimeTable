@@ -99,17 +99,18 @@ export default function useProctoring({ settings = {}, active, onViolation, onTe
   }, [active, settings.disableRightClick, report]);
 
   /* ---- fullscreen ----
-     Watched whether or not the paper demands fullscreen. A quiz that merely
-     opened in fullscreen still owes the student a word when they drop out of
-     it — the screen reads `isFullscreen` to say so — and only the *report* is
-     something `requireFullscreen` gates. */
+     Watched whether or not the paper demands fullscreen, and whether or not a
+     sitting is live. A quiz that merely opened in fullscreen still owes the
+     student a word when they drop out of it — the screen reads `isFullscreen`
+     to say so — and `active` must not gate the *watching*: a state seeded at
+     mount and then never updated reads "still fullscreen" for the rest of the
+     sitting, which is exactly how a fullscreen gate comes to never fire.
+     Only the report is gated, on `active` and on `requireFullscreen`. */
   useEffect(() => {
-    if (!active) return undefined;
-
     const onChange = () => {
       const inFullscreen = Boolean(document.fullscreenElement);
       setIsFullscreen(inFullscreen);
-      if (!inFullscreen && settings.requireFullscreen) report('fullscreen_exit');
+      if (!inFullscreen && active && settings.requireFullscreen) report('fullscreen_exit');
     };
     document.addEventListener('fullscreenchange', onChange);
     setIsFullscreen(Boolean(document.fullscreenElement));

@@ -7,6 +7,15 @@
 // itself is NOT here — the page reuses POST /attendancemodule/embeddings/
 // generate with the fetched roster (see embeddingController.js).
 //
+// ── Which subjects get asked for ────────────────────────────────────────────
+// The ERP Embedding Generation tab has no subject picker: department (+ an
+// optional semester) is the whole selection, and every subject that resolves
+// to gets its own ERP roster request. collectSubjectsForDept decides that set
+// from BOTH Subject.dept and the department's own timetables
+// (Subject.code → TimeTable.code), because Subject.dept is an optional field
+// that is frequently blank — a dept-only query silently drops subjects that
+// plainly belong to the department.
+//
 // ── The ERP request ─────────────────────────────────────────────────────────
 // One endpoint, one shape — the NITJ ERP's student-roster API:
 //
@@ -74,6 +83,143 @@ const ErpSyncSettings = require('../../../models/attendanceModule/erpSyncSetting
 // students' GT folders live under first-year/other-branch batch folders,
 // never under the teaching department's.
 const BASIC_SCIENCES_DEPT = 'Basic Sciences';
+
+// Underscore/space-tolerant department matcher — the client sends
+// "Electronics_and_Communication_Engineering" while the DB may hold either
+// spelling.
+function deptPattern(dept) {
+    const escaped = String(dept || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(escaped.replace(/[_\s]+/g, '[_ ]+'), 'i');
+}
+
+// Subject.dept is free text, and across a real deployment it holds anything
+// from the timetable's full department name down to an abbreviation ("CSE",
+// "ECE", "IT", "ICE") or a truncation ("Mechanical", "Industrial and
+// Production") — while the page's Department dropdown is fed from
+// TimeTable.dept, i.e. always the full name. Matching the full name alone
+// therefore misses subjects that plainly belong to the department.
+//
+// So match the full name, every cumulative word-prefix of it (which is what a
+// truncation is), and its initials. All anchored — a prefix match is exact
+// against the whole field, never a substring of some other department.
+function deptAliasPatterns(dept) {
+    const escape = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const words = String(dept || '').replace(/_/g, ' ').split(/\s+/).filter(Boolean);
+    if (!words.length) return [];
+
+    const STOPWORDS = new Set(['and', 'of', 'for', 'the', '&']);
+    const exact = (v) => new RegExp(`^\\s*${escape(v).replace(/\s+/g, '[_ ]+')}\\s*$`, 'i');
+
+    const patterns = [deptPattern(dept)];
+    for (let i = 1; i <= words.length; i += 1) {
+        // A prefix ending on a stopword ("Industrial and") is not a name
+        // anyone writes, so it is skipped.
+        if (STOPWORDS.has(words[i - 1].toLowerCase())) continue;
+        patterns.push(exact(words.slice(0, i).join(' ')));
+    }
+    const initials = words
+        .filter((w) => !STOPWORDS.has(w.toLowerCase()))
+        .map((w) => w[0]).join('');
+    if (initials.length >= 2) patterns.push(exact(initials));
+    return patterns;
+}
+
+// Codes of every timetable owned by a department, across all sessions.
+//
+// Subject.code is the owning timetable's code — the same link
+// getFirstYearCodes() uses for Basic Sciences — and lets collectSubjectsForDept
+// find a department's subjects regardless of what Subject.dept contains.
+//
+// Deliberately NOT restricted to the current session: subject records are
+// created once and keep the code of whichever timetable they were imported
+// with, so most of them point at earlier sessions' timetables. Filtering to
+// the current session made this path match almost nothing. Including older
+// codes is safe — department and semester still constrain the result.
+async function timetableCodesForDept(dept) {
+    if (!dept) return [];
+    const alias = deptAliasPatterns(dept);
+    if (!alias.length) return [];
+    try {
+        const tts = await TimeTable.find({
+            $or: [{ dept: { $in: alias } }, { name: { $in: alias } }],
+        }).select('code').lean();
+        return [...new Set(tts.map((t) => t.code).filter(Boolean))];
+    } catch (err) {
+        console.warn(`[ErpSync] Timetable code lookup failed for ${dept}: ${err.message}`);
+        return [];
+    }
+}
+
+// Subject names the department's LOCKED TIMETABLE lists for a semester —
+// LockSem.slotData.subject, the same source the Semester dropdown itself is
+// fed from (/timetablemodule/lock/sems-by-dept). This is the authoritative
+// answer to "which subjects run in this dept this semester", and the only one
+// of the three resolution paths that cannot be defeated by a Subject document
+// whose dept/code/sem was filled in differently — whatever semester value the
+// dropdown offered came from these very records.
+//
+// Mirrors /timetablemodule/lock/subjects-by-dept-sem's cascade (ref-join then
+// code-join, current session preferred) so both pages see the same subjects.
+// Returns [{ abbreviation, sem }] — the subject abbreviations as they appear
+// in the timetable's slots, paired with the LockSem semester string they run
+// in. Both are exactly what the ERP wants (`abbreviation` and `semester`), so
+// a roster can be requested for one of these WITHOUT any Subject document —
+// which is how the Manual Generation tab has always worked.
+async function timetableSubjects(dept, sem) {
+    if (!dept) return [];
+    const re = deptPattern(dept);
+    const deptFilter = [{ 'timetableData.dept': re }, { 'timetableData.name': re }];
+    const head = sem ? [{ $match: { sem: String(sem) } }] : [];
+    const joinByRef = [
+        { $lookup: { from: 'timetables', localField: 'timetable', foreignField: '_id', as: 'timetableData' } },
+        { $unwind: '$timetableData' },
+    ];
+    const joinByCode = [
+        { $lookup: { from: 'timetables', localField: 'code', foreignField: 'code', as: 'timetableData' } },
+        { $unwind: '$timetableData' },
+    ];
+    const tail = [
+        { $unwind: '$slotData' },
+        { $match: { 'slotData.subject': { $exists: true, $ne: '' } } },
+        // Grouped on sem too: without a semester filter the same abbreviation
+        // can run in several, and each is its own ERP request.
+        { $group: { _id: { abbreviation: '$slotData.subject', sem: '$sem' } } },
+        { $sort: { '_id.sem': 1, '_id.abbreviation': 1 } },
+    ];
+
+    try {
+        for (const join of [joinByRef, joinByCode]) {
+            for (const extra of [{ 'timetableData.currentSession': true }, {}]) {
+                const records = await LockSem.aggregate([
+                    ...head, ...join, { $match: { ...extra, $or: deptFilter } }, ...tail,
+                ]);
+                const rows = records
+                    .map((r) => ({ abbreviation: r._id.abbreviation, sem: r._id.sem }))
+                    .filter((r) => r.abbreviation);
+                if (rows.length) return rows;
+            }
+        }
+    } catch (err) {
+        console.warn(`[ErpSync] Timetable subject lookup failed for ${dept}/${sem}: ${err.message}`);
+    }
+    return [];
+}
+
+// Semester dropdown value vs Subject.sem. Both normally hold the ERP's own
+// format ("B.Tech-ECE-5"), but the dropdown is fed from LockSem.sem, which is
+// sometimes a bare number — so a bare number on either side is compared on the
+// semester digits alone. Two formatted-but-different strings never match: that
+// would collapse distinct classes (e.g. B.Tech-ECE-5 and M.Tech-ECE-5) into one.
+function semMatches(subjectSem, requested) {
+    const want = String(requested || '').trim();
+    if (!want) return true;
+    const have = String(subjectSem || '').trim();
+    if (have.toLowerCase() === want.toLowerCase()) return true;
+    if (!/^\d+$/.test(have) && !/^\d+$/.test(want)) return false;
+    const a = have.match(/\d+/)?.[0];
+    const b = want.match(/\d+/)?.[0];
+    return !!a && a === b;
+}
 
 async function getFirstYearCodes() {
     try {
@@ -404,8 +550,14 @@ async function syncSubjectRolls(subject, instituteWise, isFirstYear = false, deg
 
 // ── Route handlers ───────────────────────────────────────────────────────────
 
-// Collect the subjects the ERP tab shows for a department:
-//   • regular subjects whose Subject.dept matches (optionally sem-filtered)
+// Collect the subjects the ERP tab shows for a department. The tab has no
+// subject picker — dept + semester is the whole selection — so this is what
+// decides which subjects get a roster request sent to the ERP, both for the
+// per-row buttons and for Fetch/Generate all:
+//   • regular subjects whose Subject.dept matches, OR which belong to one of
+//     the department's own timetables via Subject.code (optionally
+//     sem-filtered). The second path exists because Subject.dept is optional
+//     and often blank — see timetableCodesForDept.
 //   • PLUS first-year (Basic Sciences timetable) subjects taught by this
 //     department's faculty — they carry no owning dept, so the link comes
 //     from the timetable faculty's Faculty.dept, mirroring the timetable
@@ -418,7 +570,10 @@ async function syncSubjectRolls(subject, instituteWise, isFirstYear = false, deg
 // so they can't be reached via the normal numeric dropdown at all.
 const FIRST_YEAR_SENTINEL = 'FIRST_YEAR';
 
-async function collectSubjectsForDept(dept, sem) {
+// diagnostics — optional object filled in with how the subject set was
+// resolved (which join key produced what). Surfaced by GET /subjects so an
+// empty listing can be explained instead of guessed at.
+async function collectSubjectsForDept(dept, sem, diagnostics = null) {
     const normDept = (v) => String(v || '').toUpperCase().replace(/[\s_]+/g, '');
     const firstYearOnly = sem === FIRST_YEAR_SENTINEL;
     const firstYearCodes = await getFirstYearCodes();
@@ -432,20 +587,73 @@ async function collectSubjectsForDept(dept, sem) {
         for (const fy of fyCandidates) {
             const teachingDepts = await resolveFirstYearTeachingDepts(fy);
             if ([...teachingDepts].some((d) => normDept(d) === normDept(dept))) {
-                subjects.push({ ...fy, __isFirstYear: true });
+                subjects.push({ ...fy, dept: fy.dept || dept, __isFirstYear: true });
             }
         }
         subjects.sort((a, b) => String(a.subjectFullName).localeCompare(String(b.subjectFullName)));
         return subjects;
     }
 
-    const filter = {
-        dept: { $regex: new RegExp(String(dept).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
-    };
-    if (sem) filter.sem = String(sem);
+    // ── Resolving "every subject under this dept + sem" ──────────────────────
+    // Three independent paths, unioned, because each join key is unreliable on
+    // its own and a subject missed here never gets a roster request at all:
+    //   1. Subject.dept        — optional, frequently blank or written as an
+    //                            abbreviation/truncation (deptAliasPatterns).
+    //   2. Subject.code        — the owning timetable's code, any session;
+    //                            absent when the subject was created outside a
+    //                            timetable import.
+    //   3. timetable subject   — LockSem.slotData.subject for this dept+sem,
+    //      names               joined back to Subject by abbreviation/full
+    //                            name. Independent of BOTH fields above, and
+    //                            the same source the Semester dropdown uses.
+    const deptCodes = await timetableCodesForDept(dept);
+    const ttNames = [...new Set((await timetableSubjects(dept, sem)).map((r) => r.abbreviation))];
+    const nameRes = ttNames.map(
+        (n) => new RegExp(`^\\s*${String(n).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i'));
 
-    const subjects = (await Subject.find(filter).lean())
-        .map((s) => ({ ...s, __isFirstYear: false }));
+    const deptAlias = deptAliasPatterns(dept);
+    const deptOr = [{ dept: { $in: deptAlias } }];
+    if (deptCodes.length) deptOr.push({ code: { $in: deptCodes } });
+    if (nameRes.length) deptOr.push({ subName: { $in: nameRes } }, { subjectFullName: { $in: nameRes } });
+
+    const candidates = await Subject.find({ $or: deptOr }).lean();
+
+    // Semester is filtered here rather than in the query so a bare-number
+    // dropdown value still matches an ERP-formatted Subject.sem (semMatches).
+    // Timetable-name matches are held to the looser digit comparison only:
+    // the name was already read from the requested semester's own timetable
+    // rows, so the semester is established — it is Subject.sem that may be
+    // written in some third format.
+    const nameMatched = (s) => nameRes.some(
+        (re) => re.test(String(s.subName || '')) || re.test(String(s.subjectFullName || '')));
+    const semDigits = (v) => String(v || '').match(/\d+/)?.[0] || '';
+    const subjects = candidates
+        .filter((s) => semMatches(s.sem, sem)
+            || (nameMatched(s) && (!sem || semDigits(s.sem) === semDigits(sem))))
+        // A blank Subject.dept would leave the ERP request without its
+        // `department` field; the department being listed is the right answer
+        // for a subject reached through that department's timetable. Only the
+        // in-memory copy is patched — nothing is written back to the Subject.
+        .map((s) => ({ ...s, dept: s.dept || dept, __isFirstYear: false }));
+
+    // Why an empty (or short) list came out — the three join keys fail
+    // silently and independently, so guessing between them is not viable.
+    console.log(`[ErpSync] subjects dept=${dept} sem=${sem || 'ALL'} → ${subjects.length}`
+        + ` (timetable codes=${deptCodes.length}, timetable subject names=${ttNames.length},`
+        + ` subject-collection candidates=${candidates.length})`);
+    if (diagnostics) {
+        Object.assign(diagnostics, {
+            timetableCodes: deptCodes,
+            timetableSubjectNames: ttNames,
+            subjectCollectionCandidates: candidates.length,
+            // Timetable subjects with no Subject document at all — these cannot
+            // be synced (there is nothing to persist a roster onto) and are the
+            // usual reason this page looks emptier than the timetable does.
+            timetableNamesWithoutSubjectRecord: ttNames.filter(
+                (n) => !candidates.some((s) => [s.subName, s.subjectFullName]
+                    .some((v) => String(v || '').trim().toLowerCase() === String(n).trim().toLowerCase()))),
+        });
+    }
 
     const includeFY = firstYearCodes.size > 0 && !sem;
     if (includeFY) {
@@ -459,7 +667,9 @@ async function collectSubjectsForDept(dept, sem) {
             }
             const teachingDepts = await resolveFirstYearTeachingDepts(fy);
             if ([...teachingDepts].some((d) => normDept(d) === normDept(dept))) {
-                subjects.push({ ...fy, __isFirstYear: true });
+                // Same blank-dept stand-in as above — for a first-year subject
+                // the teaching department is what put it in this list.
+                subjects.push({ ...fy, dept: fy.dept || dept, __isFirstYear: true });
             }
         }
     } else {
@@ -480,6 +690,73 @@ async function collectSubjectsForDept(dept, sem) {
     return subjects;
 }
 
+// The rows the ERP tab renders — the timetable is the source of truth for
+// "which subjects run in this dept this semester", exactly as it is for the
+// Manual Generation tab's subject dropdown.
+//
+// A timetable subject with no Subject document is still a row: the ERP request
+// needs only department + semester + abbreviation, all three of which come
+// from the timetable, so its roster can be fetched and its embeddings
+// generated. What it cannot do is PERSIST that roster (there is no document to
+// write enrolledRollNos onto), so such a row is marked hasSubjectRecord:false
+// and the page keeps its roster in memory for the session.
+//
+// Subject documents the timetable never mentions are appended afterwards, so
+// nothing that resolved before this became timetable-driven disappears.
+async function buildSubjectRows(dept, sem, diagnostics = null) {
+    const docs = await collectSubjectsForDept(dept, sem, diagnostics);
+    const ttRows = sem === FIRST_YEAR_SENTINEL ? [] : await timetableSubjects(dept, sem);
+
+    const norm = (v) => String(v || '').trim().toLowerCase();
+    const semDigits = (v) => String(v || '').match(/\d+/)?.[0] || '';
+    const used = new Set();
+
+    const rows = [];
+    for (const tt of ttRows) {
+        const match = docs.find((d, i) => !used.has(i)
+            && (norm(d.subName) === norm(tt.abbreviation) || norm(d.subjectFullName) === norm(tt.abbreviation))
+            && (norm(d.sem) === norm(tt.sem) || semDigits(d.sem) === semDigits(tt.sem)));
+        if (match) {
+            used.add(docs.indexOf(match));
+            // The timetable's semester string is the one the ERP understands
+            // ("B.Tech-CSE-5A"); Subject.sem may be written some other way.
+            rows.push({ ...match, __ttSem: tt.sem, __hasRecord: true, __inTimetable: true });
+        } else {
+            rows.push({
+                _id: null,
+                subjectFullName: tt.abbreviation,
+                subName: tt.abbreviation,
+                subCode: '',
+                type: '',
+                sem: tt.sem,
+                dept,
+                __ttSem: tt.sem,
+                __hasRecord: false,
+                __inTimetable: true,
+                __isFirstYear: false,
+            });
+        }
+    }
+    docs.forEach((d, i) => {
+        if (!used.has(i)) rows.push({ ...d, __hasRecord: true, __inTimetable: false });
+    });
+
+    // The page draws a header each time the semester group changes, so rows of
+    // the same semester have to stay adjacent — the appended leftovers above
+    // would otherwise repeat a group that has already been drawn.
+    rows.sort((a, b) => {
+        if (!!a.__isFirstYear !== !!b.__isFirstYear) return a.__isFirstYear ? -1 : 1;
+        const semOf = (s) => String(s.__ttSem || s.sem || '');
+        const na = parseInt(semOf(a).match(/\d+/)?.[0] || '99', 10);
+        const nb = parseInt(semOf(b).match(/\d+/)?.[0] || '99', 10);
+        if (na !== nb) return na - nb;
+        const bySem = semOf(a).localeCompare(semOf(b));
+        if (bySem !== 0) return bySem;
+        return String(a.subjectFullName || '').localeCompare(String(b.subjectFullName || ''));
+    });
+    return rows;
+}
+
 // GET /erp-sync/subjects?dept=&sem=
 // sem optional — omitted returns ALL semesters for the department, sorted
 // sem-wise (the ERP tab renders them grouped by semester, First Year first).
@@ -488,23 +765,36 @@ async function listSubjects(req, res) {
         const { dept, sem } = req.query;
         if (!dept) return res.status(400).json({ error: 'dept is required' });
 
-        const subjects = await collectSubjectsForDept(dept, sem);
+        const diagnostics = {};
+        const subjects = await buildSubjectRows(dept, sem, diagnostics);
         const fySem = firstYearStudentSem();
 
         res.json({
             erpConfigured: erpConfigured(),
+            // How the set was resolved — the page shows this when it comes back
+            // empty, so "no subjects" says which join key came up short rather
+            // than leaving it to be guessed.
+            diagnostics: { ...diagnostics, matched: subjects.length },
             subjects: subjects.map(s => ({
                 _id:              s._id,
+                // false → no Subject document backs this row. Its roster can
+                // still be fetched and generated (the ERP request is fully
+                // specified by dept + semester + abbreviation) but cannot be
+                // persisted, so the page holds it for the session only.
+                hasSubjectRecord: s.__hasRecord !== false,
+                inTimetable:      !!s.__inTimetable,
                 isFirstYear:      !!s.__isFirstYear,
                 studentSem:       s.__isFirstYear ? fySem : null,
-                groupLabel:       s.__isFirstYear ? 'First Year' : `Semester ${s.sem}`,
+                groupLabel:       s.__isFirstYear ? 'First Year' : `Semester ${s.__ttSem || s.sem}`,
                 subjectFullName:  s.subjectFullName,
                 subName:          s.subName,
                 subCode:          s.subCode,
                 type:             s.type,
                 sem:              s.sem,
                 dept:             s.dept,
-                erpLookup:        buildErpPayload(s),
+                // The timetable's semester string is what the ERP understands,
+                // so it wins over Subject.sem when the two disagree.
+                erpLookup:        buildErpPayload({ ...s, sem: s.__ttSem || s.sem }),
                 rollCount:        (s.enrolledRollNos || []).length,
                 missedCount:      (s.missedGroundTruth || []).length,
                 missedGroundTruth: s.missedGroundTruth || [],
@@ -522,23 +812,80 @@ async function listSubjects(req, res) {
     }
 }
 
-// POST /erp-sync/fetch-rolls  { subjectId, instituteWise, degree? }
-// degree comes from the page's Degree dropdown and overrides Subject.degree.
+// POST /erp-sync/fetch-rolls
+//   { subjectId, instituteWise, degree?, dept? }            — backed by a Subject
+//   { dept, sem, abbreviation, instituteWise, degree? }     — timetable only
+//
+// Two shapes, because the ERP needs no Subject document: department + semester
+// + abbreviation fully specify a roster request, and the timetable supplies
+// all three. This is precisely what the Manual Generation tab posts to
+// /embeddings/erp-rolls, and it is why that tab can fetch rolls for a subject
+// that was never entered into the Subject collection.
+//
+// The difference is persistence. With a real subjectId the roster is written
+// back (enrolledRollNos / missedGroundTruth / erpSyncedAt / faculty) via the
+// same syncSubjectRolls the nightly job uses. Without one there is nowhere to
+// write it, so the rolls are returned for the caller to hold (persisted:false).
+//
+// dept also stands in for a blank Subject.dept, which the ERP request cannot
+// do without — subjects reached through the department's timetable rather than
+// Subject.dept routinely have no dept of their own.
 async function fetchRolls(req, res) {
     try {
         if (!erpConfigured()) {
             return res.status(503).json({ error: 'ERP_PORTAL_KEY not configured on the server.' });
         }
-        const { subjectId, instituteWise, degree } = req.body;
-        if (!subjectId) return res.status(400).json({ error: 'subjectId is required' });
+        const { subjectId, instituteWise, degree, dept, sem, abbreviation } = req.body;
+        const hasRealSubject = subjectId && mongoose.Types.ObjectId.isValid(subjectId);
 
-        const subject = await Subject.findById(subjectId).lean();
-        if (!subject) return res.status(404).json({ error: 'Subject not found' });
+        if (hasRealSubject) {
+            const found = await Subject.findById(subjectId).lean();
+            if (!found) return res.status(404).json({ error: 'Subject not found' });
+            // The timetable's semester string is the one the ERP understands.
+            const subject = {
+                ...found,
+                dept: found.dept || dept || '',
+                sem:  sem || found.sem,
+            };
 
-        const firstYearCodes = await getFirstYearCodes();
-        const isFirstYear = firstYearCodes.has(subject.code);
-        const result = await syncSubjectRolls(subject, !!instituteWise, isFirstYear, degree);
-        res.json(result);
+            const firstYearCodes = await getFirstYearCodes();
+            const isFirstYear = firstYearCodes.has(subject.code);
+            const result = await syncSubjectRolls(subject, !!instituteWise, isFirstYear, degree);
+            return res.json({ ...result, persisted: true });
+        }
+
+        // ── Timetable-only subject ───────────────────────────────────────────
+        if (!dept || !sem || !abbreviation) {
+            return res.status(400).json({
+                error: 'Either subjectId, or dept + sem + abbreviation, is required',
+            });
+        }
+        const subject = { dept, sem, subName: abbreviation };
+        const payload = buildErpPayload(subject, degree);
+        const missing = missingPayloadFields(payload);
+        if (missing.length) {
+            return res.status(400).json({ error: `Cannot query ERP — missing ${missing.join(', ')}.` });
+        }
+
+        const { rollNos, faculty } = await fetchRollsFromErp(subject, degree);
+        if (rollNos.length === 0) {
+            return res.json({
+                ok: false, subject: abbreviation, persisted: false, total: 0, rollNos: [],
+                error: 'ERP returned no roll numbers',
+            });
+        }
+        const missedGroundTruth = computeMissedGroundTruth(rollNos, dept, !!instituteWise);
+        return res.json({
+            ok: true,
+            subject: abbreviation,
+            persisted: false,
+            rollNos,
+            total: rollNos.length,
+            missedGroundTruth,
+            missedCount: missedGroundTruth.length,
+            erpFaculty: faculty,
+            payload,
+        });
     } catch (err) {
         const status = err.response?.status;
         res.status(502).json({
@@ -710,9 +1057,11 @@ module.exports = {
     // buttons use, rather than duplicating it.
     syncSubjectRolls, getFirstYearCodes, resolveFirstYearTeachingDepts,
     firstYearStudentSem, rollSetsEqual, erpConfigured,
-    // Exported for the unit tests — the Subject → ERP-request mapping and the
-    // defensive response parsing are the two pieces worth pinning down.
-    buildErpPayload, parseErpResponse,
+    // Exported for the unit tests — the Subject → ERP-request mapping, the
+    // defensive response parsing and the semester matching (the ERP tab's only
+    // filter besides department) are the pieces worth pinning down.
+    buildErpPayload, parseErpResponse, semMatches, timetableCodesForDept,
+    deptAliasPatterns,
     // Exported for healthRoutes.js / uptimeDigestScheduler.js — the ERP
     // reachability probes hit this URL directly (no dedicated ERP health
     // route is assumed to exist on the ERP server).

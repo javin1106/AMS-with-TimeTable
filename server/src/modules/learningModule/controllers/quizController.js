@@ -1030,8 +1030,30 @@ function buildReview(quiz, attempt) {
 }
 
 /**
- * Records a proctoring event, and ends the attempt when the tab-switch budget
- * is exhausted and the teacher asked for that.
+ * What spends the student's budget for leaving the test.
+ *
+ * A fullscreen exit counts alongside tab switches whenever the paper asked for
+ * fullscreen, because that is what the brief promises them: "leaving
+ * fullscreen, or switching to another window or tab, is recorded — you may do
+ * so N times". Counting only the tab switches left the harder-to-miss half of
+ * that sentence unenforced, so a student could press Escape all day and the
+ * auto-submit the teacher switched on would never arrive. On a paper that
+ * never asked for fullscreen the exit is still recorded, but it costs nothing:
+ * the student was never told it would.
+ */
+const countsAsLeaving = (type, settings) =>
+  type === "tab_switch" ||
+  type === "blur" ||
+  (type === "fullscreen_exit" && Boolean(settings.requireFullscreen));
+
+// One departure can reach us as two events — a browser that drops fullscreen as
+// it loses focus fires both — and charging twice for one Escape would halve a
+// budget the student was quoted in full.
+const LEAVE_COALESCE_MS = 2000;
+
+/**
+ * Records a proctoring event, and ends the attempt when the budget for leaving
+ * the test is exhausted and the teacher asked for that.
  */
 exports.recordViolation = async (req, res) => {
   const attempt = await LmQuizAttempt.findOne({
@@ -1046,21 +1068,34 @@ exports.recordViolation = async (req, res) => {
   const allowed = ["tab_switch", "blur", "fullscreen_exit", "copy", "paste", "right_click", "mobile_detected"];
   if (!allowed.includes(type)) return res.status(400).json({ message: "Unknown violation type." });
 
-  attempt.violations.push({ type, at: new Date() });
-  if (type === "tab_switch" || type === "blur") attempt.tabSwitches += 1;
-  await attempt.save();
-
   const quiz = await LmQuiz.findById(attempt.quizId);
   const settings = quiz?.settings || {};
+
+  const now = new Date();
+  const previous = attempt.violations[attempt.violations.length - 1];
+  const coalesced =
+    previous &&
+    countsAsLeaving(previous.type, settings) &&
+    now - new Date(previous.at) < LEAVE_COALESCE_MS;
+
+  attempt.violations.push({ type, at: now });
+  if (countsAsLeaving(type, settings) && !coalesced) attempt.tabSwitches += 1;
+  await attempt.save();
+
   const overBudget = !settings.allowTabChange && attempt.tabSwitches > (settings.maxTabSwitches || 0);
 
   if (overBudget && settings.autoSubmitOnTabLimit) {
-    const finished = await finaliseAttempt(attempt, quiz, { body: { reason: `Exceeded ${settings.maxTabSwitches} tab switches` } }, "terminated");
+    const finished = await finaliseAttempt(
+      attempt,
+      quiz,
+      { body: { reason: `Left the test ${attempt.tabSwitches} time(s), over the limit of ${settings.maxTabSwitches}` } },
+      "terminated",
+    );
     return res.json({
       status: finished.status,
       terminated: true,
       tabSwitches: finished.tabSwitches,
-      message: "Your test was submitted automatically because you left the test window too many times.",
+      message: "Your test was submitted automatically because you left the test too many times.",
     });
   }
 
@@ -1068,7 +1103,7 @@ exports.recordViolation = async (req, res) => {
     status: attempt.status,
     tabSwitches: attempt.tabSwitches,
     warning: overBudget
-      ? "You have exceeded the allowed number of tab switches. This has been recorded."
+      ? "You have left the test more times than allowed. This has been recorded."
       : null,
     remaining: settings.allowTabChange
       ? null
