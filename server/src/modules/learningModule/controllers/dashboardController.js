@@ -19,7 +19,9 @@ const myActiveClassIds = async (userId) => {
     _id: { $in: memberships.map((m) => m.classId) },
     status: "active",
   })
-    .select("name coverColor section subject")
+    // subjectCode rides along so the calendar can label a chip with the subject
+    // short name instead of only the class colour.
+    .select("name coverColor section subject subjectCode")
     .lean();
 
   const roleByClass = new Map(memberships.map((m) => [String(m.classId), m.role]));
@@ -128,7 +130,9 @@ exports.getCalendar = async (req, res) => {
         { dueDate: null, publishedAt: { $gte: from, $lte: to } },
       ],
     })
-      .select("title dueDate publishedAt points workType classId")
+      // `notebookId` so a coding exercise on the grid opens the exercise rather
+      // than its gradebook row, and can be labelled as one.
+      .select("title dueDate publishedAt points workType classId notebookId")
       .lean(),
     // A quiz is "conducted" on the day its window opens; papers with no window
     // fall back to when they were set up, which is the only date they have.

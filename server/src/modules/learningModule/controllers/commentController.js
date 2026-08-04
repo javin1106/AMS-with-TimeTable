@@ -2,13 +2,20 @@ const LmComment = require("../models/lmComment");
 const LmAnnouncement = require("../models/lmAnnouncement");
 const LmCoursework = require("../models/lmCoursework");
 const LmSubmission = require("../models/lmSubmission");
+const LmDiscussion = require("../models/lmDiscussion");
 const { notifyUser, notifyClass } = require("../services/notifyService");
+const game = require("../services/gamification");
 
 const TARGET_MODELS = {
   announcement: LmAnnouncement,
   coursework: LmCoursework,
   submission: LmSubmission,
+  discussion: LmDiscussion,
 };
+
+// A discussion counts its replies in `replyCount`, not `commentCount`, so the
+// generic decrement below cannot reach it.
+const COUNTER_FIELD = { discussion: "replyCount" };
 
 const canComment = (req) => {
   if (req.lmIsTeacher) return true;
@@ -83,6 +90,28 @@ exports.createComment = async (req, res) => {
     await LmAnnouncement.updateOne({ _id: targetId }, { $inc: { commentCount: 1 } });
   } else if (targetType === "coursework") {
     await LmCoursework.updateOne({ _id: targetId }, { $inc: { commentCount: 1 } });
+  } else if (targetType === "discussion") {
+    // `findOneAndUpdate` rather than an update plus a read: the badge below
+    // needs the count *after* this reply, and two people answering at once
+    // would otherwise both read the same number.
+    const discussion = await LmDiscussion.findOneAndUpdate(
+      { _id: targetId, classId: req.lmClass._id },
+      {
+        $inc: { replyCount: 1 },
+        $set: { lastReplyAt: new Date(), lastReplyBy: req.lmUser.name },
+      },
+      { new: true },
+    );
+    if (discussion) {
+      await game.onDiscussionPopular({ classId: req.lmClass._id, discussion });
+    }
+  }
+
+  // Only class-visible discussion earns. A private thread with a teacher about
+  // a grade is not participation to be scored, and paying for it would put a
+  // price on a conversation students should feel free to have.
+  if (!isPrivate && !req.lmIsTeacher) {
+    await game.onComment({ req, comment });
   }
 
   // Private thread → tell the other side. Class comment → tell the author of
@@ -143,8 +172,23 @@ exports.deleteComment = async (req, res) => {
   if (String(comment.authorId) !== req.lmUser.id && !req.lmIsTeacher) {
     return res.status(403).json({ message: "Forbidden" });
   }
+  const alreadyDeleted = comment.deleted;
   comment.deleted = true;
   comment.deletedAt = new Date();
   await comment.save();
+
+  // The counter is what the stream badge reads, so it has to come back down
+  // with the comment. Guarded against a double delete driving it negative.
+  if (!alreadyDeleted) {
+    const Model = TARGET_MODELS[comment.targetType];
+    if (Model && comment.targetType !== "submission") {
+      const field = COUNTER_FIELD[comment.targetType] || "commentCount";
+      await Model.updateOne(
+        { _id: comment.targetId, [field]: { $gt: 0 } },
+        { $inc: { [field]: -1 } },
+      );
+    }
+  }
+
   return res.json({ deleted: true });
 };

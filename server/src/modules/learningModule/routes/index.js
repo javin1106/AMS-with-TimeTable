@@ -6,6 +6,7 @@ const {
   requireClassCreator,
   loadClass,
   requireTeacher,
+  requireClassStudent,
   requireOwner,
   asyncRoute,
 } = require("../middleware/lmAuth");
@@ -14,6 +15,7 @@ const classController = require("../controllers/classController");
 const memberController = require("../controllers/memberController");
 const streamController = require("../controllers/streamController");
 const commentController = require("../controllers/commentController");
+const feedbackController = require("../controllers/feedbackController");
 const courseworkController = require("../controllers/courseworkController");
 const submissionController = require("../controllers/submissionController");
 const quizController = require("../controllers/quizController");
@@ -25,6 +27,10 @@ const notificationController = require("../controllers/notificationController");
 const dashboardController = require("../controllers/dashboardController");
 const uploadController = require("../controllers/uploadController");
 const timetableOptionsController = require("../controllers/timetableOptionsController");
+const leaderboardController = require("../controllers/leaderboardController");
+const discussionController = require("../controllers/discussionController");
+const bugReportController = require("../controllers/bugReportController");
+const profileController = require("../controllers/profileController");
 
 const router = express.Router();
 
@@ -66,6 +72,18 @@ router.get("/timetable/subjects", asyncRoute(timetableOptionsController.listSubj
 router.get("/classes", asyncRoute(classController.listMyClasses));
 router.post("/classes", requireClassCreator, asyncRoute(classController.createClass));
 router.get("/classes/all", asyncRoute(classController.listAllClasses));
+
+/* ── bug reports and the profile ────────────────────────────────────────
+   Outside the class router on purpose: most bugs are not about a class, and
+   making somebody navigate into one first is how a bug goes unreported. The
+   admin-only endpoints check `isPlatformAdmin` in the handler — there is no
+   class to hang a `requireTeacher` off. */
+router.post("/bugs", asyncRoute(bugReportController.createBugReport));
+router.get("/bugs/mine", asyncRoute(bugReportController.listMyBugReports));
+router.get("/bugs", asyncRoute(bugReportController.listAllBugReports));
+router.patch("/bugs/:reportId", asyncRoute(bugReportController.reviewBugReport));
+
+router.get("/me/profile", asyncRoute(profileController.getMyProfile));
 
 router.post("/join", asyncRoute(memberController.joinByCode));
 router.post("/claim-invites", asyncRoute(memberController.claimInvites));
@@ -120,6 +138,26 @@ classRouter.post("/comments/:targetType/:targetId", asyncRoute(commentController
 classRouter.patch("/comments/:commentId", asyncRoute(commentController.updateComment));
 classRouter.delete("/comments/:commentId", asyncRoute(commentController.deleteComment));
 
+// anonymous feedback — student → teaching staff, name withheld from staff and
+// kept for the administrator.
+//
+// The list is one endpoint rather than two because who is asking decides what
+// comes back: a student gets their own notes, staff get the class's with every
+// identifying field stripped, and a platform admin gets the same list with the
+// names put back. Sending is gated on an active *student* enrolment for the
+// same reason quiz attempts are — staff feedback in a student channel would be
+// indistinguishable from the cohort's once anonymised.
+//
+// DELETE is platform-admin-only, and deliberately *not* requireTeacher — that
+// guard would hand the member of staff a complaint is about the power to delete
+// it. The check is in the controller because "platform admin" is the one
+// standing this module has no route middleware for: `loadClass` folds admins
+// into the teacher role, so there is nothing here to test against.
+classRouter.get("/feedback", asyncRoute(feedbackController.listFeedback));
+classRouter.post("/feedback", requireClassStudent, asyncRoute(feedbackController.createFeedback));
+classRouter.patch("/feedback/:feedbackId", requireTeacher, asyncRoute(feedbackController.updateFeedback));
+classRouter.delete("/feedback/:feedbackId", asyncRoute(feedbackController.deleteFeedback));
+
 // classwork
 classRouter.get("/coursework", asyncRoute(courseworkController.listCoursework));
 classRouter.post("/coursework", requireTeacher, asyncRoute(courseworkController.createCoursework));
@@ -153,17 +191,31 @@ classRouter.post("/quizzes/:quizId/publish", asyncRoute(quizController.publishQu
 classRouter.post("/quizzes/:quizId/collaborators", requireTeacher, asyncRoute(quizController.setCollaborators));
 classRouter.delete("/quizzes/:quizId/responses", asyncRoute(quizController.deleteResponses));
 
-// quizzes — sitting
+// quizzes — sitting.
+//
+// Every step of actually taking the paper is gated on an active *student*
+// enrolment, not merely on being able to open the class: staff and platform
+// admins have standing here through their role, and an attempt from one of them
+// would be scored into the cohort's results. The brief is deliberately left
+// open to staff — it is the page they hand out, and being able to read it is
+// how they check what the class will see.
 classRouter.get("/quizzes/:quizId/brief", asyncRoute(quizController.getQuizBrief));
-classRouter.post("/quizzes/:quizId/attempts", asyncRoute(quizController.startAttempt));
-classRouter.get("/attempts/:attemptId/paper", asyncRoute(quizController.getAttemptPaper));
-classRouter.get("/attempts/:attemptId/current", asyncRoute(quizController.getCurrentQuestion));
-classRouter.post("/attempts/:attemptId/answer", asyncRoute(quizController.answerAndAdvance));
-classRouter.post("/attempts/:attemptId/save", asyncRoute(quizController.saveAttemptDraft));
-classRouter.post("/attempts/:attemptId/violation", asyncRoute(quizController.recordViolation));
-classRouter.post("/attempts/:attemptId/heartbeat", asyncRoute(quizController.heartbeat));
-classRouter.post("/attempts/:attemptId/submit", asyncRoute(quizController.submitAttempt));
+classRouter.post("/quizzes/:quizId/attempts", requireClassStudent, asyncRoute(quizController.startAttempt));
+classRouter.get("/attempts/:attemptId/paper", requireClassStudent, asyncRoute(quizController.getAttemptPaper));
+classRouter.get("/attempts/:attemptId/current", requireClassStudent, asyncRoute(quizController.getCurrentQuestion));
+classRouter.post("/attempts/:attemptId/answer", requireClassStudent, asyncRoute(quizController.answerAndAdvance));
+classRouter.post("/attempts/:attemptId/save", requireClassStudent, asyncRoute(quizController.saveAttemptDraft));
+classRouter.post("/attempts/:attemptId/violation", requireClassStudent, asyncRoute(quizController.recordViolation));
+// Same gate as the rest of the sitting: only the student taking the paper pings.
+classRouter.post("/attempts/:attemptId/heartbeat", requireClassStudent, asyncRoute(quizController.heartbeat));
+classRouter.post("/attempts/:attemptId/submit", requireClassStudent, asyncRoute(quizController.submitAttempt));
 classRouter.get("/attempts/:attemptId", asyncRoute(quizController.getAttempt));
+
+// quizzes — putting one student's sitting right. Staff only: both of these
+// rewrite an exam record, and `reopen` hands out a fresh deadline that the quiz
+// window would otherwise refuse.
+classRouter.post("/attempts/:attemptId/reopen", requireTeacher, asyncRoute(quizController.reopenAttempt));
+classRouter.delete("/attempts/:attemptId", requireTeacher, asyncRoute(quizController.deleteAttempt));
 
 // quizzes — analytics
 classRouter.get("/quizzes/:quizId/results", requireTeacher, asyncRoute(quizController.getQuizResults));
@@ -197,6 +249,26 @@ classRouter.delete("/notebooks/:notebookId", requireTeacher, asyncRoute(notebook
 classRouter.post("/notebooks/:notebookId/publish", requireTeacher, asyncRoute(notebookController.publishNotebook));
 classRouter.get("/notebooks/:notebookId/attempt", asyncRoute(notebookController.getMyAttempt));
 classRouter.get("/notebooks/:notebookId/attempts", requireTeacher, asyncRoute(notebookController.listAttempts));
+
+/* ── points and badges ──────────────────────────────────────────────────
+   Open to the whole class, students included: a leaderboard only staff can
+   read is a report, not a game. */
+classRouter.get("/leaderboard", asyncRoute(leaderboardController.getLeaderboard));
+classRouter.get("/my-points", asyncRoute(leaderboardController.getMyPoints));
+// One student's badges and the split of their points. Not staff-gated at the
+// router, because a student reading their own is the same request — the
+// controller is where "mine, or anybody's if I am staff" is decided.
+classRouter.get("/students/:studentId/points", asyncRoute(leaderboardController.getStudentPoints));
+classRouter.get("/points-guide", asyncRoute(leaderboardController.getPointsGuide));
+
+/* ── discussion forum ───────────────────────────────────────────────────
+   Open to students by design — starting a topic is the point. The one-a-week
+   limit is a unique index on the model, and staff moderate. */
+classRouter.get("/discussions", asyncRoute(discussionController.listDiscussions));
+classRouter.post("/discussions", asyncRoute(discussionController.createDiscussion));
+classRouter.get("/discussions/:discussionId", asyncRoute(discussionController.getDiscussion));
+classRouter.patch("/discussions/:discussionId", requireTeacher, asyncRoute(discussionController.updateDiscussion));
+classRouter.delete("/discussions/:discussionId", asyncRoute(discussionController.deleteDiscussion));
 classRouter.get("/notebook-attempts/:attemptId", asyncRoute(notebookController.getAttempt));
 classRouter.post("/notebook-attempts/:attemptId/save", asyncRoute(notebookController.saveAttempt));
 classRouter.post("/notebook-attempts/:attemptId/submit", asyncRoute(notebookController.submitAttempt));

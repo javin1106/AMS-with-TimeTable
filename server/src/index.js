@@ -22,6 +22,7 @@ const v1router = require("./routes");
 const { startAutoScheduler } = require('./modules/attendanceModule/controllers/autoAttendanceScheduler');
 const { startGpuMetricsCollector } = require('./modules/attendanceModule/controllers/gpuMetricsCollector');
 const alertNotifier = require("./modules/attendanceModule/controllers/alertNotifier");
+const cameraHealthScheduler = require("./modules/attendanceModule/controllers/cameraHealthScheduler");
 
 process.on('uncaughtException',  (err) => console.error('UNCAUGHT EXCEPTION:', err));
 process.on('unhandledRejection', (err) => console.error('UNHANDLED REJECTION:', err));
@@ -48,6 +49,8 @@ app.use(
       "http://127.0.0.1:5173",
       "https://nitjtt.netlify.app",
       "http://localhost:8010",
+      "http://xceed.learning.app",
+      "capacitor://xceed.learning.app",
       //for chemcon
       "http://localhost:5174","https://chemcon2024.com",
   //for eaic2025
@@ -202,11 +205,17 @@ mongoose
       
       // Register lifecycle alerts (startup & shutdown)
       alertNotifier.setupServerLifecycleAlerts();
-      
+
+      // Checks the SMTP settings once, here, rather than per message — bad
+      // credentials or an unreachable host now show up in the boot log instead
+      // of as an invite that quietly went nowhere. Never throws.
+      require("./modules/mailerModule/transport").verifyTransport();
+
      // ── Auto Attendance Scheduler ─────────────────────────────
       // No args needed — rooms, periods, and run settings are now read
       // live from AcquisitionControl + the Camera Registry on every tick.
       startAutoScheduler();
+      cameraHealthScheduler.start();
       console.log('[AutoScheduler] Scheduler started — DB-driven (rooms, periods, embeddings).'); 
 
       // ── Frame Cleanup Scheduler (Task #1544) ──────────────────
@@ -246,7 +255,7 @@ mongoose
       // ── ERP Auto-Sync Scheduler ───────────────────────────────
       // Nightly: re-fetches every subject's ERP roster and regenerates
       // embeddings ONLY for subjects whose roster actually changed since
-      // last sync (no-op until ERP_API_URL is configured; toggle on/off
+      // last sync (no-op until ERP_PORTAL_KEY is configured; toggle on/off
       // from the ERP Sync page — see ErpSyncSettings).
       const { startErpAutoSyncScheduler } = require('./modules/attendanceModule/controllers/erpAutoSyncScheduler');
       startErpAutoSyncScheduler();
@@ -269,7 +278,7 @@ mongoose
       // consolidated Server Down digest if any are unreachable. Distinct
       // from the edge-triggered 30s health monitor in healthRoutes.js —
       // recipients come from the same serverDown opt-in. Probe targets are
-      // CLIENT_HEALTH_URL / SERVER_HEALTH_URL (plus ML_SERVICE_URL / ERP_API_URL).
+      // CLIENT_HEALTH_URL / SERVER_HEALTH_URL (plus ML_SERVICE_URL / ERP_STUDENTS_API_URL).
       const { startUptimeDigestScheduler } = require('./modules/attendanceModule/controllers/uptimeDigestScheduler');
       startUptimeDigestScheduler();
 

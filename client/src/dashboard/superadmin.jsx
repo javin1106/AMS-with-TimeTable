@@ -20,6 +20,7 @@ import {
   FiActivity,
   FiZap,
   FiArrowRight,
+  FiAlertCircle,
 } from 'react-icons/fi';
 
 const MODULES = [
@@ -64,6 +65,13 @@ const MODULES = [
     to: '/usermanagement',
     icon: FiUsers,
     accent: 'teal',
+  },
+  {
+    title: 'Bugs & Suggestions',
+    description: 'Read what users have reported, and approve the reports worth acting on.',
+    to: '/superadmin/bugs',
+    icon: FiAlertCircle,
+    accent: 'red',
   },
   {
     title: 'Logs',

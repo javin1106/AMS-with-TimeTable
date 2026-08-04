@@ -17,6 +17,15 @@ const lmNotificationSchema = new mongoose.Schema({
       "join_request",
       "quiz",
       "material",
+      // Carries no actorName, unlike every other type here — see
+      // feedbackController.createFeedback.
+      "feedback",
+      // A forum topic. In-app only: a class of two hundred each starting a
+      // thread a week would be two hundred emails.
+      "discussion",
+      // A verdict on a bug report. Fires whether or not the bug named a class,
+      // so this is one of the few notifications with no class attached.
+      "bug",
     ],
     required: true,
   },

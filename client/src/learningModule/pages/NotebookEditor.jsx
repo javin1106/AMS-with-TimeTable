@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useOutletContext, useParams } from 'react-router-dom';
 import {
   Alert,
@@ -18,15 +18,19 @@ import {
   Switch,
   Text,
   Textarea,
-  Tooltip,
   VStack,
   useToast,
 } from '@chakra-ui/react';
 
+import { FiUpload } from 'react-icons/fi';
+
 import lmApi from '../api/lmApi';
-import { ErrorState, Loading, SectionCard } from '../components/common';
+import { DeadlineCountdown, ErrorState, Loading, SectionCard } from '../components/common';
+import HintTooltip from '../components/HintTooltip';
 import NotebookCell from '../components/NotebookCell';
+import { toDateTimeInput } from '../format';
 import usePyodide from '../hooks/usePyodide';
+import { MAX_IMPORT_CELLS, cellsFromFile } from '../notebookImport';
 
 /**
  * Authoring a coding notebook.
@@ -58,16 +62,48 @@ export default function NotebookEditor() {
   const [packagesText, setPackagesText] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [saving, setSaving] = useState(false);
+  // Which button is working: 'save' | 'publish' | null. One shared boolean put a
+  // spinner on both of them at once, so a plain Save looked like it was
+  // publishing too.
+  const [savingAction, setSavingAction] = useState(null);
   const [problems, setProblems] = useState([]);
   const [setupDone, setSetupDone] = useState(false);
+
+  // The buttons only disable once React has re-rendered, which is a tick later
+  // than the click that started the save.
+  const savingRef = useRef(false);
 
   const cellsRef = useRef(cells);
   cellsRef.current = cells;
 
-  const { status, detail, busyCellId, start, restart, runCell, stop } = usePyodide(
-    notebook?.packages || [],
+  const fileInputRef = useRef(null);
+
+  /**
+   * The packages box, not the saved notebook.
+   *
+   * An import writes what the file declares and imports straight into this box,
+   * and a teacher can type into it. Starting the kernel from `notebook.packages`
+   * instead meant none of that reached Pyodide until a save *and* a restart, so
+   * a freshly imported notebook raised ModuleNotFoundError on every cell while
+   * the toast said the packages had been added.
+   */
+  const packages = useMemo(
+    () => packagesText.split(',').map((name) => name.trim()).filter(Boolean),
+    [packagesText],
   );
+
+  // Scanned for imports at kernel start, so numpy and friends are fetched
+  // during the startup wait without the teacher declaring them anywhere.
+  const sources = useMemo(() => cells.map((cell) => cell.source), [cells]);
+
+  const { status, detail, busyCellId, kernelPackages, start, restart, runCell, stop } =
+    usePyodide(packages, sources);
+
+  // Installs happen once, at startup: a package added after that is not in the
+  // running kernel however many times the cell is run.
+  const missingFromKernel = kernelPackages
+    ? packages.filter((name) => !kernelPackages.includes(name))
+    : [];
 
   const load = useCallback(async () => {
     setError(null);
@@ -101,6 +137,18 @@ export default function NotebookEditor() {
       return next;
     });
 
+  /**
+   * Stop kills the worker, which takes the hidden setup and every variable with
+   * it. `setupDone` has to go back with it or the next run would skip replaying
+   * the setup into a kernel that never had it — and the run ticks are vouching
+   * for state that no longer exists.
+   */
+  const stopKernel = () => {
+    stop();
+    setSetupDone(false);
+    setCells((current) => current.map((cell) => ({ ...cell, runCount: 0 })));
+  };
+
   /** Runs hidden setup first, exactly as a student's kernel will. */
   const executeCell = async (cell) => {
     if (status !== 'ready') {
@@ -126,21 +174,106 @@ export default function NotebookEditor() {
       const { result, error: runError } = await runCell(cell._id, cell.source, push);
       if (runError) collected.push({ type: 'error', text: runError });
       else if (result !== null && result !== undefined) collected.push({ type: 'result', text: result });
-      patchCell(cell._id, { outputs: [...collected], runCount: (cell.runCount || 0) + 1 });
+      patchCell(cell._id, {
+        outputs: [...collected],
+        runCount: (cell.runCount || 0) + 1,
+        // Stamped so the status tick can say when, the same as the student side.
+        executedAt: new Date().toISOString(),
+      });
     } catch (err) {
       patchCell(cell._id, { outputs: [{ type: 'error', text: err.message }] });
     }
   };
 
+  /**
+   * Brings a `.py` or `.ipynb` file in as cells.
+   *
+   * Appended rather than replacing what is already here, and left unsaved: the
+   * teacher decides what is locked, what is hidden setup and whether the split
+   * came out right before any of it reaches a student.
+   */
+  const importFile = async (file) => {
+    if (!file) return;
+    const isIpynb = /\.ipynb$/i.test(file.name);
+
+    try {
+      const { cells: imported, truncated, marked, skipped, language, packages, magics } = cellsFromFile(
+        file.name,
+        await file.text(),
+      );
+
+      if (!imported.length) {
+        toast({ status: 'warning', title: `${file.name} has nothing to import.`, duration: 4000 });
+        return;
+      }
+
+      setCells((current) => [
+        ...current,
+        ...imported.map((cell) => ({ ...newCell(cell.type), source: cell.source })),
+      ]);
+
+      // Without this the cells import perfectly and then every one of them
+      // raises ModuleNotFoundError, because the packages box is still empty.
+      const existing = packagesText.split(',').map((name) => name.trim()).filter(Boolean);
+      const added = packages.filter((name) => !existing.includes(name));
+      if (added.length) setPackagesText([...existing, ...added].join(', '));
+
+      const notes = [];
+      // Say so rather than letting a one-cell import read as a failed split.
+      if (!isIpynb && !marked) notes.push('There were no # %% markers, so it came in as a single cell.');
+      if (skipped) notes.push(`${skipped} raw ${skipped === 1 ? 'cell' : 'cells'} could not be imported.`);
+      if (magics) {
+        notes.push(
+          `${magics} Jupyter ${magics === 1 ? 'magic was' : 'magics were'} commented out — the browser kernel has no IPython.`,
+        );
+      }
+      if (added.length) notes.push(`Added ${added.join(', ')} to Packages.`);
+      if (truncated) notes.push(`Only the first ${MAX_IMPORT_CELLS} cells fit.`);
+      notes.push('Outputs are not carried over. Save to keep the cells.');
+
+      toast({
+        status: 'success',
+        title: `Imported ${imported.length} ${imported.length === 1 ? 'cell' : 'cells'} from ${file.name}`,
+        description: notes.join(' '),
+        duration: 7000,
+      });
+
+      // An R or Julia notebook imports perfectly cleanly and then fails on every
+      // cell, because the kernel here only speaks Python. Worth its own warning.
+      if (language && !/^python/i.test(language)) {
+        toast({
+          status: 'warning',
+          title: `That notebook was written for ${language}.`,
+          description: 'Cells here run against a Python kernel, so they will not work unmodified.',
+          duration: 9000,
+        });
+      }
+    } catch (err) {
+      toast({ status: 'error', title: 'Could not import that file.', description: err.message });
+    }
+  };
+
   const save = async ({ thenPublish = false } = {}) => {
-    setSaving(true);
+    // Two saves in flight against one notebook race each other: `cells` is
+    // replaced wholesale server-side, so the slower response decides what the
+    // notebook ends up containing.
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSavingAction(thenPublish ? 'publish' : 'save');
     setProblems([]);
+
+    // Publishing is a second request on top of the save, and it can be rejected
+    // on its own (an empty text cell, say) after the save has already landed.
+    let stored = false;
     try {
       await lmApi.updateNotebook(classId, notebookId, {
         title: notebook.title,
         description: notebook.description,
         settings: notebook.settings,
-        packages: packagesText.split(',').map((name) => name.trim()).filter(Boolean),
+        // Sent on save, not only on publish: extending a deadline on a live
+        // exercise is an edit, and the class calendar reads it from here.
+        dueDate: notebook.dueDate || null,
+        packages,
         cells: cells.map((cell, order) => ({
           // A `new-…` placeholder must not be sent as an _id; Mongo mints the
           // real one and the reload below picks it up.
@@ -153,18 +286,25 @@ export default function NotebookEditor() {
         })),
       });
 
+      stored = true;
+
       if (thenPublish) {
         await lmApi.publishNotebook(classId, notebookId, { publish: true });
         toast({ status: 'success', title: 'Saved and published' });
       } else {
         toast({ status: 'success', title: 'Saved' });
       }
-      await load();
     } catch (err) {
       setProblems(err.payload?.errors || [err.message]);
       toast({ status: 'error', title: err.message });
     } finally {
-      setSaving(false);
+      // Only once the save itself landed. Reloading after a *rejected* save
+      // would throw away the very edits the teacher has to fix — but a publish
+      // that failed on top of a save that worked still needs the reload, or the
+      // editor keeps showing placeholder ids for cells the server has stored.
+      if (stored) await load();
+      savingRef.current = false;
+      setSavingAction(null);
     }
   };
 
@@ -192,17 +332,31 @@ export default function NotebookEditor() {
             size="sm"
             variant="outline"
             onClick={() => {
+              // Same reset as Stop — the ticks belong to the kernel that earned
+              // them, and a fresh one has none of those variables.
               setSetupDone(false);
+              setCells((current) => current.map((cell) => ({ ...cell, runCount: 0 })));
               restart();
             }}
           >
             Restart Python
           </Button>
         )}
-        <Button size="sm" onClick={() => save()} isLoading={saving}>
+        <Button
+          size="sm"
+          onClick={() => save()}
+          isLoading={savingAction === 'save'}
+          isDisabled={Boolean(savingAction)}
+        >
           Save
         </Button>
-        <Button size="sm" colorScheme="purple" onClick={() => save({ thenPublish: true })} isLoading={saving}>
+        <Button
+          size="sm"
+          colorScheme="purple"
+          onClick={() => save({ thenPublish: true })}
+          isLoading={savingAction === 'publish'}
+          isDisabled={Boolean(savingAction)}
+        >
           Save &amp; publish
         </Button>
       </Flex>
@@ -213,6 +367,26 @@ export default function NotebookEditor() {
           {detail}
         </Alert>
       ) : null}
+
+      {missingFromKernel.length > 0 && (
+        <Alert status="warning" borderRadius="md" py={2} fontSize="sm">
+          <AlertIcon />
+          <Box flex="1">
+            Python is already running without {missingFromKernel.join(', ')}. Restart it to install{' '}
+            {missingFromKernel.length === 1 ? 'that package' : 'those packages'}.
+          </Box>
+          <Button
+            size="xs"
+            ml={3}
+            onClick={() => {
+              setSetupDone(false);
+              restart();
+            }}
+          >
+            Restart &amp; install
+          </Button>
+        </Alert>
+      )}
 
       {problems.length > 0 && (
         <Alert status="warning" borderRadius="md" alignItems="flex-start">
@@ -258,6 +432,44 @@ export default function NotebookEditor() {
 
           <Divider />
 
+          <FormControl>
+            <Flex align="center" gap={3} wrap="wrap">
+              <FormLabel fontSize="sm" mb={0}>
+                Submission deadline
+              </FormLabel>
+              {notebook.dueDate && <DeadlineCountdown dueDate={notebook.dueDate} size="xs" />}
+            </Flex>
+            <HStack mt={2}>
+              <Input
+                type="datetime-local"
+                maxW="260px"
+                value={toDateTimeInput(notebook.dueDate)}
+                onChange={(e) =>
+                  setNotebook((current) => ({
+                    ...current,
+                    dueDate: e.target.value ? new Date(e.target.value).toISOString() : null,
+                  }))
+                }
+              />
+              {notebook.dueDate && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setNotebook((current) => ({ ...current, dueDate: null }))}
+                >
+                  Clear
+                </Button>
+              )}
+            </HStack>
+            <FormHelperText fontSize="xs">
+              Optional. Nothing locks at the deadline — students can still submit, and late ones are
+              marked as such so you can see who was on time and who was not. It also puts the exercise
+              on the class calendar.
+            </FormHelperText>
+          </FormControl>
+
+          <Divider />
+
           <FormControl display="flex" alignItems="flex-start" gap={3}>
             <Switch
               mt={1}
@@ -297,7 +509,7 @@ export default function NotebookEditor() {
           <Box key={cell._id}>
             {cell.type === 'code' && (
               <HStack spacing={4} mb={1} px={1}>
-                <Tooltip label="The student can run it but not edit it — imports and scaffolding">
+                <HintTooltip label="The student can run it but not edit it — imports and scaffolding">
                   <Checkbox
                     size="sm"
                     isChecked={cell.locked}
@@ -305,8 +517,8 @@ export default function NotebookEditor() {
                   >
                     <Text fontSize="xs">Locked</Text>
                   </Checkbox>
-                </Tooltip>
-                <Tooltip label="Runs before their cells but is never shown — data setup, helper functions">
+                </HintTooltip>
+                <HintTooltip label="Runs before their cells but is never shown — data setup, helper functions">
                   <Checkbox
                     size="sm"
                     isChecked={cell.hidden}
@@ -314,7 +526,7 @@ export default function NotebookEditor() {
                   >
                     <Text fontSize="xs">Hidden setup</Text>
                   </Checkbox>
-                </Tooltip>
+                </HintTooltip>
                 {cell.hidden && (
                   <Badge colorScheme="orange" fontSize="2xs">
                     not shown to students
@@ -330,7 +542,7 @@ export default function NotebookEditor() {
               canRun={status === 'ready' && !busyCellId}
               onChange={(patch) => patchCell(cell._id, patch)}
               onRun={() => executeCell(cell)}
-              onStop={stop}
+              onStop={stopKernel}
               onMove={(delta) => moveCell(index, delta)}
               onDelete={() => setCells((current) => current.filter((entry) => entry._id !== cell._id))}
             />
@@ -338,14 +550,44 @@ export default function NotebookEditor() {
         ))}
       </VStack>
 
-      <HStack>
+      <HStack wrap="wrap">
         <Button size="sm" variant="outline" onClick={() => setCells((c) => [...c, newCell('code')])}>
           + Code cell
         </Button>
         <Button size="sm" variant="outline" onClick={() => setCells((c) => [...c, newCell('markdown')])}>
           + Text cell
         </Button>
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".py,.ipynb,text/x-python,application/x-ipynb+json"
+          hidden
+          data-testid="notebook-import"
+          onChange={(event) => {
+            importFile(event.target.files?.[0]);
+            // Cleared so picking the same file again still fires a change.
+            event.target.value = '';
+          }}
+        />
+        <HintTooltip label="A Jupyter notebook, or a script split on the # %% markers VS Code, Spyder and jupytext write">
+          <Button
+            size="sm"
+            variant="outline"
+            leftIcon={<FiUpload />}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            Import .ipynb / .py
+          </Button>
+        </HintTooltip>
       </HStack>
+
+      <Text fontSize="xs" opacity={0.6}>
+        Importing adds cells to the end of this notebook, without their saved outputs. An{' '}
+        <Box as="code">.ipynb</Box> already knows where its cells are; in a <Box as="code">.py</Box> put{' '}
+        <Box as="code"># %%</Box> on its own line to start a new cell, or <Box as="code"># %% [markdown]</Box>{' '}
+        for a text cell.
+      </Text>
     </VStack>
   );
 }

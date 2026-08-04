@@ -6,6 +6,7 @@ const LmSubmission = require('../models/lmSubmission');
 const { seedSubmissions } = require('./courseworkController');
 const nb = require('../services/notebookService');
 const { notifyClass } = require('../services/notifyService');
+const game = require('../services/gamification');
 
 /* ─────────────────────────────── authoring ────────────────────────────── */
 
@@ -105,9 +106,23 @@ exports.updateNotebook = async (req, res) => {
     notebook.cells = cells;
   }
   if (req.body.settings) Object.assign(notebook.settings, req.body.settings);
+  if (req.body.dueDate !== undefined) {
+    notebook.dueDate = req.body.dueDate ? new Date(req.body.dueDate) : null;
+  }
 
   notebook.updated_at = new Date();
   await notebook.save();
+
+  // The Classwork row is what the calendar and the gradebook read, so a
+  // deadline moved from here has to reach it. Publishing is not the only way a
+  // date changes — a teacher extending a deadline just saves.
+  if (notebook.courseworkId) {
+    await LmCoursework.updateOne(
+      { _id: notebook.courseworkId },
+      { $set: { dueDate: notebook.dueDate, title: notebook.title, notebookId: notebook._id } },
+    );
+  }
+
   return res.json(notebook);
 };
 
@@ -152,6 +167,10 @@ exports.publishNotebook = async (req, res) => {
 
   notebook.published = true;
   notebook.publishedAt = notebook.publishedAt || new Date();
+  // Announce once. Publishing again after editing a cell is the same notebook,
+  // and re-notifying the class for it is how a working mailer becomes noise.
+  const announce = !notebook.announcedAt;
+  if (announce) notebook.announcedAt = new Date();
   if (req.body.dueDate !== undefined) {
     notebook.dueDate = req.body.dueDate ? new Date(req.body.dueDate) : null;
   }
@@ -162,14 +181,20 @@ exports.publishNotebook = async (req, res) => {
     coursework.instructions = notebook.description;
     coursework.dueDate = notebook.dueDate;
     coursework.status = 'published';
+    // Backfills rows written before notebooks were linked and typed, so an
+    // existing exercise starts pointing at itself — and stops calling itself an
+    // assignment — on the next publish.
+    coursework.notebookId = notebook._id;
+    coursework.workType = 'coding';
     await coursework.save();
   } else {
     coursework = await LmCoursework.create({
       classId: req.lmClass._id,
-      workType: 'assignment',
+      workType: 'coding',
       title: notebook.title,
       instructions: notebook.description,
       dueDate: notebook.dueDate,
+      notebookId: notebook._id,
       createdBy: req.lmUser.id,
       createdByName: req.lmUser.name,
     });
@@ -179,17 +204,19 @@ exports.publishNotebook = async (req, res) => {
   await notebook.save();
   await seedSubmissions(coursework, req.lmClass);
 
-  const codeCells = (notebook.cells || []).filter((cell) => cell.type === 'code' && !cell.hidden).length;
-  await notifyClass({
-    klass: req.lmClass,
-    excludeUserId: req.lmUser.id,
-    type: 'coursework',
-    title: `New coding notebook in ${req.lmClass.name}: ${notebook.title}`,
-    body: `${codeCells} code ${codeCells === 1 ? 'cell' : 'cells'} · runs in your browser, nothing to install`,
-    link: `/learning/class/${req.lmClass._id}/notebook/${notebook._id}`,
-    actorName: req.lmUser.name,
-    email: true,
-  });
+  if (announce) {
+    const codeCells = (notebook.cells || []).filter((cell) => cell.type === 'code' && !cell.hidden).length;
+    await notifyClass({
+      klass: req.lmClass,
+      excludeUserId: req.lmUser.id,
+      type: 'coursework',
+      title: `New coding notebook in ${req.lmClass.name}: ${notebook.title}`,
+      body: `${codeCells} code ${codeCells === 1 ? 'cell' : 'cells'} · runs in your browser, nothing to install`,
+      link: `/learning/class/${req.lmClass._id}/notebook/${notebook._id}`,
+      actorName: req.lmUser.name,
+      email: true,
+    });
+  }
 
   return res.json({ published: true, courseworkId: coursework._id });
 };
@@ -319,9 +346,18 @@ exports.submitAttempt = async (req, res) => {
     });
   }
   attempt.submittedAt = new Date();
+  attempt.summary = nb.summariseAttempt(attempt.cells);
   attempt.revision += 1;
   attempt.updated_at = new Date();
   await attempt.save();
+
+  await game.onNotebookSubmitted({
+    req,
+    notebook,
+    late: Boolean(notebook.dueDate && attempt.submittedAt > new Date(notebook.dueDate)),
+    completed: attempt.summary.completed,
+    at: attempt.submittedAt,
+  });
 
   // Mirror into the gradebook as turned-in but *ungraded*. There is no auto
   // mark: the outputs came from the student's own browser, so the only honest
@@ -372,16 +408,32 @@ exports.reopenAttempt = async (req, res) => {
 /* ─────────────────────────────── marking ──────────────────────────────── */
 
 exports.listAttempts = async (req, res) => {
+  const notebook = await LmNotebook.findOne({
+    _id: req.params.notebookId,
+    classId: req.lmClass._id,
+  })
+    .select('dueDate title')
+    .lean();
+  if (!notebook) return res.status(404).json({ message: 'Notebook not found.' });
+
   const attempts = await LmNotebookAttempt.find({
     notebookId: req.params.notebookId,
     classId: req.lmClass._id,
   })
-    .select('studentId studentName studentEmail rollNumber submittedAt lastSavedAt grade maxPoints gradedAt cells.executedAt')
+    .select(
+      'studentId studentName studentEmail rollNumber submittedAt lastSavedAt grade maxPoints gradedAt summary cells.executedAt',
+    )
     .sort({ submittedAt: -1, studentName: 1 })
     .lean();
 
-  return res.json(
-    attempts.map((attempt) => ({
+  const due = notebook.dueDate ? new Date(notebook.dueDate) : null;
+
+  const rows = attempts.map((attempt) => {
+    // Derived, not frozen: extending a deadline should forgive the people it
+    // was extended for, rather than leaving them marked late for ever.
+    const late = Boolean(due && attempt.submittedAt && new Date(attempt.submittedAt) > due);
+
+    return {
       _id: attempt._id,
       studentId: attempt.studentId,
       studentName: attempt.studentName,
@@ -392,11 +444,34 @@ exports.listAttempts = async (req, res) => {
       grade: attempt.grade,
       maxPoints: attempt.maxPoints,
       gradedAt: attempt.gradedAt,
+      late,
       // How much of the notebook they actually ran, which is the quickest read
-      // on whether somebody engaged or pasted.
-      cellsRun: (attempt.cells || []).filter((cell) => cell.executedAt).length,
-    })),
-  );
+      // on whether somebody engaged or pasted. The frozen summary is the
+      // submitted state; the live count covers anyone still working.
+      cellsRun: attempt.summary?.cellsRun ?? (attempt.cells || []).filter((cell) => cell.executedAt).length,
+      codeCells: attempt.summary?.codeCells ?? null,
+      cellsErrored: attempt.summary?.cellsErrored ?? null,
+      // Only meaningful once submitted — before that it is a work in progress,
+      // not an incomplete submission.
+      completed: attempt.submittedAt ? Boolean(attempt.summary?.completed) : null,
+    };
+  });
+
+  const submitted = rows.filter((row) => row.submittedAt);
+
+  return res.json({
+    dueDate: notebook.dueDate,
+    attempts: rows,
+    tally: {
+      started: rows.length,
+      submitted: submitted.length,
+      // The two numbers the deadline exists to produce.
+      onTime: due ? submitted.filter((row) => !row.late).length : null,
+      late: due ? submitted.filter((row) => row.late).length : null,
+      // Worked through it, as against opened it and pressed submit.
+      completed: submitted.filter((row) => row.completed).length,
+    },
+  });
 };
 
 exports.getAttempt = async (req, res) => {

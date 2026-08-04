@@ -140,6 +140,24 @@ const lmQuizAttemptSchema = new mongoose.Schema({
   // student, so a teacher can see why.
   terminationReason: { type: String, default: '' },
 
+  /* ---- staff intervention ---- */
+  /**
+   * An absolute deadline for this one sitting, set when staff reopen it.
+   *
+   * It has to be absolute rather than "extra minutes", because the case it
+   * exists for is a paper that closed hours ago: `startedAt + timeLimit` and
+   * the quiz's own `availableTo` are both already in the past, and adding to
+   * either lands in the past too. When set, it supersedes both — see
+   * `examEngine.questionDeadline`.
+   */
+  deadlineOverride: { type: Date, default: null },
+  reopenedAt: { type: Date, default: null },
+  reopenedByName: { type: String, default: '' },
+  // Counts every reopen, including the ones that restarted the paper. Left on
+  // a restarted attempt on purpose: the fact that a student sat this twice
+  // survives the wiping of what they wrote the first time.
+  reopenCount: { type: Number, default: 0 },
+
   startedAt: { type: Date, default: Date.now },
   submittedAt: { type: Date, default: null },
   durationSec: { type: Number, default: 0 },

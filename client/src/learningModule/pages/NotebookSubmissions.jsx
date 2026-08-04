@@ -24,7 +24,14 @@ import {
 } from '@chakra-ui/react';
 
 import lmApi from '../api/lmApi';
-import { EmptyState, ErrorState, Loading, SectionCard } from '../components/common';
+import {
+  DeadlineCountdown,
+  EmptyState,
+  ErrorState,
+  Loading,
+  SectionCard,
+  StatTile,
+} from '../components/common';
 import RichText from '../components/RichText';
 import { formatDateTime } from '../format';
 
@@ -42,6 +49,8 @@ export default function NotebookSubmissions() {
   const toast = useToast();
 
   const [attempts, setAttempts] = useState([]);
+  const [tally, setTally] = useState(null);
+  const [dueDate, setDueDate] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [open, setOpen] = useState(null);
@@ -50,7 +59,10 @@ export default function NotebookSubmissions() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      setAttempts(await lmApi.listNotebookAttempts(classId, notebookId));
+      const data = await lmApi.listNotebookAttempts(classId, notebookId);
+      setAttempts(data.attempts || []);
+      setTally(data.tally || null);
+      setDueDate(data.dueDate || null);
     } catch (err) {
       setError(err);
     } finally {
@@ -140,6 +152,30 @@ export default function NotebookSubmissions() {
         </Box>
       </Alert>
 
+      {/* The deadline's whole purpose, as four numbers. "Completed" is every
+          code cell run with nothing left erroring — the difference between
+          working through the exercise and opening it and pressing submit. It is
+          effort, not a mark: the outputs come from the student's own browser. */}
+      {tally && attempts.length > 0 && (
+        <Flex gap={3} wrap="wrap" align="center">
+          <StatTile label="Started" value={tally.started} />
+          <StatTile label="Submitted" value={tally.submitted} />
+          {dueDate ? (
+            <>
+              <StatTile label="On time" value={tally.onTime} accent="green.500" />
+              <StatTile label="Late" value={tally.late} accent={tally.late ? 'red.500' : 'gray.400'} />
+            </>
+          ) : null}
+          <StatTile
+            label="Ran every cell"
+            value={tally.completed}
+            hint="of those submitted"
+            accent="purple.500"
+          />
+          {dueDate && <DeadlineCountdown dueDate={dueDate} />}
+        </Flex>
+      )}
+
       {attempts.length === 0 ? (
         <EmptyState icon="🐍" title="Nobody has opened it yet" description="Work will appear here as students start." />
       ) : (
@@ -151,6 +187,7 @@ export default function NotebookSubmissions() {
                 <Th>Roll no</Th>
                 <Th>Status</Th>
                 <Th isNumeric>Cells run</Th>
+                <Th>Worked through</Th>
                 <Th isNumeric>Grade</Th>
                 <Th />
               </Tr>
@@ -162,14 +199,36 @@ export default function NotebookSubmissions() {
                   <Td>{row.rollNumber || '—'}</Td>
                   <Td>
                     {row.submittedAt ? (
-                      <Badge colorScheme="green">submitted {formatDateTime(row.submittedAt)}</Badge>
+                      <HStack spacing={1}>
+                        <Badge colorScheme={row.late ? 'orange' : 'green'}>
+                          submitted {formatDateTime(row.submittedAt)}
+                        </Badge>
+                        {row.late && <Badge colorScheme="red">late</Badge>}
+                      </HStack>
                     ) : row.lastSavedAt ? (
                       <Badge colorScheme="blue">in progress</Badge>
                     ) : (
                       <Badge>opened</Badge>
                     )}
                   </Td>
-                  <Td isNumeric>{row.cellsRun}</Td>
+                  <Td isNumeric>
+                    {row.codeCells ? `${row.cellsRun}/${row.codeCells}` : row.cellsRun}
+                  </Td>
+                  <Td>
+                    {/* Blank until submitted: a notebook still being worked on
+                        is not an incomplete submission. */}
+                    {row.completed === null ? (
+                      <Text fontSize="xs" opacity={0.5}>
+                        —
+                      </Text>
+                    ) : row.completed ? (
+                      <Badge colorScheme="green">every cell ran</Badge>
+                    ) : (
+                      <Badge colorScheme="yellow">
+                        {row.cellsErrored ? `${row.cellsErrored} errored` : 'cells left unrun'}
+                      </Badge>
+                    )}
+                  </Td>
                   <Td isNumeric>
                     {row.grade === null || row.grade === undefined
                       ? '—'

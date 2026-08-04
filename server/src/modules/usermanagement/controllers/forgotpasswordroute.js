@@ -29,8 +29,17 @@ async function forgotPassword(req, res) {
       });
     }
 
-    // Generate and send OTP
-    const otp = await sendOTP(email);
+    // Generate and send OTP. sendOTP never throws — it reports failure in its
+    // return value, so the result has to be checked. Returning a flat success
+    // here meant a mail that never left still showed the user "An OTP has been
+    // sent", and they waited for a code that was never coming.
+    const result = await sendOTP(email);
+    if (!result.success) {
+      return res.status(502).json({
+        success: false,
+        message: "Could not send the OTP email. Please try again in a minute.",
+      });
+    }
 
     return res.status(200).json({
       success: true,
@@ -79,8 +88,17 @@ const sendOTP = async (email) => {
     const otpBody = fs.readFileSync(ejsTemplatePath, "utf-8");
     const renderedHTML = ejs.render(otpBody, otpInfo);
 
-    // Add await here
-    await mailSender(email, "Forgot Password — OTP", renderedHTML);
+    // mailSender resolves to `undefined` instead of throwing when the send
+    // fails (a dead SMTP socket, a refused login), so the absence of info — not
+    // an exception — is what "the mail did not go" looks like here.
+    const info = await mailSender(email, "Forgot Password — OTP", renderedHTML);
+    if (!info) {
+      console.error("[forgotPassword] OTP mail could not be sent to", email);
+      return {
+        success: false,
+        message: "Error in sending OTP",
+      };
+    }
 
     return {
       success: true,

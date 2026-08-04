@@ -79,7 +79,7 @@ const LoginForm = () => {
       }}>
       <FormHeader />
       <form onSubmit={handleSubmit}>
-        <VStack spacing={4} width='100%'>
+        <VStack spacing={3} width='100%'>
           <FormControl>
             <FormLabel>Email</FormLabel>
 
@@ -100,7 +100,7 @@ const LoginForm = () => {
               isRequired
             />
           </FormControl>
-          <Text mt={2} textAlign="center" color="blue.500" cursor="pointer" onClick={handleForgotPassword}>
+          <Text textAlign="center" color="blue.500" cursor="pointer" onClick={handleForgotPassword}>
         Forgot Password ?
       </Text>
           <Button

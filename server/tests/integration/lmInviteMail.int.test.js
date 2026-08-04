@@ -191,13 +191,34 @@ describe("POST /classes/:classId/members/invite — invitation mail", () => {
       createAccounts: true,
     });
 
-    expect(res.body.results[0]).toMatchObject({ status: "account_created", mailed: null });
+    expect(res.body.results[0]).toMatchObject({ status: "account_created", mailed: true });
     // The welcome mail carries the set-password link (the other mailSender call
     // is the admin's "user created" notice).
     const welcome = mailSender.mock.calls.filter((call) => call[0] === "newcomer@example.com");
     expect(welcome).toHaveLength(1);
     expect(welcome[0][2]).toContain(klass.name);
     expect(sendMail).not.toHaveBeenCalled(); // no duplicate invite mail
+  });
+
+  // The welcome mail is the only thing carrying the set-password link, so an
+  // account whose welcome mail never left is an account nobody can sign in to.
+  // Reporting `account_created` on its own would read as complete success.
+  it("reports a failed welcome mail for a provisioned account", async () => {
+    const { user, cookie } = await seedTeacher();
+    const klass = await seedClass(user);
+    // mailSender swallows its own failures and resolves undefined.
+    mailSender.mockResolvedValue(undefined);
+
+    const res = await invite(klass, cookie, {
+      emails: ["newcomer@example.com"],
+      role: "student",
+      createAccounts: true,
+    });
+
+    expect(res.body.results[0]).toMatchObject({ status: "account_created", mailed: false });
+    // The account and the enrolment still stand — only the mail failed.
+    const membership = await LmMembership.findOne({ classId: klass._id, email: "newcomer@example.com" });
+    expect(membership.status).toBe("active");
   });
 
   it("still mails an address with no account when account creation is off", async () => {

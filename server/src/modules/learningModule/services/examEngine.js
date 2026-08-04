@@ -167,9 +167,7 @@ function markAnswer(question, response, negativeMarks = 0) {
   const selected = (response?.selected || []).map(String);
   const text = String(response?.text ?? '').trim();
 
-  const attempted = question.type === 'short' || question.type === 'numerical'
-    ? text.length > 0
-    : selected.length > 0;
+  const attempted = question.type === 'numerical' ? text.length > 0 : selected.length > 0;
 
   if (!attempted) {
     // Unattempted never attracts a penalty — that is the convention students
@@ -189,9 +187,6 @@ function markAnswer(question, response, negativeMarks = 0) {
       );
       correct = Math.abs(given - expected) <= allowed;
     }
-  } else if (question.type === 'short') {
-    const expected = (question.correctAnswers || []).map((value) => String(value).trim().toLowerCase());
-    correct = expected.includes(text.toLowerCase());
   } else {
     correct = sameSet(selected, question.correctAnswers);
   }
@@ -310,6 +305,35 @@ function scoreAttempt(quiz, attempt) {
 /* ──────────────────────────── window / eligibility ───────────────────────── */
 
 /**
+ * Whether the quiz has actually gone live for students.
+ *
+ * A publish can be dated, so the flag alone is not the answer: until `publishAt`
+ * passes the quiz is published in intent only, and neither the list, the link,
+ * nor a new attempt may see it. Deriving this on read rather than flipping a
+ * field on a schedule means a server that was asleep at the appointed minute
+ * still behaves correctly the moment it wakes.
+ */
+function isLive(quiz, now = new Date()) {
+  if (!quiz?.published) return false;
+  return !quiz.publishAt || now >= new Date(quiz.publishAt);
+}
+
+/** The same test as `isLive`, as a Mongo filter for student-facing queries. */
+function liveQuizFilter(now = new Date()) {
+  return { published: true, $or: [{ publishAt: null }, { publishAt: { $lte: now } }] };
+}
+
+/** When the link goes live, and whether it still lies ahead. */
+function publishState(quiz, now = new Date()) {
+  const at = quiz?.publishAt ? new Date(quiz.publishAt) : null;
+  return {
+    live: isLive(quiz, now),
+    publishAt: at,
+    scheduled: Boolean(quiz?.published && at && now < at),
+  };
+}
+
+/**
  * Whether the quiz is open, and whether a *new* attempt may start.
  *
  * These are two different questions, which is the point of a margin window: the
@@ -324,8 +348,11 @@ function windowState(quiz, now = new Date()) {
   const notYetOpen = Boolean(from && now < from);
   const closed = Boolean(to && now > to);
 
-  let startDeadline = null;
-  if (from && settings.marginMinutes > 0) {
+  // An explicit cut-off wins over the relative one: a teacher who set a moment
+  // meant that moment, and unlike the margin it still works on a quiz that has
+  // no opening time to count from.
+  let startDeadline = settings.startDeadline ? new Date(settings.startDeadline) : null;
+  if (!startDeadline && from && settings.marginMinutes > 0) {
     startDeadline = new Date(from.getTime() + settings.marginMinutes * 60000);
   }
   const lateToStart = Boolean(startDeadline && now > startDeadline);
@@ -427,10 +454,19 @@ function questionDeadline(quiz, attempt, question, now = new Date()) {
       candidates.push(new Date(servedAt.getTime() + seconds * 1000));
     }
   }
-  if (settings.timeLimitMinutes > 0) {
-    candidates.push(new Date(new Date(attempt.startedAt).getTime() + settings.timeLimitMinutes * 60000));
+  // A reopened sitting runs on its own clock. Both of the candidates below are
+  // in the past for the case this exists for — a paper the teacher reopened
+  // after it closed — so the override replaces them rather than joining them.
+  // Per-question timing above is untouched: it is measured from when *this*
+  // question was served, so it is still meaningful on a resumed paper.
+  if (attempt.deadlineOverride) {
+    candidates.push(new Date(attempt.deadlineOverride));
+  } else {
+    if (settings.timeLimitMinutes > 0) {
+      candidates.push(new Date(new Date(attempt.startedAt).getTime() + settings.timeLimitMinutes * 60000));
+    }
+    if (settings.availableTo) candidates.push(new Date(settings.availableTo));
   }
-  if (settings.availableTo) candidates.push(new Date(settings.availableTo));
 
   if (!candidates.length) return null;
   return new Date(Math.min(...candidates.map((date) => date.getTime())));
@@ -459,6 +495,9 @@ module.exports = {
   markAnswer,
   scoreAttempt,
   windowState,
+  isLive,
+  liveQuizFilter,
+  publishState,
   resultsVisible,
   questionDeadline,
   attemptDeadline,

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Alert,
   AlertIcon,
@@ -15,6 +15,18 @@ import {
   useClipboard,
 } from '@chakra-ui/react';
 import { formatDateTime, relativeTime } from '../format';
+
+/**
+ * The text colour a bare-button control has to state for itself.
+ *
+ * Chakra renders MenuItem and AccordionButton as plain `<button>`s and its
+ * theme sets no colour on them, so they take whatever they inherit — except a
+ * global `button { color: #fff }` in timetableadmin/Timetable.css matches the
+ * element directly, and a matched rule beats an inherited value however far
+ * away it was written. The result is white text on a white menu. Spread this
+ * onto any such control that is not already saying its own colour.
+ */
+export const buttonTextStyles = { color: 'gray.800' };
 
 /** Consistent loading state for every panel in the module. */
 export function Loading({ label = 'Loading…', minH = '200px' }) {
@@ -265,6 +277,77 @@ export function StateBadge({ state, late }) {
         </Badge>
       )}
     </Flex>
+  );
+}
+
+/**
+ * A deadline that counts down rather than sitting there as a date.
+ *
+ * "Due 14 Aug, 23:59" is a date a student has to do arithmetic on. A clock that
+ * says "4h 12m left" is the thing they actually want to know, and it is the
+ * last hour — where this switches to seconds and turns red — that the format
+ * exists for.
+ *
+ * The tick rate follows the urgency: once a second under the last hour, once a
+ * minute otherwise. A class list can hold thirty of these, and thirty
+ * per-second timers to redraw "in 6 days" would be pure waste.
+ */
+export function DeadlineCountdown({ dueDate, prefix = 'Due in', size = 'sm', ...rest }) {
+  const target = dueDate ? new Date(dueDate).getTime() : null;
+  const [remaining, setRemaining] = useState(() => (target ? target - Date.now() : null));
+
+  useEffect(() => {
+    if (!target) {
+      setRemaining(null);
+      return undefined;
+    }
+    const tick = () => setRemaining(target - Date.now());
+    tick();
+    // Re-armed each tick rather than a fixed interval, so crossing into the
+    // last hour speeds it up without waiting for a remount.
+    let timer = null;
+    const schedule = () => {
+      const left = target - Date.now();
+      timer = setTimeout(() => {
+        tick();
+        schedule();
+      }, Math.abs(left) < 3600_000 ? 1000 : 60_000);
+    };
+    schedule();
+    return () => clearTimeout(timer);
+  }, [target]);
+
+  if (!target || remaining === null) return null;
+
+  const overdue = remaining < 0;
+  const left = Math.abs(remaining);
+  const days = Math.floor(left / 864e5);
+  const hours = Math.floor((left % 864e5) / 36e5);
+  const minutes = Math.floor((left % 36e5) / 6e4);
+  const seconds = Math.floor((left % 6e4) / 1000);
+
+  let text;
+  if (days > 0) text = `${days}d ${hours}h`;
+  else if (hours > 0) text = `${hours}h ${minutes}m`;
+  else if (minutes > 0) text = `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+  else text = `${seconds}s`;
+
+  // Urgency in the colour, so a glance down a list finds the one closing today.
+  const scheme = overdue ? 'red' : left < 36e5 ? 'red' : left < 864e5 ? 'orange' : 'gray';
+
+  return (
+    <Tooltip label={`Deadline: ${formatDateTime(dueDate)}`}>
+      <Badge
+        colorScheme={scheme}
+        borderRadius="full"
+        px={2}
+        fontSize={size === 'xs' ? '0.65rem' : '0.75rem'}
+        fontVariantNumeric="tabular-nums"
+        {...rest}
+      >
+        {overdue ? `Overdue by ${text}` : `${prefix} ${text}`}
+      </Badge>
+    </Tooltip>
   );
 }
 

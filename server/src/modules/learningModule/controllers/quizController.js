@@ -6,9 +6,22 @@ const LmMembership = require("../models/lmMembership");
 const User = require("../../../models/usermanagement/user");
 const { seedSubmissions } = require("./courseworkController");
 const engine = require("../services/examEngine");
-const { notifyClass } = require("../services/notifyService");
+const { duplicateOptionMessage } = require("../services/questionRules");
+const { notifyClass, notifyUser } = require("../services/notifyService");
+const game = require("../services/gamification");
 
 /* ─────────────────────────────── helpers ──────────────────────────────── */
+
+/**
+ * A date field off the wire. Blank and unparseable both mean "no date" rather
+ * than an Invalid Date, which mongoose would happily store and every comparison
+ * downstream would then read as false.
+ */
+const readDate = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
 
 /**
  * Teachers manage every quiz in their class; a quiz may additionally name
@@ -27,6 +40,21 @@ const requireManage = (req, res, quiz) => {
   res.status(403).json({ message: "You do not have edit access to this quiz." });
   return false;
 };
+
+/**
+ * Who this paper belongs to, for the banner above a sitting.
+ *
+ * Sent with the quiz rather than read from the class the surrounding page
+ * happens to have loaded: the test screen is the one place in the module that
+ * renders outside the class layout, so it cannot rely on that being there.
+ */
+const paperHeader = (klass, quiz) => ({
+  className: klass.name,
+  subject: klass.subject || klass.name,
+  // The subject's faculty first — the class owner — falling back to whoever set
+  // the paper when a class predates the owner name being recorded.
+  facultyName: klass.ownerName || quiz?.createdByName || "",
+});
 
 /** Answer key stripped. Applied to every student-facing read of a quiz. */
 const forStudent = (quiz) => ({
@@ -89,7 +117,7 @@ const prepareQuestions = (input, sections) => {
     return {
       _id: question._id || undefined,
       question: String(question.question || ""),
-      type: ["mcq", "msq", "truefalse", "short", "numerical"].includes(type) ? type : "mcq",
+      type: ["mcq", "msq", "truefalse", "numerical"].includes(type) ? type : "mcq",
       options: Array.isArray(question.options) ? question.options.map(String) : [],
       correctAnswers: Array.isArray(question.correctAnswers)
         ? question.correctAnswers.map(String)
@@ -145,21 +173,46 @@ const prepareSections = (input) =>
   }));
 
 exports.listQuizzes = async (req, res) => {
-  const filter = { classId: req.lmClass._id, ...(req.lmIsTeacher ? {} : { published: true }) };
-  const quizzes = await LmQuiz.find(filter).sort({ created_at: -1 }).lean();
   const now = new Date();
+  const filter = {
+    classId: req.lmClass._id,
+    ...(req.lmIsTeacher ? {} : engine.liveQuizFilter(now)),
+  };
+  const quizzes = await LmQuiz.find(filter).sort({ created_at: -1 }).lean();
 
   if (req.lmIsTeacher) {
     const stats = await LmQuizAttempt.aggregate([
       { $match: { classId: req.lmClass._id, status: { $in: ["submitted", "expired", "terminated"] } } },
-      { $group: { _id: "$quizId", attempts: { $sum: 1 }, avg: { $avg: "$percent" } } },
+      {
+        $group: {
+          _id: "$quizId",
+          attempts: { $sum: 1 },
+          avg: { $avg: "$percent" },
+          // When the cohort actually finished, which is the honest answer to
+          // "when did this test complete" — a window that closes at midnight
+          // says nothing about a test everyone had left by 10:20.
+          lastSubmittedAt: { $max: "$submittedAt" },
+        },
+      },
     ]);
     const byQuiz = new Map(stats.map((entry) => [String(entry._id), entry]));
+
+    // Who is sitting right now. The card cannot say a test is live from the
+    // window alone: "open until Friday" is not the same thing as anyone being
+    // in it, and it is the second one a teacher is watching for.
+    const sittingNow = await LmQuizAttempt.aggregate([
+      { $match: { classId: req.lmClass._id, status: "in_progress" } },
+      { $group: { _id: "$quizId", count: { $sum: 1 } } },
+    ]);
+    const liveByQuiz = new Map(sittingNow.map((entry) => [String(entry._id), entry.count]));
+
     return res.json(
       quizzes.map((quiz) => ({
         ...quiz,
-        stats: byQuiz.get(String(quiz._id)) || { attempts: 0, avg: null },
+        stats: byQuiz.get(String(quiz._id)) || { attempts: 0, avg: null, lastSubmittedAt: null },
+        sittingNow: liveByQuiz.get(String(quiz._id)) || 0,
         window: engine.windowState(quiz, now),
+        publish: engine.publishState(quiz, now),
       })),
     );
   }
@@ -176,7 +229,17 @@ exports.listQuizzes = async (req, res) => {
       const mine = myAttempts.filter((attempt) => String(attempt.quizId) === String(quiz._id));
       const best = mine.reduce((top, attempt) => (!top || attempt.percent > top.percent ? attempt : top), null);
       const visible = engine.resultsVisible(quiz, now);
+      // Deliberately outside the `visible` gate below. When a student finished
+      // is not a mark and does not leak one — withholding it while withholding
+      // the score just leaves them unsure whether the submission registered at
+      // all, which is the anxious question they ask staff about.
+      const submitted = mine
+        .map((attempt) => attempt.submittedAt)
+        .filter(Boolean)
+        .sort((a, b) => new Date(b) - new Date(a));
       return {
+        completedAt: submitted[0] || null,
+        inProgress: mine.some((attempt) => attempt.status === "in_progress"),
         _id: quiz._id,
         title: quiz.title,
         description: quiz.description,
@@ -199,6 +262,10 @@ exports.createQuiz = async (req, res) => {
   if (!title) return res.status(400).json({ message: "A quiz title is required." });
 
   const sections = prepareSections(req.body.sections);
+  const questions = prepareQuestions(req.body.questions, sections);
+  const duplicates = duplicateOptionMessage(questions);
+  if (duplicates) return res.status(400).json({ message: duplicates });
+
   const quiz = new LmQuiz({
     classId: req.lmClass._id,
     title,
@@ -207,7 +274,7 @@ exports.createQuiz = async (req, res) => {
     audioSessionId: req.body.audioSessionId || null,
     instructions: Array.isArray(req.body.instructions) ? req.body.instructions.map(String) : [],
     sections,
-    questions: prepareQuestions(req.body.questions, sections),
+    questions,
     createdBy: req.lmUser.id,
     createdByName: req.lmUser.name,
   });
@@ -223,9 +290,17 @@ exports.getQuiz = async (req, res) => {
   const now = new Date();
 
   if (canManage(req, quiz)) {
-    return res.json({ ...quiz, window: engine.windowState(quiz, now), canManage: true });
+    return res.json({
+      ...quiz,
+      ...paperHeader(req.lmClass, quiz),
+      window: engine.windowState(quiz, now),
+      publish: engine.publishState(quiz, now),
+      canManage: true,
+    });
   }
-  if (!quiz.published) return res.status(404).json({ message: "Quiz not found." });
+  // A dated publish is not a publish yet — until then the quiz does not exist
+  // as far as anyone holding the link is concerned.
+  if (!engine.isLive(quiz, now)) return res.status(404).json({ message: "Quiz not found." });
 
   const attempts = await LmQuizAttempt.find({ quizId: quiz._id, studentId: req.lmUser.id })
     .sort({ attemptNumber: 1 })
@@ -233,6 +308,7 @@ exports.getQuiz = async (req, res) => {
 
   return res.json({
     ...forStudent(quiz),
+    ...paperHeader(req.lmClass, quiz),
     attempts: attempts.map((attempt) => attemptForStudent(attempt, quiz, now)),
     attemptsUsed: attempts.length,
     window: engine.windowState(quiz, now),
@@ -246,14 +322,14 @@ exports.getQuiz = async (req, res) => {
  * out a single question.
  */
 exports.getQuizBrief = async (req, res) => {
+  const now = new Date();
   const quiz = await LmQuiz.findOne({
     _id: req.params.quizId,
     classId: req.lmClass._id,
-    published: true,
+    ...engine.liveQuizFilter(now),
   }).lean();
   if (!quiz) return res.status(404).json({ message: "Quiz not found." });
 
-  const now = new Date();
   const attempts = await LmQuizAttempt.find({ quizId: quiz._id, studentId: req.lmUser.id }).lean();
   const inProgress = attempts.find((attempt) => attempt.status === "in_progress");
 
@@ -261,6 +337,8 @@ exports.getQuizBrief = async (req, res) => {
     _id: quiz._id,
     title: quiz.title,
     description: quiz.description,
+    ...paperHeader(req.lmClass, quiz),
+    createdByName: quiz.createdByName,
     instructions: quiz.instructions,
     sections: quiz.sections.map((section) => ({
       ...section,
@@ -294,7 +372,10 @@ exports.updateQuiz = async (req, res) => {
   }
   if (req.body.sections !== undefined) quiz.sections = prepareSections(req.body.sections);
   if (req.body.questions !== undefined) {
-    quiz.questions = prepareQuestions(req.body.questions, quiz.sections);
+    const questions = prepareQuestions(req.body.questions, quiz.sections);
+    const duplicates = duplicateOptionMessage(questions);
+    if (duplicates) return res.status(400).json({ message: duplicates });
+    quiz.questions = questions;
   }
   if (req.body.settings) Object.assign(quiz.settings, req.body.settings);
   normaliseTiming(quiz.settings);
@@ -381,6 +462,11 @@ exports.publishQuiz = async (req, res) => {
     return res.status(400).json({ message: "Add at least one question before publishing." });
   }
 
+  // Checked again here rather than trusted from the save: a quiz authored
+  // before this rule existed has never been through the save path since.
+  const duplicates = duplicateOptionMessage(quiz.questions);
+  if (duplicates) return res.status(400).json({ message: duplicates });
+
   // A per-question-timed paper with a question that has no clock would hang the
   // student on that question forever — and with the whole-paper clock now held
   // at 0 in this mode, there is no fallback to catch it.
@@ -393,21 +479,74 @@ exports.publishQuiz = async (req, res) => {
     }
   }
 
+  const now = new Date();
+  const link = `/learning/class/${req.lmClass._id}/quiz/${quiz._id}`;
+
   quiz.published = req.body.publish !== false;
-  await quiz.save();
 
   if (!quiz.published) {
+    quiz.publishAt = null;
+    await quiz.save();
     await LmCoursework.updateMany({ quizId: quiz._id }, { $set: { status: "draft" } });
     return res.json({ published: false });
   }
 
+  // The three clocks, set together because only together do they make sense.
+  // `publishAt` decides when the link answers; `availableFrom` when the Start
+  // button unlocks behind it; `startDeadline` when it locks again for anyone
+  // who has not begun. Out of order they produce a quiz nobody can ever sit,
+  // so the ordering is checked here rather than discovered on the day.
+  const publishAt = readDate(req.body.publishAt);
+  const availableFrom = readDate(req.body.availableFrom);
+  const startDeadline = readDate(req.body.startDeadline);
+
+  if (publishAt && availableFrom && availableFrom < publishAt) {
+    return res.status(400).json({
+      message: "The quiz cannot start before it is published. Move the start time later, or publish earlier.",
+    });
+  }
+  if (startDeadline && availableFrom && startDeadline < availableFrom) {
+    return res.status(400).json({
+      message: "Entry would close before the quiz opens. Move the entry cut-off later than the start time.",
+    });
+  }
+  if (startDeadline && publishAt && startDeadline < publishAt) {
+    return res.status(400).json({
+      message: "Entry would close before the quiz is published. Move the entry cut-off later.",
+    });
+  }
+
+  quiz.publishAt = publishAt && publishAt > now ? publishAt : null;
+  if (req.body.availableFrom !== undefined) quiz.settings.availableFrom = availableFrom;
+  if (req.body.availableTo !== undefined) quiz.settings.availableTo = readDate(req.body.availableTo);
+  if (req.body.startDeadline !== undefined) {
+    quiz.settings.startDeadline = startDeadline;
+    // Clearing the cut-off has to clear the relative form too, or a quiz
+    // carrying a legacy margin would silently keep turning latecomers away
+    // after the teacher switched the option off.
+    if (!startDeadline) quiz.settings.marginMinutes = 0;
+  }
+  if (req.body.marginMinutes !== undefined) {
+    quiz.settings.marginMinutes = Math.max(0, Number(req.body.marginMinutes) || 0);
+  }
+  await quiz.save();
+
+  const scheduled = Boolean(quiz.publishAt);
+  const dueDate =
+    req.body.dueDate !== undefined
+      ? readDate(req.body.dueDate)
+      : quiz.settings.availableTo || null;
+
   let coursework = await LmCoursework.findOne({ quizId: quiz._id, classId: req.lmClass._id });
   if (coursework) {
-    coursework.status = "published";
+    // A scheduled publish rides the stream's own lazy release, so the class
+    // entry appears at the same moment the link starts answering.
+    coursework.status = scheduled ? "scheduled" : "published";
+    coursework.scheduledFor = scheduled ? quiz.publishAt : null;
     coursework.title = quiz.title;
     coursework.points = quiz.totalMarks;
-    if (req.body.dueDate !== undefined) {
-      coursework.dueDate = req.body.dueDate ? new Date(req.body.dueDate) : null;
+    if (req.body.dueDate !== undefined || req.body.availableTo !== undefined) {
+      coursework.dueDate = dueDate;
     }
     await coursework.save();
   } else {
@@ -417,7 +556,10 @@ exports.publishQuiz = async (req, res) => {
       title: quiz.title,
       instructions: quiz.description,
       points: quiz.totalMarks,
-      dueDate: req.body.dueDate ? new Date(req.body.dueDate) : quiz.settings.availableTo || null,
+      dueDate,
+      status: scheduled ? "scheduled" : "published",
+      scheduledFor: scheduled ? quiz.publishAt : null,
+      publishedAt: quiz.publishAt || now,
       quizId: quiz._id,
       aiSourceSessionId: quiz.audioSessionId || null,
       createdBy: req.lmUser.id,
@@ -427,18 +569,35 @@ exports.publishQuiz = async (req, res) => {
 
   await seedSubmissions(coursework, req.lmClass);
 
-  await notifyClass({
-    klass: req.lmClass,
-    excludeUserId: req.lmUser.id,
-    type: "quiz",
-    title: `New quiz in ${req.lmClass.name}: ${quiz.title}`,
-    body: `${quiz.questions.length} questions · ${quiz.totalMarks} marks`,
-    link: `/learning/class/${req.lmClass._id}/quiz/${quiz._id}`,
-    actorName: req.lmUser.name,
-    email: true,
-  });
+  // Announcing a quiz nobody can open yet would only send the class to a 404;
+  // the scheduled stream entry does the announcing when it goes live.
+  //
+  // `announcedAt` rather than "is this the first publish": a teacher who
+  // corrects the window and saves again has not added a second quiz. It also
+  // covers the other order — a quiz first scheduled, then brought forward to
+  // publish now — which was announced by neither branch.
+  if (!scheduled && !quiz.announcedAt) {
+    quiz.announcedAt = now;
+    await quiz.save();
+    await notifyClass({
+      klass: req.lmClass,
+      excludeUserId: req.lmUser.id,
+      type: "quiz",
+      title: `New quiz in ${req.lmClass.name}: ${quiz.title}`,
+      body: `${quiz.questions.length} questions · ${quiz.totalMarks} marks`,
+      link,
+      actorName: req.lmUser.name,
+      email: true,
+    });
+  }
 
-  return res.json({ published: true, courseworkId: coursework._id });
+  return res.json({
+    published: true,
+    courseworkId: coursework._id,
+    link,
+    publish: engine.publishState(quiz, now),
+    window: engine.windowState(quiz, now),
+  });
 };
 
 /* ───────────────────────────── attempts ───────────────────────────────── */
@@ -449,14 +608,14 @@ const rollNumberOf = async (classId, userId) => {
 };
 
 exports.startAttempt = async (req, res) => {
+  const now = new Date();
   const quiz = await LmQuiz.findOne({
     _id: req.params.quizId,
     classId: req.lmClass._id,
-    published: true,
+    ...engine.liveQuizFilter(now),
   });
   if (!quiz) return res.status(404).json({ message: "Quiz not found." });
 
-  const now = new Date();
   const userAgent = req.get("User-Agent") || "";
   const isMobile = engine.isMobileUserAgent(userAgent);
 
@@ -488,9 +647,10 @@ exports.startAttempt = async (req, res) => {
     return res.status(400).json({ message, code: "WINDOW_CLOSED", window: state });
   }
 
-  const allowed = quiz.settings.attemptsAllowed || 1;
-  if (existing.length >= allowed) {
-    return res.status(400).json({ message: `You have used all ${allowed} attempt(s).` });
+  // One sitting per student. A paper that went wrong is reopened by a teacher
+  // deleting the attempt, not by the student starting a fresh one.
+  if (existing.length) {
+    return res.status(400).json({ message: "You have already attempted this quiz." });
   }
 
   const attemptNumber = existing.length + 1;
@@ -841,7 +1001,12 @@ async function finaliseAttempt(attempt, quiz, req, reason = "completed") {
   attempt.durationSec = Math.round((now - new Date(attempt.startedAt)) / 1000);
   await attempt.save();
 
-  // Best-of across attempts, so a permitted retake can only help.
+  // Sitting the paper is what pays; the score adds a modest bonus on top. The
+  // marks are the teacher's business — points are not a second grade.
+  await game.onQuizSubmitted({ req, quiz, percent: scored.percent, at: now });
+
+  // Best-of across attempts. A student now sits a quiz once, but rows from
+  // before that rule — or from a re-sit a teacher opened up — are still read.
   const coursework = await LmCoursework.findOne({ quizId: quiz._id, classId: attempt.classId });
   if (coursework) {
     const best = await LmQuizAttempt.find({
@@ -956,7 +1121,7 @@ function buildReview(quiz, attempt) {
         question: question.question,
         type: question.type,
         options,
-        correctAnswers: question.type === "short" || question.type === "numerical"
+        correctAnswers: question.type === "numerical"
           ? question.correctAnswers
           : remap(question.correctAnswers),
         explanation: question.explanation,
@@ -980,8 +1145,30 @@ function buildReview(quiz, attempt) {
 }
 
 /**
- * Records a proctoring event, and ends the attempt when the tab-switch budget
- * is exhausted and the teacher asked for that.
+ * What spends the student's budget for leaving the test.
+ *
+ * A fullscreen exit counts alongside tab switches whenever the paper asked for
+ * fullscreen, because that is what the brief promises them: "leaving
+ * fullscreen, or switching to another window or tab, is recorded — you may do
+ * so N times". Counting only the tab switches left the harder-to-miss half of
+ * that sentence unenforced, so a student could press Escape all day and the
+ * auto-submit the teacher switched on would never arrive. On a paper that
+ * never asked for fullscreen the exit is still recorded, but it costs nothing:
+ * the student was never told it would.
+ */
+const countsAsLeaving = (type, settings) =>
+  type === "tab_switch" ||
+  type === "blur" ||
+  (type === "fullscreen_exit" && Boolean(settings.requireFullscreen));
+
+// One departure can reach us as two events — a browser that drops fullscreen as
+// it loses focus fires both — and charging twice for one Escape would halve a
+// budget the student was quoted in full.
+const LEAVE_COALESCE_MS = 2000;
+
+/**
+ * Records a proctoring event, and ends the attempt when the budget for leaving
+ * the test is exhausted and the teacher asked for that.
  */
 exports.recordViolation = async (req, res) => {
   const attempt = await LmQuizAttempt.findOne({
@@ -996,21 +1183,34 @@ exports.recordViolation = async (req, res) => {
   const allowed = ["tab_switch", "blur", "fullscreen_exit", "copy", "paste", "right_click", "mobile_detected"];
   if (!allowed.includes(type)) return res.status(400).json({ message: "Unknown violation type." });
 
-  attempt.violations.push({ type, at: new Date() });
-  if (type === "tab_switch" || type === "blur") attempt.tabSwitches += 1;
-  await attempt.save();
-
   const quiz = await LmQuiz.findById(attempt.quizId);
   const settings = quiz?.settings || {};
+
+  const now = new Date();
+  const previous = attempt.violations[attempt.violations.length - 1];
+  const coalesced =
+    previous &&
+    countsAsLeaving(previous.type, settings) &&
+    now - new Date(previous.at) < LEAVE_COALESCE_MS;
+
+  attempt.violations.push({ type, at: now });
+  if (countsAsLeaving(type, settings) && !coalesced) attempt.tabSwitches += 1;
+  await attempt.save();
+
   const overBudget = !settings.allowTabChange && attempt.tabSwitches > (settings.maxTabSwitches || 0);
 
   if (overBudget && settings.autoSubmitOnTabLimit) {
-    const finished = await finaliseAttempt(attempt, quiz, { body: { reason: `Exceeded ${settings.maxTabSwitches} tab switches` } }, "terminated");
+    const finished = await finaliseAttempt(
+      attempt,
+      quiz,
+      { body: { reason: `Left the test ${attempt.tabSwitches} time(s), over the limit of ${settings.maxTabSwitches}` } },
+      "terminated",
+    );
     return res.json({
       status: finished.status,
       terminated: true,
       tabSwitches: finished.tabSwitches,
-      message: "Your test was submitted automatically because you left the test window too many times.",
+      message: "Your test was submitted automatically because you left the test too many times.",
     });
   }
 
@@ -1018,7 +1218,7 @@ exports.recordViolation = async (req, res) => {
     status: attempt.status,
     tabSwitches: attempt.tabSwitches,
     warning: overBudget
-      ? "You have exceeded the allowed number of tab switches. This has been recorded."
+      ? "You have left the test more times than allowed. This has been recorded."
       : null,
     remaining: settings.allowTabChange
       ? null
@@ -1044,6 +1244,238 @@ exports.getAttempt = async (req, res) => {
     attempt: req.lmIsTeacher ? attempt : attemptForStudent(attempt, quiz, now),
     review: reveal && attempt.status !== "in_progress" ? buildReview(quiz, attempt) : null,
   });
+};
+
+/* ─────────────── staff intervention on one student's sitting ───────────── */
+
+// How long a reopened sitting runs for when the teacher does not say.
+const DEFAULT_REOPEN_MINUTES = 30;
+const MAX_REOPEN_MINUTES = 600;
+
+/**
+ * Rewrites one student's mirrored gradebook row from whatever attempts are
+ * left.
+ *
+ * Not a blanket reset: `finaliseAttempt` mirrors the *best* of a student's
+ * attempts, so blanking the row would throw away a legitimate earlier sitting,
+ * and leaving it would show a mark for an attempt that no longer exists. The
+ * only correct answer is to recompute, which is what this does — clearing the
+ * row only when nothing finished is left.
+ */
+async function remirrorGradebook(quiz, classId, studentId) {
+  const coursework = await LmCoursework.findOne({ quizId: quiz._id, classId });
+  if (!coursework) return;
+
+  const [top] = await LmQuizAttempt.find({
+    quizId: quiz._id,
+    studentId,
+    status: { $in: ["submitted", "expired", "terminated"] },
+  })
+    .sort({ score: -1 })
+    .limit(1)
+    .lean();
+
+  if (!top) {
+    await LmSubmission.updateOne(
+      { courseworkId: coursework._id, studentId },
+      {
+        $set: {
+          state: "assigned",
+          grade: null,
+          feedback: "",
+          turnedInAt: null,
+          returnedAt: null,
+          gradedAt: null,
+        },
+      },
+    );
+    return;
+  }
+
+  const maxPoints = top.maxScore || quiz.totalMarks;
+  await LmSubmission.updateOne(
+    { courseworkId: coursework._id, studentId },
+    {
+      $set: {
+        grade: top.score,
+        maxPoints,
+        feedback: `Quiz auto-graded: ${top.score}/${maxPoints}`,
+      },
+    },
+  );
+}
+
+const tellStudent = (attempt, quiz, req, title, body) =>
+  notifyUser({
+    userId: attempt.studentId,
+    klass: req.lmClass,
+    type: "quiz",
+    title,
+    body,
+    link: `/learning/class/${req.lmClass._id}/quiz/${quiz._id}`,
+    actorName: req.lmUser.name,
+  });
+
+/**
+ * Delete one student's sitting.
+ *
+ * The class-wide `deleteResponses` already existed; this is the same act aimed
+ * at one person, which is what a teacher actually needs when a single student's
+ * test went wrong. The row is removed rather than flagged, because a student
+ * gets one sitting: a kept-but-hidden attempt would still stand in their way
+ * and they would be unable to sit the paper again.
+ */
+exports.deleteAttempt = async (req, res) => {
+  const attempt = await LmQuizAttempt.findOne({
+    _id: req.params.attemptId,
+    classId: req.lmClass._id,
+  });
+  if (!attempt) return res.status(404).json({ message: "Attempt not found." });
+
+  const quiz = await LmQuiz.findById(attempt.quizId);
+  if (!quiz) return res.status(404).json({ message: "Quiz not found." });
+
+  await LmQuizAttempt.deleteOne({ _id: attempt._id });
+  await remirrorGradebook(quiz, req.lmClass._id, attempt.studentId);
+
+  await tellStudent(
+    attempt,
+    quiz,
+    req,
+    `Your attempt at "${quiz.title}" was cleared`,
+    "Your teacher removed this attempt. If you are meant to sit the test again, it will be open for you.",
+  );
+
+  return res.json({ deleted: true, studentId: attempt.studentId });
+};
+
+/**
+ * Let one student back into a test that has already ended for them.
+ *
+ * Two modes, because the two situations are genuinely different and a teacher
+ * knows which one they are in:
+ *
+ *  - **continue** — the paper closed under them (a dropped connection, a dead
+ *    battery, a proctoring termination, the window expiring mid-sitting). Their
+ *    answers and their position in the paper are kept and they carry on. What
+ *    they had already written is not their fault and should not be thrown away.
+ *
+ *  - **restart** — the sitting is to be discarded and taken again from the
+ *    beginning. The old attempt is deleted and a fresh paper is dealt, with a
+ *    *different* shuffle: with `questionsPerAttempt` randomisation, reusing the
+ *    seed would deal the identical subset they have already seen and read a
+ *    second time.
+ *
+ * Either way the sitting gets its own deadline (`deadlineOverride`), because
+ * both of the clocks that would otherwise apply — the paper's time limit
+ * measured from `startedAt`, and the quiz's own `availableTo` — have already run
+ * out in exactly the case this endpoint is for.
+ */
+exports.reopenAttempt = async (req, res) => {
+  const now = new Date();
+  const mode = req.body.mode === "restart" ? "restart" : "continue";
+  const minutes = Math.min(
+    MAX_REOPEN_MINUTES,
+    Math.max(1, Number(req.body.minutes) || DEFAULT_REOPEN_MINUTES),
+  );
+  const deadlineOverride = new Date(now.getTime() + minutes * 60000);
+
+  const attempt = await LmQuizAttempt.findOne({
+    _id: req.params.attemptId,
+    classId: req.lmClass._id,
+  });
+  if (!attempt) return res.status(404).json({ message: "Attempt not found." });
+
+  const quiz = await LmQuiz.findById(attempt.quizId);
+  if (!quiz) return res.status(404).json({ message: "Quiz not found." });
+
+  if (mode === "continue") {
+    if (attempt.status === "in_progress") {
+      // Already open. Not an error — the teacher's intent is "let them sit for
+      // another N minutes", and extending the clock delivers exactly that.
+      attempt.deadlineOverride = deadlineOverride;
+      attempt.reopenedAt = now;
+      attempt.reopenedByName = req.lmUser.name;
+      attempt.reopenCount += 1;
+      await attempt.save();
+      await tellStudent(
+        attempt,
+        quiz,
+        req,
+        `More time on "${quiz.title}"`,
+        `Your teacher extended your test by ${minutes} minutes.`,
+      );
+      return res.json({ attempt, mode, extended: true, deadlineOverride });
+    }
+
+    attempt.status = "in_progress";
+    attempt.submittedAt = null;
+    attempt.terminationReason = "";
+    // The clock on the question in front of them starts again from now — they
+    // are being handed the paper back, not caught mid-thought.
+    attempt.currentServedAt = now;
+    attempt.deadlineOverride = deadlineOverride;
+    attempt.reopenedAt = now;
+    attempt.reopenedByName = req.lmUser.name;
+    attempt.reopenCount += 1;
+    await attempt.save();
+
+    // The mark that was mirrored into the gradebook came from a sitting that is
+    // no longer finished, so it stops standing for anything until they submit
+    // again.
+    await remirrorGradebook(quiz, req.lmClass._id, attempt.studentId);
+
+    await tellStudent(
+      attempt,
+      quiz,
+      req,
+      `"${quiz.title}" has been reopened for you`,
+      `Continue from where you stopped. You have ${minutes} minutes.`,
+    );
+
+    return res.json({ attempt, mode, deadlineOverride });
+  }
+
+  // restart
+  const { studentId, studentName, studentEmail, rollNumber, attemptNumber, reopenCount } = attempt;
+  await LmQuizAttempt.deleteOne({ _id: attempt._id });
+
+  // A seed the student has not sat before. `buildPaper` uses this argument for
+  // nothing but the shuffle, so varying it is safe and `attemptNumber` on the
+  // new row stays truthful.
+  const paper = engine.buildPaper(quiz.toObject(), String(studentId), `${attemptNumber}-r${reopenCount + 1}`);
+
+  const fresh = await LmQuizAttempt.create({
+    quizId: quiz._id,
+    classId: req.lmClass._id,
+    studentId,
+    studentName,
+    studentEmail,
+    rollNumber,
+    attemptNumber,
+    questionOrder: paper.questionOrder,
+    optionOrder: paper.optionOrder,
+    maxScore: paper.maxScore,
+    cursor: 0,
+    currentServedAt: now,
+    startedAt: now,
+    deadlineOverride,
+    reopenedAt: now,
+    reopenedByName: req.lmUser.name,
+    reopenCount: reopenCount + 1,
+  });
+
+  await remirrorGradebook(quiz, req.lmClass._id, studentId);
+
+  await tellStudent(
+    fresh,
+    quiz,
+    req,
+    `"${quiz.title}" has been reset for you`,
+    `Your teacher cleared your previous attempt. You can take the test again — you have ${minutes} minutes from now.`,
+  );
+
+  return res.json({ attempt: fresh, mode, deadlineOverride });
 };
 
 /* ────────────────────────────── analytics ─────────────────────────────── */

@@ -6,7 +6,13 @@ const LmQuiz = require("../models/lmQuiz");
 const LmComment = require("../models/lmComment");
 const { notifyClass } = require("../services/notifyService");
 
+// What a teacher may create from the Classwork page. "coding" is deliberately
+// absent: a coding exercise is created by publishing a notebook, and one made
+// here would be a row with no exercise behind it.
 const WORK_TYPES = ["assignment", "quiz", "question", "material"];
+
+// Everything the collection can hold, for filtering a list down to one type.
+const FILTERABLE_WORK_TYPES = [...WORK_TYPES, "coding"];
 
 const audienceFilter = (req) =>
   req.lmIsTeacher ? {} : { $or: [{ audience: { $size: 0 } }, { audience: req.lmUser.id }] };
@@ -64,7 +70,7 @@ exports.listCoursework = async (req, res) => {
     ...audienceFilter(req),
     ...(req.lmIsTeacher ? {} : { status: "published" }),
   };
-  if (req.query.workType && WORK_TYPES.includes(req.query.workType)) {
+  if (req.query.workType && FILTERABLE_WORK_TYPES.includes(req.query.workType)) {
     filter.workType = req.query.workType;
   }
   if (req.query.topicId) filter.topicId = req.query.topicId;
@@ -257,6 +263,27 @@ exports.updateCoursework = async (req, res) => {
       { courseworkId: coursework._id },
       { $set: { maxPoints: coursework.points } },
     );
+  }
+
+  // Publishing a draft is the moment the class gains the item, so it announces
+  // exactly as `createCoursework` does when something is published outright.
+  // Only this transition: an ordinary edit of a live item must not re-announce
+  // it, which is what `wasPublished` guards.
+  if (!wasPublished && coursework.status === "published") {
+    await LmClass.updateOne({ _id: req.lmClass._id }, { $inc: { "stats.courseworkCount": 1 } });
+    await notifyClass({
+      klass: req.lmClass,
+      userIds: coursework.audience.length ? coursework.audience : null,
+      excludeUserId: req.lmUser.id,
+      type: coursework.workType === "material" ? "material" : "coursework",
+      title: `${req.lmClass.name}: ${coursework.title}`,
+      body: coursework.dueDate
+        ? `Due ${new Date(coursework.dueDate).toLocaleString("en-IN")}`
+        : "No due date",
+      link: `/learning/class/${req.lmClass._id}/work/${coursework._id}`,
+      actorName: req.lmUser.name,
+      email: true,
+    });
   }
 
   return res.json(coursework);

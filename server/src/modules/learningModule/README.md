@@ -50,6 +50,7 @@ client/src/learningModule/
 │                     CommentThread, LearningLayout, NotificationBell,
 │                     QuizReview, ShortResults, NotebookCell
 ├── hooks/            useProctoring, useShortStream, usePyodide
+├── notebookImport.js .ipynb / .py → notebook cells
 ├── pages/            dashboard, class tabs, quiz, tutorial, shorts and
 │                     notebook screens
 └── LearningRoutes.jsx  everything under /learning/*
@@ -106,7 +107,7 @@ history; private teacher⇄student comment threads; bulk return; gradebook grid
 with class averages and CSV export.
 
 **Quizzes** — manual or AI-generated; MCQ / multi-select / true-false / short
-answer; time limit, attempt cap, shuffling, negative marking, pass mark,
+answer; time limit, one sitting per student, shuffling, negative marking, pass mark,
 availability window; auto-grading that writes straight into the gradebook;
 per-question difficulty analysis for the teacher.
 
@@ -116,6 +117,10 @@ See below.
 
 **Coding notebooks** — Colab-style Python worksheets that run in the student's
 own browser. See below.
+
+**Anonymous feedback** — a per-class channel from students to teaching staff.
+Anonymous to the teacher, attributed for the administrator, with a language
+filter and an escalating warning in front of it. See below.
 
 **Parameterised tutorials** — see below.
 
@@ -244,9 +249,48 @@ The effective deadline for a question is the *earliest* of whichever clock is in
 force and the close time — and it is computed server-side from when the question
 was served, so reloading cannot reset it.
 
+### Putting one student's sitting right
+
+A test ends for the wrong reason often enough that the teacher needs a way back
+in for one person: a dropped connection, a dead battery, a proctoring
+termination, the window expiring mid-paper. Two staff-only endpoints on the
+attempt, both in the results table's per-row menu:
+
+| | What happens | When |
+| --- | --- | --- |
+| `POST /attempts/:id/reopen` `mode: continue` | Status back to `in_progress`, answers and cursor kept | The paper closed under them — what they had written is not their fault |
+| `POST /attempts/:id/reopen` `mode: restart` | Old attempt deleted, fresh paper dealt, back to question 1 | The sitting is to be discarded and taken again |
+| `DELETE /attempts/:id` | The attempt and its score are removed | Clearing one student's response, freeing their attempt slot |
+
+Three things make this work, and each is easy to break by accident:
+
+- **`deadlineOverride` on the attempt.** Both clocks that would otherwise apply
+  — `startedAt + timeLimitMinutes`, and the quiz's `availableTo` — have already
+  run out in exactly the situation being fixed, so a reopened sitting is given an
+  absolute deadline of its own that supersedes both (`examEngine.questionDeadline`).
+  Per-question timing is untouched: it runs from when *this* question was served,
+  so it is still meaningful on a resumed paper.
+- **An open attempt outranks a closed window.** `startAttempt` already resumed an
+  in-progress attempt before testing `canStart`; `QuizBrief` now matches it, and
+  suppresses the "this test closed" alert when a sitting is open. A closed window
+  turning the student away at the door would defeat the whole endpoint.
+- **A restart re-seeds the shuffle.** `buildPaper` derives its permutation from
+  (quiz, student, attemptNumber), so reusing the number would deal the identical
+  paper — and with `questionsPerAttempt` sampling, the identical *subset* they
+  have already read. The stored `attemptNumber` stays truthful; only the seed
+  varies.
+
+The mirrored gradebook row is recomputed, never blanked (`remirrorGradebook`):
+`finaliseAttempt` mirrors the *best* of a student's attempts, so clearing the row
+would discard a legitimate earlier sitting while leaving it would show a mark for
+an attempt that no longer exists. `reopenCount` / `reopenedByName` stay on the
+record — including across a restart, so the fact that a student sat a paper twice
+survives the wiping of what they wrote the first time.
+
 ### Question types and marking
 
-Five types: `mcq` (single), `msq` (multiple), `truefalse`, `numerical`, `short`.
+Four types: `mcq` (single), `msq` (multiple), `truefalse`, `numerical`. Every
+one of them auto-marks; there is deliberately no free-text type.
 The aim2Crack names `single` / `multiple` / `integer` are accepted on input and
 translated, so questions can be imported without rewriting.
 
@@ -296,8 +340,18 @@ question.
 **Deterrents only.** Reported by the student's own browser, so a determined
 student defeats any of them:
 
-tab/window blur counting, fullscreen gating, copy/cut/paste and right-click
-suppression, and `preventMobile`.
+- `allowTabChange` / `maxTabSwitches` / `autoSubmitOnTabLimit` — leaving the
+  test is counted; passing the budget warns, or ends the attempt if configured.
+  Tab and window blur always count, and a fullscreen exit counts too when the
+  paper required fullscreen, which is what the brief promises the student.
+  Events landing within two seconds of each other are one departure: a browser
+  that drops fullscreen as it blurs would otherwise charge twice for one Escape.
+- `requireFullscreen` — the sitting is gated behind fullscreen, and exits are
+  recorded. The client watches `fullscreenchange` for the whole sitting, in both
+  delivery modes, so the gate cannot be bypassed by a stale "still fullscreen".
+- `disableCopyPaste`, `disableRightClick` — suppressed in the page, nothing more.
+- `preventMobile` — checked server-side from the User-Agent when starting, which
+  makes it the odd one out: the *check* is ours, but the input is not.
 
 `preventMobile` deserves naming plainly: it checks the User-Agent, which the
 browser chooses for itself, so the devtools device toolbar defeats it in one
@@ -312,6 +366,14 @@ record, not the prevention.**
 shared account, or somebody sitting the paper on a student's behalf. No browser
 API can see any of them. A quiz that genuinely matters needs an invigilated lab,
 not JavaScript — and the UI should not imply otherwise.
+
+### On-screen calculator
+
+`allowCalculator` (default **on**) offers a scientific calculator floating over
+the paper for the length of the sitting. It is pure client work — the server
+only carries the flag — and it holds nothing that outlives the attempt, so it
+cannot double as a notepad between questions. Turn it off for a paper where the
+arithmetic is the thing being marked.
 
 ### Collaborators
 
@@ -336,7 +398,8 @@ teachers. Only a class teacher can change the collaborator list.
 
 ```
 /quiz/:quizId                        brief — rules, timings, eligibility, countdowns
-      │  Start (blocked by window, margin, device, attempts)
+      │  readable the moment the quiz is published, window open or not
+      │  Start (blocked by window, margin, device, an attempt already used)
       ▼
 /quiz/:quizId/attempt/:attemptId     the sitting (either delivery mode)
       │  submit, auto-submit on expiry, or termination
@@ -601,6 +664,65 @@ notebook that executes client-side.
 the editor. A quietly rewritten setup cell is exactly the sort of thing nobody
 notices until the marks look strange, and the client is not a security boundary.
 
+### Importing `.ipynb` and `.py`
+
+The authoring screen takes either format. `client/learningModule/notebookImport.js`
+holds both parsers, pure and separately tested — every interesting failure here is
+a parsing one, and all of them produce a notebook that looks plausible and is
+wrong.
+
+**`.ipynb`** is read as nbformat JSON, so nothing is guessed. Two traps worth
+knowing: `source` is either a string *or* a list of lines that already end in
+`\n` (joining that list on `\n` double-spaces every cell in the file), and
+nbformat 3 nests its cells under `worksheets` instead of at the top level. Cells
+that are neither code nor markdown — `raw`, and v3's `heading` — are **counted**
+rather than dropped quietly, and the count goes in the toast. The kernel language
+is read from `metadata`, because an R or Julia notebook imports perfectly cleanly
+and then fails on every cell against a Python kernel.
+
+**`.py`** is split on the `# %%` convention rather than one invented here: it is
+what VS Code, Spyder, PyCharm and jupytext all write, so a teacher who keeps
+lecture code as a script can hand that file over unchanged. `# %% [markdown]`
+becomes a text cell with the comment hashes stripped (`### Heading` keeps its
+own — the heading level is content, not a comment marker), and the `# In[3]:`
+markers `jupyter nbconvert --to script` emits are read too. The scan follows
+triple-quoted strings, so a docstring quoting `# %%` does not split the file in
+half.
+
+A `.py` with **no** markers arrives as one cell rather than being chopped up on
+blank lines — guessing the split wrong leaves a notebook to repair by hand, which
+is worse than one cell the teacher can split themselves. The toast says which of
+the two happened, so a single-cell import does not read as a failed split.
+
+Stored outputs are never carried over: `lmNotebook` has no field for them, and a
+student should meet the cell unrun. Imported cells are appended and left
+**unsaved** — locked, hidden setup, and whether the split came out right are all
+decisions the teacher should look at before any of it reaches a student.
+
+#### Making an imported notebook actually run
+
+A file out of Jupyter or Colab is not a Python file, and importing it verbatim
+produces a notebook where nothing works:
+
+* **IPython magics.** `%matplotlib inline`, `!pip install pandas`, `%%time` are
+  rewritten by IPython before CPython sees them. The kernel here is plain Pyodide
+  calling `runPythonAsync`, so a cell that opens with a magic dies on line 1 with
+  a `SyntaxError`. `nbconvert` output has the same problem one step later: it
+  turns magics into `get_ipython().run_line_magic(...)` calls, which parse and
+  then raise `NameError`. Both forms are handled — installs become packages,
+  `%matplotlib` is dropped as redundant against the worker's own Agg + `plt.show`
+  shim, and anything else is **commented, not deleted**, with a count in the
+  toast so the teacher knows what came out.
+* **Dependencies.** The packages box is a separate field, so imported cells would
+  otherwise all raise `ModuleNotFoundError`. Import statements and `pip install`
+  lines are scanned and merged into it. Names are mapped where the import differs
+  from the distribution (`sklearn` → `scikit-learn`, `cv2` → `opencv-python`, …)
+  and the standard library is excluded — sending `os` to micropip fails an
+  install for no reason.
+
+Both scans respect triple-quoted strings, so a docstring containing `%` or an
+`import` line is left alone.
+
 ### Storage
 
 Each student gets a **copy**, not a diff against the authored cells: the teacher
@@ -633,6 +755,96 @@ Output renders **below** each editor rather than beside it, despite the
 halves the width available to both, and Python output is overwhelmingly wide — a
 pandas DataFrame or a traceback wraps into soup at half a screen. Stacked also
 survives a phone.
+
+---
+
+## Anonymous feedback
+
+One tab per class, `Anonymous Feedback`, shown to students and staff alike. A
+student writes a note; the teaching staff read it with no name on it; a platform
+admin reads the same list with the names restored.
+
+### What "anonymous" means here, exactly
+
+Anonymous **to the teacher**, not unattributed. `lm_feedback` stores the author's
+id, name, email and roll number in full, and `feedbackController.forTeacher()` is
+the single projection that strips them on the way out. Two reasons the identity
+is kept rather than discarded: a channel nobody can be held to fills with abuse,
+and an allegation about a member of staff has to be traceable to be actionable.
+
+The cost is honesty at the margin, so the UI states **both halves before the box**
+— "your teacher will not see who wrote this" and "your institute administrator
+can" — at the same size. A student told only the first half writes something they
+would not have written knowing the second, which is neither fair to them nor
+useful to anyone.
+
+Three things follow from the same reasoning and are easy to undo by accident:
+
+- **The teacher's copy is dated, not timestamped.** `forTeacher()` rounds
+  `created_at` down to the day. "17:42, four minutes after the lab ended" plus a
+  room of laptops is a name, and hiding `studentId` does not help.
+- **The notification carries no `actorName`.** Every other `notifyClass` call in
+  the module names its actor; this one must not.
+- **`DELETE /feedback/:id` is platform-admin-only**, and deliberately *not*
+  `requireTeacher` — that guard would hand the staff member a complaint is about
+  the power to delete it. `PATCH` (mark read, reply) is staff-only and cannot
+  touch the text.
+
+There is no withdraw button, and the student is told so before they send. A
+withdraw button reads as a kindness but is a pressure point: it only has to
+exist for a teacher who has guessed who wrote something to be able to ask for it
+to be taken down, and for the student to have no answer except that they could.
+Feedback that cannot be retracted cannot be retracted under pressure either. The
+`deleted` flag stays on the model because an administrator can still remove a
+note, which is a soft delete so the record survives it.
+
+### The language filter
+
+`services/profanityFilter.js`, backed by the list in `profanityWords.js`
+(English + Hinglish, extendable per deployment via `LM_EXTRA_BLOCKED_WORDS`).
+Anonymity is what makes it necessary: elsewhere a message carries its author's
+name, and that is most of the moderation.
+
+It **rejects rather than masks**. Storing an asterisked version would leave the
+teacher reading an abusive sentence with a hole in it and the student thinking
+the point had landed; a refusal naming the words is the only outcome that lets
+them rewrite it and be heard.
+
+Matching is anchored to token boundaries, then tolerant of the three ways people
+get a word past a filter: leetspeak (`sh1t`, `$hit`), doubling (`fuuuck`) and
+padding (`f.u.c.k`, `f u c k`). Short terms opt out of padding tolerance —
+applied to a three-letter term it matches half the dictionary — which is what
+`BLOCKED_EXACT` is for.
+
+What is deliberately **not** on the list: harsh but honest adjectives — "useless",
+"boring", "a waste of time", "the professor never answers questions". The box
+exists to carry criticism a student would not sign their name to. A filter that
+swallowed criticism would have defeated the feature, so only abuse aimed at a
+person is blocked. `tests/unit/learningModuleProfanityFilter.test.js` pins both
+directions, and the clean-text half is the half that matters.
+
+### Warnings, and the block
+
+A refused attempt is never stored as feedback — it never became feedback. It is
+written to `lm_feedback_strike` instead, with the student's name and the verbatim
+text, and the student is told: *warning N of 3, recorded against your account,
+one more and it will be blocked and referred to the administrator.* At three,
+`POST /feedback` returns 403 for that account, platform-wide.
+
+Three warnings rather than one because the word list has false positives in it,
+and a student whose honest complaint tripped on a surname should find that out
+and rephrase rather than lose the channel. The count is per *student*, not per
+class — the point is a pattern of behaviour, and a counter that reset on every
+subject would not measure one.
+
+Nothing deletes strike rows: they are the audit trail for a sanction. The admin
+view shows them with the words intact, because "your account was blocked by a
+regex" is not a decision anybody can defend — the person deciding reads what was
+actually written. The sender's **email is masked behind an eye toggle** there:
+judging whether the filter was right needs the message, not the address, and a
+column of student emails is a column that gets read over a shoulder or left open
+on a projector. It is a friction, not a control — the address is in the payload
+either way — so that seeing it is something somebody chose to do.
 
 ---
 
@@ -696,6 +908,10 @@ Removing it would leak nothing; it exists so the app does not look broken.
 | `GET /studio/sessions/:id` | the raw transcript and the unreviewed quiz draft |
 | `GET /notebooks/:id/attempt` | 403 until published; seeds the caller their own copy |
 | attempt endpoints | ownership, on every quiz / tutorial / notebook attempt |
+| `GET /feedback` | classmates' feedback entirely — a student sees only their own notes |
+
+Withheld from *teachers*, uniquely in this module: `GET /feedback` drops the
+sender's name, email, roll number and the time of day. See above.
 
 Quiz authoring (`PATCH`/`DELETE`/`publish`) is deliberately **not** `requireTeacher`:
 a named collaborator may edit one quiz without being class staff, so `canManage()`
@@ -795,9 +1011,10 @@ into) an email body.
 Every mail this module sends uses the platform frame in `notifyService.emailShell`
 — the same 480px card, teal banner, `Dear User,` greeting and footer as the
 forgot-password OTP mail (`otpbody.ejs`) and the welcome mail
-(`usermanagement/welcomeMailer`). The banner carries the `XCEED — NIT Jalandhar`
-wordmark by default; the invitation overrides it with `Welcome to XCEED
-Learning!`, since for most recipients it is their first mail from the module.
+(`usermanagement/welcomeMailer`). The banner carries `XCEED Learning` by default
+— this is Learning module mail, and that is the product the recipient is being
+told about; the invitation overrides it with `Welcome to XCEED Learning!`, since
+for most recipients it is their first mail from the module.
 Links are absolutised against the request origin
 (falling back to `FRONTEND_URL`, then `https://xceed.nitj.ac.in`): a stored
 in-app path such as `/learning/class/:id` is not resolvable from a mail client.
@@ -806,8 +1023,30 @@ Two distinct kinds of mail, gated differently:
 
 | Mail | Trigger | Gate |
 | --- | --- | --- |
-| Post/notification digest | someone posts to the class | `settings.emailNotifications` |
+| Post notification | anything is posted to the class | `settings.emailNotifications` |
 | Invitation | a teacher adds someone by email | none — always sent |
+
+**Every post type mails the class**: announcements (including a draft published
+later), coursework, materials, quizzes, tutorials, notebooks, audio study
+material, discussions and a live Short starting. Comments and anonymous feedback
+do not — they are replies and staff traffic, not posts.
+
+Post mail goes out **one message per recipient**, addressed to that student. It
+used to be one message per fifty with the class in `bcc` and the `to:` pointing
+back at the sending account, which the relay accepted and the receiving side
+filed as junk — the failure mode being that nothing errored and no student got
+anything. `sendBulkMail` reports `{ sent, failed }` and `notifyClass` logs both
+per post, so a delivery problem is readable in the log instead of inferred from
+students saying they never heard.
+
+Three things used to suppress this mail silently, all of them fixed and all of
+them worth not reintroducing: `muted: false` in the audience query (Mongo does
+not match a missing field against `false`, so pre-`muted` rows were read as
+muted), a truthy test on `settings.emailNotifications` (a class document without
+the field read as opted out), and sharing one `try` block with the in-app
+notification insert (one rejected row cancelled the whole class's mail). A
+member whose membership row carries no denormalised `email` is now looked up
+from their account rather than skipped.
 
 The invitation is transactional, not a digest, so it is **not** gated on
 `settings.emailNotifications` ("email the class when something is posted"). It
@@ -969,6 +1208,19 @@ PATCH  /announcements/:id        edit own post; teachers can pin
 DELETE /announcements/:id
 POST   /announcements/:id/react  toggle a reaction
 
+GET    /feedback                 anonymous feedback. Students get their own
+                                 notes; staff get the class's with every
+                                 identifying field stripped and the time blunted
+                                 to a date; platform admins get the same list
+                                 with senders restored, plus refused attempts
+POST   /feedback                 send one (active student enrolment only). 400
+                                 `PROFANITY` with the matched terms and the
+                                 warning count; 403 `FEEDBACK_BLOCKED` after 3
+PATCH  /feedback/:id         T   mark read / acted on, or reply to the sender
+DELETE /feedback/:id             platform admins only — no withdraw path for the
+                                 student, and never for the teacher the note is
+                                 about
+
 GET    /comments/:targetType/:targetId    announcement | coursework | submission
 POST   /comments/:targetType/:targetId
 PATCH  /comments/:commentId
@@ -1011,6 +1263,12 @@ POST   /attempts/:id/save            save an all_at_once draft
 POST   /attempts/:id/violation       record a proctoring event
 POST   /attempts/:id/submit          auto-grade and mirror into the gradebook
 GET    /attempts/:id
+POST   /attempts/:id/reopen      T   let one student back in — `mode: continue`
+                                     keeps their answers, `restart` deals a
+                                     fresh paper; `minutes` gives the sitting
+                                     its own clock, so a closed window does not
+                                     shut them out again
+DELETE /attempts/:id             T   delete one student's response and its score
 
 GET    /quizzes/:quizId/results      T   attempts, question/section analysis
 GET    /quizzes/:quizId/results.csv  T   full export

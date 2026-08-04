@@ -162,7 +162,32 @@ function applyStudentCells(existingCells, incoming, { allowAddCells = true } = {
   return merged.map((cell, index) => ({ ...cell, order: index }));
 }
 
+/**
+ * How far through the notebook a submission actually got.
+ *
+ * "Completed" is every code cell run with nothing left erroring — the teacher's
+ * question is "did they work through it", and a cell that ran and raised is not
+ * a cell that worked. Markdown is ignored: there is nothing to run.
+ *
+ * Reads only what the student's browser reported, which is forgeable. This is a
+ * read on effort, never a basis for a mark — see the note on the schema field.
+ */
+function summariseAttempt(cells) {
+  const code = (cells || []).filter((cell) => cell.type === 'code');
+  const run = code.filter((cell) => cell.executedAt || cell.runCount > 0);
+  const errored = code.filter((cell) => (cell.outputs || []).some((output) => output.type === 'error'));
+
+  return {
+    codeCells: code.length,
+    cellsRun: run.length,
+    cellsErrored: errored.length,
+    // An empty notebook is not a completed one.
+    completed: code.length > 0 && run.length === code.length && errored.length === 0,
+  };
+}
+
 module.exports = {
+  summariseAttempt,
   prepareCells,
   preparePackages,
   validateCells,

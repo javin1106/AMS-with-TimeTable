@@ -41,6 +41,7 @@ import Markdown from '../components/Markdown';
 import RichTextEditor from '../components/RichTextEditor';
 import { EmptyState, ErrorState, Loading, SectionCard } from '../components/common';
 import { formatDate, relativeTime } from '../format';
+import { duplicateOptionIndexes } from '../questionRules';
 
 const prettySize = (bytes) => (bytes ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : '');
 
@@ -213,6 +214,9 @@ function NewSessionModal({ isOpen, onClose, classId, onCreated }) {
 function QuestionEditor({ question, index, onChange, onRemove }) {
   const set = (field, value) => onChange({ ...question, [field]: value });
   const isChoice = ['mcq', 'msq', 'truefalse'].includes(question.type);
+  // A generated draft is exactly where a repeated option turns up, and the
+  // publish endpoint refuses one — so say which option before it is sent.
+  const duplicates = isChoice ? duplicateOptionIndexes(question.options) : new Set();
 
   return (
     <Box borderWidth="1px" borderColor="gray.200" borderRadius="md" p={4} mb={3} bg="white">
@@ -225,7 +229,6 @@ function QuestionEditor({ question, index, onChange, onRemove }) {
             <option value="mcq">Single choice</option>
             <option value="msq">Multi choice</option>
             <option value="truefalse">True/False</option>
-            <option value="short">Short answer</option>
           </Select>
           <Select size="xs" w="90px" value={question.difficulty} onChange={(e) => set('difficulty', e.target.value)}>
             <option value="easy">Easy</option>
@@ -273,7 +276,12 @@ function QuestionEditor({ question, index, onChange, onRemove }) {
                   set('correctAnswers', next);
                 }}
               />
-              <Box flex="1">
+              <Box
+                flex="1"
+                borderWidth={duplicates.has(optionIndex) ? '1px' : 0}
+                borderColor="red.400"
+                borderRadius="md"
+              >
                 <RichTextEditor
                   compact
                   minH="46px"
@@ -285,6 +293,11 @@ function QuestionEditor({ question, index, onChange, onRemove }) {
                   }}
                   placeholder={`Option ${optionIndex + 1}`}
                 />
+                {duplicates.has(optionIndex) && (
+                  <Text fontSize="xs" color="red.600" px={2} pb={1}>
+                    Same as an option above
+                  </Text>
+                )}
               </Box>
             </Flex>
           ))}
@@ -292,16 +305,6 @@ function QuestionEditor({ question, index, onChange, onRemove }) {
             + Add option
           </Button>
         </Stack>
-      )}
-
-      {question.type === 'short' && (
-        <Input
-          size="sm"
-          mb={2}
-          placeholder="Expected answer (exact match auto-grades)"
-          value={(question.correctAnswers || [])[0] || ''}
-          onChange={(event) => set('correctAnswers', [event.target.value])}
-        />
       )}
 
       <RichTextEditor

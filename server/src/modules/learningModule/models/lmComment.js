@@ -7,7 +7,10 @@ const lmCommentSchema = new mongoose.Schema({
   classId: { type: mongoose.Schema.Types.ObjectId, ref: "lm_class", required: true, index: true },
   targetType: {
     type: String,
-    enum: ["announcement", "coursework", "submission", "audioSession"],
+    // "discussion" is a forum thread. Replies are ordinary comments so that
+    // threading, notification and moderation stay in one place rather than
+    // being reimplemented per surface.
+    enum: ["announcement", "coursework", "submission", "audioSession", "discussion"],
     required: true,
   },
   targetId: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },

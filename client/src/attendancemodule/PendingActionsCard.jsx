@@ -1,19 +1,15 @@
 // client/src/attendancemodule/PendingActionsCard.jsx
 // "Pending actions" summary card, shared by the department dashboard and the
 // admin dashboard.
-//
-// Previously showed two raw counts (ground-truth pending, attendance
-// verification pending) sourced from GET /attendancemodule/dept-admin/stats/today
-// — the ground-truth number in particular wasn't clear about what it meant.
-// Now shows three roll-number-centric numbers, aggregated across every
-// batch (all semesters) in the branch, sourced directly from the same
-// summary table the Roll Assignment → Summary tab uses
-// (GET /attendancemodule/roll-assign/summary):
-//   • Approved roll numbers   — sum of `approved` across all batches
-//   • Unprocessed roll numbers — sum of `unclustered` (ERP photos on file
-//     that haven't been through acquisition/clustering at all yet)
-//   • Pending approval        — sum of `pending` (matched, awaiting review)
-// Clicking any tile goes to the Roll Assignment Summary tab for full detail.
+// Dependent filters:
+// - Dept Admin: Auto-selected department badge, Batch selector is directly active.
+// - Super Admin: Select Department first -> Unlocks filtered Batches side-by-side.
+// Shows outstanding-work counts sourced from
+// GET /attendancemodule/dept-admin/stats/today:
+//   • Approved roll numbers   — sum of `approved` across batches (stats.groundTruthApproved)[cite: 5]
+//   • Pending review          — clusters awaiting incharge review (stats.groundTruthPending)[cite: 5]
+//   • Yet to be acquired      — ERP students with no ground truth captured (stats.pendingAcquisition)[cite: 5]
+//   • Attendance verifications pending — overrides awaiting coordinator verification (stats.attendanceVerificationPending)[cite: 5]
 
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -21,8 +17,6 @@ import { theme, styles } from './config';
 import getEnvironment from '../getenvironment';
 
 const apiUrl = getEnvironment();
-const SUMMARY_URL = `${apiUrl}/attendancemodule/roll-assign/summary`;
-const STATS_URL   = `${apiUrl}/attendancemodule/dept-admin/stats/today`;
 const SUMMARY_LINK = '/attendance/groundtruth/assign?tab=summary';
 
 function PendingTile({ label, value, detail, to, color }) {
@@ -46,46 +40,42 @@ function PendingTile({ label, value, detail, to, color }) {
 }
 
 export default function PendingActionsCard() {
-  const [rollStats, setRollStats] = useState(null); // { approved, unclustered, pending }
-  const [attendanceVerificationPending, setAttendanceVerificationPending] = useState(null);
+  const [stats, setStats] = useState(null);
   const [departments, setDepartments] = useState([]);
+  const [allSummaryBatches, setAllSummaryBatches] = useState([]);
   const [department, setDepartment] = useState('');
+  const [batch, setBatch] = useState('');
   const [fullAccess, setFullAccess] = useState(false);
   const [error, setError] = useState('');
 
+  // Fetch pending actions stats from API supporting department and batch query parameters
   const load = useCallback(async () => {
     setError('');
     try {
-      // Attendance-verification count still comes from dept-admin stats
-      // (unrelated to roll assignment) — also tells us fullAccess/dept scope.
-      const statsParams = department ? `?department=${encodeURIComponent(department)}` : '';
-      const statsRes = await fetch(`${STATS_URL}${statsParams}`, { credentials: 'include' });
-      const statsData = await statsRes.json();
-      if (!statsRes.ok) throw new Error(statsData.message || 'Failed to load pending actions.');
-      setAttendanceVerificationPending(statsData.attendanceVerificationPending);
-      setFullAccess(Boolean(statsData.fullAccess));
+      const queryParams = new URLSearchParams();
+      if (department) queryParams.append('department', department);
+      if (batch) queryParams.append('batch', batch);
 
-      // Roll-number stats — aggregated across every batch (all semesters)
-      // returned for this branch by the same table the Summary tab uses.
-      const summaryParams = (statsData.fullAccess && department) ? `?department=${encodeURIComponent(department)}` : '';
-      const summaryRes = await fetch(`${SUMMARY_URL}${summaryParams}`, { credentials: 'include' });
-      const summaryData = await summaryRes.json();
-      if (!summaryRes.ok) throw new Error(summaryData.error || 'Failed to load roll assignment summary.');
-      const batches = summaryData.batches || [];
-      const totals = batches.reduce((acc, b) => ({
-        approved:    acc.approved    + (b.approved    || 0),
-        unclustered: acc.unclustered + (b.unclustered || 0),
-        pending:     acc.pending     + (b.pending      || 0),
-      }), { approved: 0, unclustered: 0, pending: 0 });
-      setRollStats(totals);
+      const queryString = queryParams.toString() ? `?${queryParams.toString()}` : '';
+      const res = await fetch(`${apiUrl}/attendancemodule/dept-admin/stats/today${queryString}`, { credentials: 'include' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Failed to load pending actions.');
+      
+      setStats(data);
+      setFullAccess(Boolean(data.fullAccess));
+
+      // Dept Admin Login: Auto-set department if not full access
+      if (!data.fullAccess && data.department && data.department !== 'Institute') {
+        setDepartment(data.department);
+      }
     } catch (err) {
       setError(err.message);
     }
-  }, [department]);
+  }, [department, batch]);
 
   useEffect(() => { load(); }, [load]);
 
-  // Department options for the admin selector.
+  // Load department list for full-access admin[cite: 5, 6]
   useEffect(() => {
     if (!fullAccess) return;
     (async () => {
@@ -97,22 +87,100 @@ export default function PendingActionsCard() {
     })();
   }, [fullAccess]);
 
+  // Load all available batches once from summary[cite: 6]
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${apiUrl}/attendancemodule/roll-assign/summary`, { credentials: 'include' });
+        const data = await res.json();
+        if (res.ok) {
+          setAllSummaryBatches((data.batches || []).map((b) => b.batch));
+        }
+      } catch (_) {}
+    })();
+  }, []);
+
+  // Active department used to filter the batch list[cite: 6]
+  const activeDept = fullAccess ? department : (stats?.department || department);
+
+  // Filter batches dependent on active department[cite: 6]
+  const filteredBatches = allSummaryBatches.filter((b) => {
+    if (!activeDept || activeDept === 'Institute') return false;
+    const deptNorm = activeDept.replace(/[\s_-]+/g, '').toUpperCase();
+    const batchNorm = b.replace(/[\s_-]+/g, '').toUpperCase();
+    return batchNorm.includes(deptNorm);
+  });
+
+  // Handle department selection change for Admin[cite: 6]
+  const handleDepartmentChange = (e) => {
+    const selectedDept = e.target.value;
+    setDepartment(selectedDept);
+    setBatch(''); // Reset batch selection when department changes[cite: 6]
+  };
+
   return (
     <section style={{ ...styles.card, padding: 18, marginTop: 18 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', marginBottom: 14 }}>
         <div style={{ fontSize: 17, fontWeight: 700 }}>Pending actions</div>
-        {fullAccess && (
+        
+        {/* Strictly Side-by-Side Dependent Filters */}
+        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 10, flexWrap: 'nowrap' }}>
+          
+          {/* Step 1: Department Selector */}
+          {fullAccess ? (
+            <select
+              value={department}
+              onChange={handleDepartmentChange}
+              style={{ padding: '7px 12px', borderRadius: 8, border: `1px solid ${theme.border}`, fontFamily: theme.fontBody, fontSize: '13px' }}
+            >
+              <option value="">All departments</option>
+              {departments.map((d) => (
+                <option key={d} value={d}>{d}</option>
+              ))}
+            </select>
+          ) : (
+            stats?.department && stats.department !== 'Institute' && (
+              <div
+                style={{
+                  padding: '7px 12px',
+                  borderRadius: 8,
+                  border: `1px solid ${theme.border}`,
+                  background: theme.bg || '#f3f4f6',
+                  fontFamily: theme.fontBody,
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  color: theme.text
+                }}
+              >
+                Dept: {stats.department.replace(/_/g, ' ')}
+              </div>
+            )
+          )}
+
+          {/* Step 2: Batch Selector (Cascading / Dependent) */}
           <select
-            value={department}
-            onChange={(e) => setDepartment(e.target.value)}
-            style={{ padding: '7px 10px', borderRadius: 8, border: `1px solid ${theme.border}`, fontFamily: theme.fontBody }}
+            value={batch}
+            onChange={(e) => setBatch(e.target.value)}
+            disabled={fullAccess && !department}
+            style={{
+              padding: '7px 12px',
+              borderRadius: 8,
+              border: `1px solid ${theme.border}`,
+              fontFamily: theme.fontBody,
+              fontSize: '13px',
+              opacity: (fullAccess && !department) ? 0.6 : 1,
+              cursor: (fullAccess && !department) ? 'not-allowed' : 'pointer'
+            }}
           >
-            <option value="">All departments</option>
-            {departments.map((d) => (
-              <option key={d} value={d}>{d}</option>
+            <option value="">
+              {(fullAccess && !department) ? 'Select Dept First' : 'All Batches (Dept Total)'}
+            </option>
+            {(fullAccess && department ? filteredBatches : (fullAccess ? [] : (activeDept ? filteredBatches : allSummaryBatches))).map((b) => (
+              <option key={b} value={b}>{b}</option>
             ))}
           </select>
-        )}
+
+        </div>
       </div>
 
       {error ? (
@@ -120,29 +188,29 @@ export default function PendingActionsCard() {
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
           <PendingTile
-            label="Approved roll numbers"
-            value={rollStats?.approved}
+            label="Approved"
+            value={stats?.groundTruthApproved}
             detail="View summary"
             to={SUMMARY_LINK}
             color={theme.success}
           />
           <PendingTile
-            label="Unprocessed roll numbers"
-            value={rollStats?.unclustered}
-            detail="View summary"
+            label="Pending review"
+            value={stats?.groundTruthPending}
+            detail="Review acquisitions"
             to={SUMMARY_LINK}
-            color="#ef4444"
+            color={theme.warning}
           />
           <PendingTile
-            label="Pending approval"
-            value={rollStats?.pending}
-            detail="View summary"
-            to={SUMMARY_LINK}
-            color="#f59e0b"
+            label="Yet to be acquired"
+            value={stats?.pendingAcquisition}
+            detail="Capture ground truth"
+            to="/attendance/groundtruth/rtsp"
+            color={theme.danger}
           />
           <PendingTile
             label="Attendance verifications pending"
-            value={attendanceVerificationPending}
+            value={stats?.attendanceVerificationPending}
             detail="Verify ERP overrides"
             to="/attendance/erp-overrides"
             color={theme.accent}

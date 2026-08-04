@@ -1999,7 +1999,7 @@ function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRo
                                                     {c.erpPhoto && <img src={erpPhotoUrl(c.erpPhoto)} alt="" style={{ width: 34, height: 34, borderRadius: 4, objectFit: 'cover', flexShrink: 0, border: `2px solid ${confidenceColor(c.confidence)}` }} onError={e => { e.target.style.display = 'none'; }} />}
                                                     <div style={{ flex: 1, minWidth: 0 }}>
                                                         <div style={{ fontSize: '11px', fontWeight: 700, color: isSel ? theme.success : theme.text, fontFamily: theme.fontMono }}>{c.rollNo}</div>
-                                                        <div style={{ fontSize: '10px', color: confidenceColor(c.confidence), fontWeight: 600 }}>{confidenceLabel(c.confidence)} · {(c.confidence * 100).toFixed(1)}%</div>
+                                                        <div style={{ fontSize: '10px', color : confidenceColor(c.confidence), fontWeight: 600 }}>{confidenceLabel(c.confidence)} · {(c.confidence * 100).toFixed(1)}%</div>
                                                     </div>
                                                     {isSel && <span style={{ fontSize: '13px', color: theme.success, fontWeight: 900 }}>✓</span>}
                                                 </div>

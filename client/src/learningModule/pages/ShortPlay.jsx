@@ -26,7 +26,28 @@ import lmApi from '../api/lmApi';
 import { ErrorState, Loading } from '../components/common';
 import RichText from '../components/RichText';
 import ShortResults from '../components/ShortResults';
+import StageBar from '../components/StageBar';
 import useShortStream from '../hooks/useShortStream';
+
+/**
+ * The same bar the quiz stage carries.
+ *
+ * This screen sits outside LearningLayout — a deck can admit someone with no
+ * account, so it cannot depend on the signed-in chrome — which left a scanned
+ * QR landing on a page with no indication of what it was. It wraps the loading
+ * and error states too: those are the moments where "did that QR work?" is the
+ * actual question.
+ */
+function PlayShell({ title, presenter, children }) {
+  return (
+    <Box minH="100vh" bg={useColorModeValue('gray.50', 'gray.900')}>
+      <StageBar label="Live Short" faculty={presenter} title={title} />
+      <Box maxW="560px" mx="auto" px={{ base: 3, md: 6 }} py={5} pb={10}>
+        {children}
+      </Box>
+    </Box>
+  );
+}
 
 /**
  * The student's phone.
@@ -321,9 +342,19 @@ export default function ShortPlay() {
   const cardBg = useColorModeValue('white', 'gray.800');
 
   if (connection === 'denied') {
-    return <ErrorState error={{ message: error }} onRetry={() => navigate('/learning/short/join')} />;
+    return (
+      <PlayShell>
+        <ErrorState error={{ message: error }} onRetry={() => navigate('/learning/short/join')} />
+      </PlayShell>
+    );
   }
-  if (!state) return <Loading label="Joining…" />;
+  if (!state) {
+    return (
+      <PlayShell>
+        <Loading label="Joining…" />
+      </PlayShell>
+    );
+  }
 
   const ended = state.status === 'ended' || connection === 'ended';
   // `expired` is the local half of the same rule the server applies: the stream
@@ -340,15 +371,14 @@ export default function ShortPlay() {
     draft.selected.length > 0 || String(draft.text || '').trim().length > 0 || draft.number !== null;
 
   return (
-    <Box maxW="560px" mx="auto" pb={10}>
+    <PlayShell title={state.title} presenter={state.presentedByName}>
       <VStack align="stretch" spacing={4}>
-        {/* The hold screen carries the title itself, so the compact header would
-            only repeat it. */}
+        {/* The title moved up into the bar, so what is left here is the pair
+            that changes as the room moves: which slide, and how long is left.
+            The hold screen carries its own title card. */}
         {!holding && (
           <Flex align="center" gap={2} wrap="wrap">
-            <Heading size="sm" flex="1" noOfLines={1}>
-              {state.title}
-            </Heading>
+            <Box flex="1" />
             <Badge>
               {state.slideIndex + 1} / {state.slideCount}
             </Badge>
@@ -513,6 +543,6 @@ export default function ShortPlay() {
           Leave
         </Button>
       </VStack>
-    </Box>
+    </PlayShell>
   );
 }
