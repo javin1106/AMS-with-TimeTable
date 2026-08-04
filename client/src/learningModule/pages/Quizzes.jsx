@@ -76,9 +76,8 @@ const PRESETS = {
       allowReviewBeforeSubmit: false,
       shuffleQuestions: true,
       shuffleOptions: true,
-      allowTabChange: false,
-      autoSubmitOnTabLimit: true,
-      requireFullscreen: true,
+      // Fullscreen and the submit-on-leaving rule are no longer per-quiz — they
+      // apply to every paper — so the preset only carries what still varies.
       disableCopyPaste: true,
       disableRightClick: true,
     },

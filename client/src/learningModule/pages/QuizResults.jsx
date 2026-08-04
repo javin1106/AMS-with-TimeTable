@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useOutletContext, useParams } from 'react-router-dom';
 import {
   Alert,
@@ -6,11 +6,17 @@ import {
   Badge,
   Box,
   Button,
+  Checkbox,
   Flex,
   Grid,
   HStack,
   Heading,
+  Input,
   Progress,
+  Radio,
+  RadioGroup,
+  Stack,
+  Switch,
   Tab,
   TabList,
   TabPanel,
@@ -22,6 +28,7 @@ import {
   Text,
   Th,
   Thead,
+  Tooltip,
   Tr,
   FormControl,
   FormHelperText,
@@ -45,7 +52,7 @@ import {
 import lmApi from '../api/lmApi';
 import { EmptyState, ErrorState, Loading, SectionCard, StatTile, buttonTextStyles } from '../components/common';
 import { richTextToPlain } from '../richTextUtils';
-import { formatDateTime } from '../format';
+import { formatDateTime, relativeTime } from '../format';
 
 const duration = (seconds) => {
   if (!seconds) return '—';
@@ -55,6 +62,98 @@ const duration = (seconds) => {
 
 const bandColor = (percent) =>
   percent === null ? 'gray' : percent >= 70 ? 'green' : percent >= 40 ? 'orange' : 'red';
+
+const nameOf = (person) => person.studentName || person.studentEmail || 'Unknown student';
+
+/** How often the invigilation view re-reads the server while it is open. */
+const LIVE_POLL_MS = 15000;
+
+/**
+ * A once-a-second re-render, so countdowns tick without the page re-fetching.
+ *
+ * Only mounted by the monitor view: a timer running behind the analytics tabs
+ * would re-render tables that cannot change between polls.
+ */
+function useSecondTick(enabled) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const id = setInterval(() => setTick((value) => value + 1), 1000);
+    return () => clearInterval(id);
+  }, [enabled]);
+}
+
+/**
+ * Time left on a sitting, counted against the server's clock rather than the
+ * browser's.
+ *
+ * `skewMs` is how far this machine is ahead of the server, measured when the
+ * results were fetched. An invigilator's laptop being three minutes fast is
+ * common and would otherwise show students being cut off before they are.
+ */
+function TimeLeft({ deadline, skewMs }) {
+  if (!deadline) {
+    return (
+      <Text fontSize="xs" color="gray.500">
+        no limit
+      </Text>
+    );
+  }
+
+  const remaining = new Date(deadline).getTime() - (Date.now() + skewMs);
+  if (remaining <= 0) {
+    return (
+      <Badge colorScheme="red" fontSize="0.6rem">
+        time up
+      </Badge>
+    );
+  }
+
+  const totalSec = Math.floor(remaining / 1000);
+  const mins = Math.floor(totalSec / 60);
+  return (
+    <Text fontSize="xs" fontWeight="600" color={mins < 5 ? 'red.600' : mins < 15 ? 'orange.600' : 'gray.700'}>
+      {mins}:{String(totalSec % 60).padStart(2, '0')}
+    </Text>
+  );
+}
+
+/** The proctoring badges shown against an attempt, in monitor and in results. */
+function AttemptFlags({ attempt }) {
+  const fullscreen = (attempt.violations || []).filter((v) => v.type === 'fullscreen_exit').length;
+  return (
+    <>
+      {attempt.tabSwitches > 0 && (
+        <Badge colorScheme="orange" fontSize="0.6rem" mr={1}>
+          {attempt.tabSwitches}× away
+        </Badge>
+      )}
+      {fullscreen > 0 && (
+        <Tooltip label={`Left fullscreen ${fullscreen} time(s)`}>
+          <Badge colorScheme="purple" fontSize="0.6rem" mr={1}>
+            fs {fullscreen}
+          </Badge>
+        </Tooltip>
+      )}
+      {attempt.device?.isMobile && (
+        <Badge colorScheme="gray" fontSize="0.6rem" mr={1}>
+          mobile
+        </Badge>
+      )}
+      {attempt.regradedAt && (
+        <Tooltip
+          label={`Re-marked ${relativeTime(attempt.regradedAt)}${
+            attempt.regradedByName ? ` by ${attempt.regradedByName}` : ''
+          }`}
+        >
+          <Badge colorScheme="blue" fontSize="0.6rem">
+            re-marked
+          </Badge>
+        </Tooltip>
+      )}
+    </>
+  );
+}
 
 /**
  * The three ways a teacher can put one student's sitting right.
@@ -205,6 +304,659 @@ function AttemptActionModal({ state, onClose, onDone, classId, toast }) {
   );
 }
 
+/* ──────────────────── correcting the answer key ────────────────────────── */
+
+const keyFieldsOf = (question) => ({
+  correctAnswers: (question.correctAnswers || []).map(String),
+  marks: String(question.marks ?? 1),
+  tolerancePercent: String(question.tolerancePercent ?? 0),
+  toleranceAbs: String(question.toleranceAbs ?? 0),
+});
+
+/**
+ * Fix the answer key of a paper the class has already sat, then re-mark them all.
+ *
+ * Only the fields that decide marks are editable here. Question text and
+ * options are shown but locked: a stored response is an *index* into the
+ * options as authored, so reordering or rewording them under a cohort that has
+ * already answered silently changes what every recorded answer means. Rewriting
+ * a question belongs in the quiz editor, before anybody sits it.
+ */
+function AnswerKeyModal({ isOpen, quiz, classId, onClose, onDone, toast }) {
+  const initial = useMemo(() => {
+    const draft = {};
+    (quiz?.questions || []).forEach((question) => {
+      draft[String(question._id)] = keyFieldsOf(question);
+    });
+    return draft;
+  }, [quiz]);
+
+  const [draft, setDraft] = useState(initial);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setDraft(initial);
+      setResult(null);
+    }
+  }, [isOpen, initial]);
+
+  const set = (questionId, value) =>
+    setDraft((current) => ({ ...current, [questionId]: { ...current[questionId], ...value } }));
+
+  const changedIds = useMemo(
+    () =>
+      Object.keys(draft).filter((id) => {
+        const before = initial[id];
+        const after = draft[id];
+        if (!before || !after) return false;
+        return (
+          before.correctAnswers.join() !== after.correctAnswers.join() ||
+          Number(before.marks) !== Number(after.marks) ||
+          Number(before.tolerancePercent) !== Number(after.tolerancePercent) ||
+          Number(before.toleranceAbs) !== Number(after.toleranceAbs)
+        );
+      }),
+    [draft, initial],
+  );
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const outcome = await lmApi.updateAnswerKey(
+        classId,
+        quiz._id,
+        changedIds.map((questionId) => ({
+          questionId,
+          correctAnswers: draft[questionId].correctAnswers,
+          marks: Number(draft[questionId].marks) || 0,
+          tolerancePercent: Number(draft[questionId].tolerancePercent) || 0,
+          toleranceAbs: Number(draft[questionId].toleranceAbs) || 0,
+        })),
+      );
+      setResult(outcome);
+      toast({
+        title: `Answer key updated — ${outcome.changed} question(s)`,
+        description: outcome.regrade
+          ? `${outcome.regrade.regraded} paper(s) re-marked, ${outcome.regrade.changed} result(s) changed.`
+          : 'No paper needed re-marking.',
+        status: 'success',
+        duration: 7000,
+      });
+      onDone();
+    } catch (err) {
+      toast({ title: err.message || 'Could not update the answer key', status: 'error', duration: 6000 });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!quiz) return null;
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} size="3xl" scrollBehavior="inside">
+      <ModalOverlay />
+      <ModalContent>
+        <ModalHeader>
+          Answer key — {quiz.title}
+          <Text fontSize="xs" fontWeight="400" color="gray.500">
+            Tick the right answer, or change what a question is worth. Saving re-marks every paper
+            already submitted and updates the gradebook. Question wording and options are edited in
+            the quiz editor, not here.
+          </Text>
+        </ModalHeader>
+        <ModalCloseButton />
+        <ModalBody>
+          {result ? (
+            <Box>
+              <Alert status="success" borderRadius="md" mb={3} fontSize="sm">
+                <AlertIcon />
+                <Box>
+                  {result.changed} question(s) corrected.{' '}
+                  {result.regrade
+                    ? `${result.regrade.regraded} paper(s) re-marked, ${result.regrade.changed} result(s) changed.`
+                    : 'Nothing needed re-marking.'}
+                </Box>
+              </Alert>
+              {result.regrade?.changes?.length > 0 && (
+                <Table size="sm">
+                  <Thead>
+                    <Tr>
+                      <Th>Student</Th>
+                      <Th isNumeric>Was</Th>
+                      <Th isNumeric>Now</Th>
+                    </Tr>
+                  </Thead>
+                  <Tbody>
+                    {result.regrade.changes.map((change) => (
+                      <Tr key={change.attemptId}>
+                        <Td fontSize="xs">{change.studentName}</Td>
+                        <Td isNumeric fontSize="xs">
+                          {change.before.score}
+                        </Td>
+                        <Td
+                          isNumeric
+                          fontSize="xs"
+                          fontWeight="600"
+                          color={change.after.score > change.before.score ? 'green.600' : 'red.600'}
+                        >
+                          {change.after.score}
+                        </Td>
+                      </Tr>
+                    ))}
+                  </Tbody>
+                </Table>
+              )}
+            </Box>
+          ) : (
+            (quiz.questions || []).map((question, index) => {
+              const id = String(question._id);
+              const entry = draft[id] || keyFieldsOf(question);
+              const multi = question.type === 'msq';
+              const numerical = question.type === 'numerical';
+              const changed = changedIds.includes(id);
+
+              return (
+                <Box
+                  key={id}
+                  py={3}
+                  px={changed ? 2 : 0}
+                  borderBottomWidth="1px"
+                  borderColor="gray.100"
+                  bg={changed ? 'purple.50' : undefined}
+                  borderRadius="md"
+                >
+                  <Flex justify="space-between" gap={3} align="flex-start">
+                    <Text fontSize="sm" fontWeight="600">
+                      Q{index + 1}. {richTextToPlain(question.question)}
+                    </Text>
+                    <HStack spacing={1} flexShrink={0}>
+                      {changed && (
+                        <Badge colorScheme="purple" fontSize="0.6rem">
+                          changed
+                        </Badge>
+                      )}
+                      <Badge fontSize="0.6rem">{question.type}</Badge>
+                    </HStack>
+                  </Flex>
+
+                  {numerical ? (
+                    <HStack mt={2} spacing={3} align="flex-end" wrap="wrap">
+                      <FormControl w="160px">
+                        <FormLabel fontSize="xs" mb={1}>
+                          Correct value
+                        </FormLabel>
+                        <Input
+                          size="sm"
+                          value={entry.correctAnswers[0] || ''}
+                          onChange={(event) => set(id, { correctAnswers: [event.target.value] })}
+                        />
+                      </FormControl>
+                      <FormControl w="120px">
+                        <FormLabel fontSize="xs" mb={1}>
+                          ± percent
+                        </FormLabel>
+                        <Input
+                          size="sm"
+                          value={entry.tolerancePercent}
+                          onChange={(event) => set(id, { tolerancePercent: event.target.value })}
+                        />
+                      </FormControl>
+                      <FormControl w="120px">
+                        <FormLabel fontSize="xs" mb={1}>
+                          ± absolute
+                        </FormLabel>
+                        <Input
+                          size="sm"
+                          value={entry.toleranceAbs}
+                          onChange={(event) => set(id, { toleranceAbs: event.target.value })}
+                        />
+                      </FormControl>
+                    </HStack>
+                  ) : multi ? (
+                    <Stack mt={2} spacing={1}>
+                      {(question.options || []).map((option, optionIndex) => (
+                        <Checkbox
+                          key={optionIndex}
+                          size="sm"
+                          isChecked={entry.correctAnswers.includes(String(optionIndex))}
+                          onChange={(event) => {
+                            const picked = new Set(entry.correctAnswers);
+                            if (event.target.checked) picked.add(String(optionIndex));
+                            else picked.delete(String(optionIndex));
+                            set(id, { correctAnswers: [...picked].sort() });
+                          }}
+                        >
+                          <Text as="span" fontSize="sm">
+                            {richTextToPlain(option)}
+                          </Text>
+                        </Checkbox>
+                      ))}
+                    </Stack>
+                  ) : (
+                    <RadioGroup
+                      mt={2}
+                      value={entry.correctAnswers[0] ?? ''}
+                      onChange={(value) => set(id, { correctAnswers: [value] })}
+                    >
+                      <Stack spacing={1}>
+                        {(question.options || []).map((option, optionIndex) => (
+                          <Radio key={optionIndex} size="sm" value={String(optionIndex)}>
+                            <Text as="span" fontSize="sm">
+                              {richTextToPlain(option)}
+                            </Text>
+                          </Radio>
+                        ))}
+                      </Stack>
+                    </RadioGroup>
+                  )}
+
+                  <HStack mt={2} spacing={3} align="flex-end">
+                    <FormControl w="110px">
+                      <FormLabel fontSize="xs" mb={1}>
+                        Marks
+                      </FormLabel>
+                      <Input
+                        size="sm"
+                        value={entry.marks}
+                        onChange={(event) => set(id, { marks: event.target.value })}
+                      />
+                    </FormControl>
+                    {changed && (
+                      <Button size="xs" variant="link" onClick={() => set(id, initial[id])}>
+                        Undo
+                      </Button>
+                    )}
+                  </HStack>
+                </Box>
+              );
+            })
+          )}
+        </ModalBody>
+        <ModalFooter gap={2}>
+          {!result && (
+            <Text fontSize="sm" color="gray.600" mr="auto">
+              {changedIds.length === 0
+                ? 'No changes yet'
+                : `${changedIds.length} question(s) will change and every submitted paper re-marked`}
+            </Text>
+          )}
+          <Button size="sm" variant="ghost" onClick={onClose}>
+            {result ? 'Close' : 'Cancel'}
+          </Button>
+          {!result && (
+            <Button
+              size="sm"
+              colorScheme="purple"
+              onClick={save}
+              isLoading={busy}
+              isDisabled={changedIds.length === 0}
+            >
+              Save key &amp; re-evaluate
+            </Button>
+          )}
+        </ModalFooter>
+      </ModalContent>
+    </Modal>
+  );
+}
+
+/**
+ * Re-mark the whole cohort against the key as it stands now, without changing it.
+ *
+ * Separate from the key editor because the key is not always what moved: a
+ * question edited in the quiz editor, or a paper whose marks were never
+ * recomputed after an earlier fix, both need this and neither needs the key
+ * touching. The confirmation says how many results moved afterwards, since
+ * "nothing changed" is a common and useful outcome — it says the correction did
+ * not affect anybody.
+ */
+function RegradeModal({ isOpen, onClose, onDone, classId, quizId, toast }) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    if (isOpen) setResult(null);
+  }, [isOpen]);
+
+  const run = async () => {
+    setBusy(true);
+    try {
+      const outcome = await lmApi.regradeQuiz(classId, quizId);
+      setResult(outcome);
+      toast({
+        title: `Re-evaluated ${outcome.regraded} paper(s)`,
+        description: outcome.changed
+          ? `${outcome.changed} result(s) changed. Those students have been notified.`
+          : 'No result changed.',
+        status: 'success',
+        duration: 6000,
+      });
+      onDone();
+    } catch (err) {
+      toast({ title: err.message || 'Could not re-evaluate', status: 'error', duration: 6000 });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} isCentered size="lg" scrollBehavior="inside">
+      <ModalOverlay />
+      <ModalContent>
+        <ModalHeader>Re-evaluate the whole quiz</ModalHeader>
+        <ModalCloseButton />
+        <ModalBody>
+          {result ? (
+            <Box>
+              <Text fontSize="sm" mb={2}>
+                {result.regraded} paper(s) re-marked, {result.changed} result(s) changed.
+              </Text>
+              {result.changes.length > 0 && (
+                <Table size="sm">
+                  <Thead>
+                    <Tr>
+                      <Th>Student</Th>
+                      <Th isNumeric>Was</Th>
+                      <Th isNumeric>Now</Th>
+                    </Tr>
+                  </Thead>
+                  <Tbody>
+                    {result.changes.map((change) => (
+                      <Tr key={change.attemptId}>
+                        <Td fontSize="xs">{change.studentName}</Td>
+                        <Td isNumeric fontSize="xs">
+                          {change.before.score}
+                        </Td>
+                        <Td
+                          isNumeric
+                          fontSize="xs"
+                          fontWeight="600"
+                          color={change.after.score > change.before.score ? 'green.600' : 'red.600'}
+                        >
+                          {change.after.score}
+                        </Td>
+                      </Tr>
+                    ))}
+                  </Tbody>
+                </Table>
+              )}
+            </Box>
+          ) : (
+            <>
+              <Text fontSize="sm" color="gray.700">
+                Every submitted, expired and terminated paper is marked again against the answer key,
+                marks and questions <b>as they stand now</b>. Use this when the paper was corrected
+                elsewhere — fixing a question on its own does not move marks that have already been
+                awarded.
+              </Text>
+              <Alert status="info" borderRadius="md" mt={4} fontSize="xs">
+                <AlertIcon />
+                <Box>
+                  Students still sitting the test are left alone — their paper will be marked from the
+                  corrected key when they submit. Students whose score changes are notified.
+                </Box>
+              </Alert>
+            </>
+          )}
+        </ModalBody>
+        <ModalFooter gap={2}>
+          <Button size="sm" variant="ghost" onClick={onClose}>
+            {result ? 'Close' : 'Cancel'}
+          </Button>
+          {!result && (
+            <Button size="sm" colorScheme="purple" onClick={run} isLoading={busy}>
+              Re-evaluate now
+            </Button>
+          )}
+        </ModalFooter>
+      </ModalContent>
+    </Modal>
+  );
+}
+
+/* ───────────────────────── live invigilation view ──────────────────────── */
+
+/**
+ * Who is writing, who has stopped, and who never appeared.
+ *
+ * The results tabs answer "how did the cohort do"; this one answers "what is
+ * happening right now", which during a test is the only question that matters
+ * and which a table sorted by score cannot answer. The three groups are kept
+ * apart rather than badged within one table because the action each calls for
+ * is different: watch, let back in, or chase.
+ */
+function LiveMonitor({ data, skewMs, onAct, onRefresh, refreshing, auto, setAuto, updatedAt }) {
+  useSecondTick(true);
+
+  const { attempts, notStartedStudents, quiz } = data;
+  const writing = attempts.filter((attempt) => attempt.status === 'in_progress');
+  // Terminated and expired first: those are the students who lost the paper
+  // through something other than choosing to finish, and they are who the
+  // invigilator is looking for.
+  const stopped = attempts
+    .filter((attempt) => attempt.status !== 'in_progress')
+    .sort((a, b) => {
+      const rank = (attempt) => (attempt.status === 'submitted' ? 1 : 0);
+      return rank(a) - rank(b) || new Date(b.submittedAt || 0) - new Date(a.submittedAt || 0);
+    });
+
+  const closedEarly = stopped.filter((attempt) => attempt.status !== 'submitted');
+
+  return (
+    <Box>
+      <Flex justify="space-between" align="center" mb={3} gap={3} wrap="wrap">
+        <HStack spacing={3}>
+          <FormControl display="flex" alignItems="center" w="auto">
+            <Switch
+              id="live-refresh"
+              size="sm"
+              isChecked={auto}
+              onChange={(event) => setAuto(event.target.checked)}
+              mr={2}
+            />
+            <FormLabel htmlFor="live-refresh" fontSize="sm" mb={0}>
+              Auto-refresh
+            </FormLabel>
+          </FormControl>
+          <Text fontSize="xs" color="gray.500">
+            updated {relativeTime(updatedAt)}
+          </Text>
+        </HStack>
+        <Button size="xs" variant="outline" onClick={onRefresh} isLoading={refreshing}>
+          Refresh now
+        </Button>
+      </Flex>
+
+      {closedEarly.length > 0 && (
+        <Alert status="warning" borderRadius="md" mb={4} fontSize="sm">
+          <AlertIcon />
+          <Box>
+            <Text fontWeight="600">
+              {closedEarly.length} student(s) had the test end on them rather than finishing it
+            </Text>
+            <Text fontSize="xs">
+              Use <b>Let back in</b> below to hand the paper back with their answers intact — they
+              carry on from the question they were on.
+            </Text>
+          </Box>
+        </Alert>
+      )}
+
+      {/* ---- writing now ---- */}
+      <SectionCard
+        title={`Writing now (${writing.length})`}
+        subtitle="Progress counts questions with something written on them. The clock is the server's, including any extra time you have granted."
+        mb={4}
+      >
+        {writing.length === 0 ? (
+          <Text fontSize="sm" color="gray.500">
+            Nobody is sitting the test at the moment.
+          </Text>
+        ) : (
+          <Box overflowX="auto">
+            <Table size="sm">
+              <Thead>
+                <Tr>
+                  <Th>Student</Th>
+                  <Th>Roll</Th>
+                  <Th w="180px">Progress</Th>
+                  <Th>Time left</Th>
+                  <Th>Last answer</Th>
+                  <Th>Flags</Th>
+                  <Th>Fix</Th>
+                </Tr>
+              </Thead>
+              <Tbody>
+                {writing.map((attempt) => {
+                  const total = attempt.questionCount || quiz.questions.length || 1;
+                  const percent = Math.round((attempt.answeredCount / total) * 100);
+                  return (
+                    <Tr key={attempt._id}>
+                      <Td>{nameOf(attempt)}</Td>
+                      <Td fontSize="xs">{attempt.rollNumber}</Td>
+                      <Td>
+                        <Progress value={percent} size="sm" borderRadius="full" colorScheme="green" />
+                        <Text fontSize="xs" color="gray.500">
+                          {attempt.answeredCount}/{total} answered
+                          {quiz.settings.deliveryMode === 'one_at_a_time' &&
+                            ` · on Q${(attempt.cursor ?? 0) + 1}`}
+                        </Text>
+                      </Td>
+                      <Td>
+                        <TimeLeft deadline={attempt.deadline} skewMs={skewMs} />
+                      </Td>
+                      <Td fontSize="xs" color="gray.600">
+                        {relativeTime(attempt.lastActivityAt)}
+                      </Td>
+                      <Td>
+                        <AttemptFlags attempt={attempt} />
+                      </Td>
+                      <Td>
+                        <AttemptActions attempt={attempt} onAct={(action) => onAct(attempt, action)} />
+                      </Td>
+                    </Tr>
+                  );
+                })}
+              </Tbody>
+            </Table>
+          </Box>
+        )}
+      </SectionCard>
+
+      {/* ---- stopped ---- */}
+      <SectionCard
+        title={`Submitted or closed (${stopped.length})`}
+        subtitle="A paper that ended by itself — the window closing, a proctoring rule, a dead connection — can be handed straight back."
+        mb={4}
+      >
+        {stopped.length === 0 ? (
+          <Text fontSize="sm" color="gray.500">
+            Nobody has finished yet.
+          </Text>
+        ) : (
+          <Box overflowX="auto">
+            <Table size="sm">
+              <Thead>
+                <Tr>
+                  <Th>Student</Th>
+                  <Th>Roll</Th>
+                  <Th>How it ended</Th>
+                  <Th isNumeric>Answered</Th>
+                  <Th isNumeric>Score</Th>
+                  <Th>When</Th>
+                  <Th>Flags</Th>
+                  <Th>Let back in</Th>
+                  <Th>Fix</Th>
+                </Tr>
+              </Thead>
+              <Tbody>
+                {stopped.map((attempt) => (
+                  <Tr key={attempt._id} bg={attempt.status === 'terminated' ? 'red.50' : undefined}>
+                    <Td>{nameOf(attempt)}</Td>
+                    <Td fontSize="xs">{attempt.rollNumber}</Td>
+                    <Td>
+                      <Badge
+                        colorScheme={
+                          attempt.status === 'terminated'
+                            ? 'red'
+                            : attempt.status === 'expired'
+                              ? 'orange'
+                              : 'green'
+                        }
+                        fontSize="0.6rem"
+                      >
+                        {attempt.status === 'terminated'
+                          ? 'ended by proctoring'
+                          : attempt.status === 'expired'
+                            ? 'ran out of time'
+                            : 'submitted'}
+                      </Badge>
+                      {attempt.terminationReason && (
+                        <Text fontSize="0.65rem" color="red.600" maxW="220px">
+                          {attempt.terminationReason}
+                        </Text>
+                      )}
+                      {attempt.reopenCount > 0 && (
+                        <Text color="purple.600" fontSize="0.65rem">
+                          reopened ×{attempt.reopenCount}
+                          {attempt.reopenedByName ? ` by ${attempt.reopenedByName}` : ''}
+                        </Text>
+                      )}
+                    </Td>
+                    <Td isNumeric fontSize="xs">
+                      {attempt.answeredCount}/{attempt.questionCount || quiz.questions.length}
+                    </Td>
+                    <Td isNumeric fontSize="xs">
+                      {attempt.score}/{attempt.maxScore}
+                    </Td>
+                    <Td fontSize="xs">{attempt.submittedAt ? relativeTime(attempt.submittedAt) : '—'}</Td>
+                    <Td>
+                      <AttemptFlags attempt={attempt} />
+                    </Td>
+                    <Td>
+                      <Button
+                        size="xs"
+                        colorScheme="blue"
+                        variant={attempt.status === 'submitted' ? 'ghost' : 'solid'}
+                        onClick={() => onAct(attempt, 'continue')}
+                      >
+                        Let back in
+                      </Button>
+                    </Td>
+                    <Td>
+                      <AttemptActions attempt={attempt} onAct={(action) => onAct(attempt, action)} />
+                    </Td>
+                  </Tr>
+                ))}
+              </Tbody>
+            </Table>
+          </Box>
+        )}
+      </SectionCard>
+
+      {/* ---- never started ---- */}
+      <SectionCard title={`Not started (${notStartedStudents.length})`}>
+        {notStartedStudents.length === 0 ? (
+          <Text fontSize="sm" color="gray.500">
+            Every student on the roll has opened the test.
+          </Text>
+        ) : (
+          <Flex wrap="wrap" gap={2}>
+            {notStartedStudents.map((student) => (
+              <Badge key={student.studentId} colorScheme="gray" px={2} py={1} borderRadius="md" fontWeight="400">
+                {student.rollNumber ? `${student.rollNumber} · ` : ''}
+                {nameOf(student)}
+              </Badge>
+            ))}
+          </Flex>
+        )}
+      </SectionCard>
+    </Box>
+  );
+}
+
 export default function QuizResults() {
   const { classId } = useOutletContext();
   const { quizId } = useParams();
@@ -214,28 +966,64 @@ export default function QuizResults() {
   const [error, setError] = useState(null);
   // `{ attempt, action }` while a fix is being confirmed.
   const [action, setAction] = useState(null);
+  const [keyOpen, setKeyOpen] = useState(false);
+  const [regrading, setRegrading] = useState(false);
+  const [tab, setTab] = useState(0);
+  const [auto, setAuto] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [updatedAt, setUpdatedAt] = useState(null);
+  // How far this browser's clock is ahead of the server's, so the countdowns
+  // shown to an invigilator agree with the deadline the server will enforce.
+  const skewRef = useRef(0);
   const toast = useToast();
 
-  const load = useCallback(async () => {
-    setError(null);
-    try {
-      setData(await lmApi.quizResults(classId, quizId));
-    } catch (err) {
-      setError(err);
-    } finally {
-      setLoading(false);
-    }
-  }, [classId, quizId]);
+  /**
+   * `quiet` is what makes polling usable: a background refresh must not blank
+   * the page into its loading state, or the monitor would flicker every fifteen
+   * seconds and the menu you were reaching for would vanish under the cursor.
+   */
+  const load = useCallback(
+    async (quiet = false) => {
+      if (quiet) setRefreshing(true);
+      setError(null);
+      try {
+        const fetched = await lmApi.quizResults(classId, quizId);
+        if (fetched.serverTime) skewRef.current = Date.now() - new Date(fetched.serverTime).getTime();
+        setData(fetched);
+        setUpdatedAt(new Date());
+      } catch (err) {
+        // A failed background poll leaves the last good data on screen; only a
+        // failed first load has nothing to show and becomes the error state.
+        if (!quiet) setError(err);
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [classId, quizId],
+  );
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // Poll only while the monitor is the tab on screen. The analytics tabs read a
+  // finished cohort and gain nothing from re-fetching, and a poll running behind
+  // them would keep a class-sized query warm for nobody.
+  useEffect(() => {
+    if (tab !== 0 || !auto) return undefined;
+    const id = setInterval(() => load(true), LIVE_POLL_MS);
+    return () => clearInterval(id);
+  }, [tab, auto, load]);
+
+  const act = useCallback((attempt, next) => setAction({ attempt, action: next }), []);
 
   if (loading) return <Loading />;
   if (error) return <ErrorState error={error} onRetry={load} />;
   if (!data) return null;
 
   const { quiz, attempts, summary, perQuestion, perSection, distribution, resultsVisible } = data;
+  const notStartedStudents = data.notStartedStudents || [];
   const maxBand = Math.max(1, ...distribution.map((band) => band.count));
 
   return (
@@ -254,9 +1042,17 @@ export default function QuizResults() {
             {quiz.settings.negativeMarking > 0 && ` · −${quiz.settings.negativeMarking} per wrong answer`}
           </Text>
         </Box>
-        <Button as="a" href={lmApi.quizResultsCsvUrl(classId, quizId)} size="sm" variant="outline">
-          Export CSV
-        </Button>
+        <HStack>
+          <Button size="sm" colorScheme="purple" onClick={() => setKeyOpen(true)}>
+            Edit answer key
+          </Button>
+          <Button size="sm" variant="outline" colorScheme="purple" onClick={() => setRegrading(true)}>
+            Re-evaluate all
+          </Button>
+          <Button as="a" href={lmApi.quizResultsCsvUrl(classId, quizId)} size="sm" variant="outline">
+            Export CSV
+          </Button>
+        </HStack>
       </Flex>
 
       {!resultsVisible && (
@@ -284,13 +1080,33 @@ export default function QuizResults() {
               {summary.flagged} attempt(s) recorded a proctoring event
               {summary.terminated > 0 && `, ${summary.terminated} ended automatically`}
             </Text>
-            <Text fontSize="xs">See the Attempts tab for who and what.</Text>
+            <Text fontSize="xs">See the Live monitor tab for who, and to let them back in.</Text>
           </Box>
         </Alert>
       )}
 
-      <Tabs colorScheme="purple" variant="enclosed">
+      {summary.lastRegradedAt && (
+        <Alert status="info" borderRadius="md" mb={4} fontSize="sm">
+          <AlertIcon />
+          <Box>
+            <Text>
+              These marks were last re-evaluated on {formatDateTime(summary.lastRegradedAt)} — the
+              scores below reflect the answer key as it stands now.
+            </Text>
+          </Box>
+        </Alert>
+      )}
+
+      <Tabs colorScheme="purple" variant="enclosed" index={tab} onChange={setTab}>
         <TabList>
+          <Tab fontSize="sm">
+            Live monitor
+            {summary.inProgress > 0 && (
+              <Badge ml={2} colorScheme="orange" fontSize="0.6rem">
+                {summary.inProgress}
+              </Badge>
+            )}
+          </Tab>
           <Tab fontSize="sm">Attempts ({attempts.length})</Tab>
           <Tab fontSize="sm">Question analysis</Tab>
           {perSection.length > 0 && <Tab fontSize="sm">Sections</Tab>}
@@ -298,6 +1114,20 @@ export default function QuizResults() {
         </TabList>
 
         <TabPanels>
+          {/* ---- live monitor ---- */}
+          <TabPanel px={0}>
+            <LiveMonitor
+              data={{ ...data, notStartedStudents }}
+              skewMs={skewRef.current}
+              onAct={act}
+              onRefresh={() => load(true)}
+              refreshing={refreshing}
+              auto={auto}
+              setAuto={setAuto}
+              updatedAt={updatedAt}
+            />
+          </TabPanel>
+
           {/* ---- attempts ---- */}
           <TabPanel px={0}>
             {attempts.length === 0 ? (
@@ -359,21 +1189,7 @@ export default function QuizResults() {
                             {duration(attempt.durationSec)}
                           </Td>
                           <Td>
-                            {attempt.tabSwitches > 0 && (
-                              <Badge colorScheme="orange" fontSize="0.6rem" mr={1}>
-                                {attempt.tabSwitches}× away
-                              </Badge>
-                            )}
-                            {(attempt.violations || []).some((v) => v.type === 'fullscreen_exit') && (
-                              <Badge colorScheme="purple" fontSize="0.6rem" mr={1}>
-                                fs
-                              </Badge>
-                            )}
-                            {attempt.device?.isMobile && (
-                              <Badge colorScheme="gray" fontSize="0.6rem">
-                                mobile
-                              </Badge>
-                            )}
+                            <AttemptFlags attempt={attempt} />
                           </Td>
                           <Td fontSize="xs">
                             {attempt.status === 'in_progress' ? (
@@ -391,9 +1207,15 @@ export default function QuizResults() {
                                 {attempt.reopenedByName ? ` by ${attempt.reopenedByName}` : ''}
                               </Text>
                             )}
+                            {attempt.regradedAt && (
+                              <Text color="blue.600" fontSize="0.65rem">
+                                re-marked {relativeTime(attempt.regradedAt)}
+                                {attempt.regradedByName ? ` by ${attempt.regradedByName}` : ''}
+                              </Text>
+                            )}
                           </Td>
                           <Td>
-                            <AttemptActions attempt={attempt} onAct={(action) => setAction({ attempt, action })} />
+                            <AttemptActions attempt={attempt} onAct={(next) => act(attempt, next)} />
                           </Td>
                         </Tr>
                       ))}
@@ -565,6 +1387,24 @@ export default function QuizResults() {
         classId={classId}
         toast={toast}
         onClose={() => setAction(null)}
+        onDone={load}
+      />
+
+      <AnswerKeyModal
+        isOpen={keyOpen}
+        quiz={quiz}
+        classId={classId}
+        toast={toast}
+        onClose={() => setKeyOpen(false)}
+        onDone={load}
+      />
+
+      <RegradeModal
+        isOpen={regrading}
+        classId={classId}
+        quizId={quizId}
+        toast={toast}
+        onClose={() => setRegrading(false)}
         onDone={load}
       />
     </Box>

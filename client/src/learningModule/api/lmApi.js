@@ -257,6 +257,19 @@ const lmApi = {
   deleteQuizAttempt: (classId, attemptId) =>
     request(`/classes/${classId}/attempts/${attemptId}`, { method: 'DELETE' }),
 
+  /* correcting the answer key of a paper the class has already sat.
+     `questions` is [{ questionId, correctAnswers, marks, negativeMarks,
+     tolerancePercent, toleranceAbs, explanation }] — only the fields sent are
+     written, and the whole cohort is re-marked unless `regrade: false`. */
+  updateAnswerKey: (classId, quizId, questions, regrade = true) =>
+    request(`/classes/${classId}/quizzes/${quizId}/answer-key`, {
+      method: 'PATCH',
+      body: { questions, regrade },
+    }),
+  // Re-mark every finished sitting against the answer key as it stands now.
+  regradeQuiz: (classId, quizId) =>
+    request(`/classes/${classId}/quizzes/${quizId}/regrade`, { method: 'POST', body: {} }),
+
   /* parameterised tutorials */
   listTutorials: (classId) => request(`/classes/${classId}/tutorials`),
   createTutorial: (classId, body) => request(`/classes/${classId}/tutorials`, { method: 'POST', body }),

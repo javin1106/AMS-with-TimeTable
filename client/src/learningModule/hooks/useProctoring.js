@@ -6,8 +6,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  * Everything here is a deterrent, not a guarantee — a determined student can
  * defeat any of it with devtools. What makes it useful is that every event is
  * **reported to the server and recorded on the attempt**, so the teacher sees
- * who left the window and how often. The enforcement decision (warn vs
- * auto-submit) is also the server's, not this hook's.
+ * who left the window. The enforcement decision is the server's, not this
+ * hook's: leaving the tab, the window or fullscreen submits the attempt on the
+ * first offence, and the reply comes back `terminated`.
  *
  * @param {object} options
  * @param {object} options.settings   the quiz's proctoring settings
@@ -51,9 +52,12 @@ export default function useProctoring({ settings = {}, active, onViolation, onTe
     [onViolation, onTerminated],
   );
 
-  /* ---- leaving the window ---- */
+  /* ---- leaving the window ----
+     Watched on every paper, with nothing to switch it off: leaving the test is
+     no longer counted against a budget, it ends the sitting, and the brief says
+     so before the student starts. */
   useEffect(() => {
-    if (!active || settings.allowTabChange) return undefined;
+    if (!active) return undefined;
 
     const onVisibility = () => {
       if (document.visibilityState === 'hidden') report('tab_switch');
@@ -66,7 +70,7 @@ export default function useProctoring({ settings = {}, active, onViolation, onTe
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('blur', onBlur);
     };
-  }, [active, settings.allowTabChange, report]);
+  }, [active, report]);
 
   /* ---- copy / paste ---- */
   useEffect(() => {
@@ -99,23 +103,21 @@ export default function useProctoring({ settings = {}, active, onViolation, onTe
   }, [active, settings.disableRightClick, report]);
 
   /* ---- fullscreen ----
-     Watched whether or not the paper demands fullscreen, and whether or not a
-     sitting is live. A quiz that merely opened in fullscreen still owes the
-     student a word when they drop out of it — the screen reads `isFullscreen`
-     to say so — and `active` must not gate the *watching*: a state seeded at
-     mount and then never updated reads "still fullscreen" for the rest of the
-     sitting, which is exactly how a fullscreen gate comes to never fire.
-     Only the report is gated, on `active` and on `requireFullscreen`. */
+     Every paper is sat in fullscreen, so an exit is always reportable and always
+     ends the sitting. The watching is not gated on `active` either: a state
+     seeded at mount and then never updated reads "still fullscreen" for the rest
+     of the sitting, which is exactly how a fullscreen gate comes to never fire.
+     Only the report is gated, on `active` — the brief has no attempt to end. */
   useEffect(() => {
     const onChange = () => {
       const inFullscreen = Boolean(document.fullscreenElement);
       setIsFullscreen(inFullscreen);
-      if (!inFullscreen && active && settings.requireFullscreen) report('fullscreen_exit');
+      if (!inFullscreen && active) report('fullscreen_exit');
     };
     document.addEventListener('fullscreenchange', onChange);
     setIsFullscreen(Boolean(document.fullscreenElement));
     return () => document.removeEventListener('fullscreenchange', onChange);
-  }, [active, settings.requireFullscreen, report]);
+  }, [active, report]);
 
   // Entering and leaving fullscreen belongs to the quiz stage, not here: it
   // owns an element that outlives both quiz screens, so one fullscreen covers

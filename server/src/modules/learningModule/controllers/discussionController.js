@@ -15,7 +15,16 @@ const MAX_BODY = 8000;
 
 const forClient = (discussion, req) => ({
   _id: discussion._id,
-  title: discussion.removed ? "Removed" : discussion.title,
+  // A tombstone says who took the thread down, because the two removals mean
+  // different things to the class: moderation is staff saying "this was not
+  // acceptable", while a withdrawal is the author saying "wrong place". A
+  // single label for both reads as moderation for every author who ever
+  // mis-posted.
+  title: discussion.removed
+    ? discussion.removedByStaff
+      ? "Removed by staff"
+      : "Removed"
+    : discussion.title,
   body: discussion.body,
   removed: Boolean(discussion.removed),
   removedByName: discussion.removedByName || "",

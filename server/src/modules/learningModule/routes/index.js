@@ -216,11 +216,17 @@ classRouter.post("/attempts/:attemptId/violation", requireClassStudent, asyncRou
 classRouter.post("/attempts/:attemptId/submit", requireClassStudent, asyncRoute(quizController.submitAttempt));
 classRouter.get("/attempts/:attemptId", asyncRoute(quizController.getAttempt));
 
-// quizzes — putting one student's sitting right. Staff only: both of these
-// rewrite an exam record, and `reopen` hands out a fresh deadline that the quiz
+// quizzes — putting one student's sitting right. Staff only: every one of these
+// rewrites an exam record, and `reopen` hands out a fresh deadline that the quiz
 // window would otherwise refuse.
 classRouter.post("/attempts/:attemptId/reopen", requireTeacher, asyncRoute(quizController.reopenAttempt));
 classRouter.delete("/attempts/:attemptId", requireTeacher, asyncRoute(quizController.deleteAttempt));
+// Correcting the paper itself after a cohort has sat it, and re-marking them
+// all against it. Teacher-only rather than collaborator-editable: a quiz
+// collaborator may edit the paper, but moving marks that have already been
+// released to a class is the class staff's call.
+classRouter.patch("/quizzes/:quizId/answer-key", requireTeacher, asyncRoute(quizController.updateAnswerKey));
+classRouter.post("/quizzes/:quizId/regrade", requireTeacher, asyncRoute(quizController.regradeQuiz));
 
 // quizzes — analytics
 classRouter.get("/quizzes/:quizId/results", requireTeacher, asyncRoute(quizController.getQuizResults));
