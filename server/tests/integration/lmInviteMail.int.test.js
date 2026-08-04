@@ -68,6 +68,39 @@ const invite = (klass, cookie, body) =>
     .set("Cookie", cookie)
     .send(body);
 
+/**
+ * Whether one address's mail actually went out.
+ *
+ * The invite reply no longer says: the mail is queued and the route returns as
+ * soon as the durable work — the membership rows and the in-app notifications —
+ * is written, so every `results[].mailed` comes back `null`. The outcome is
+ * reported through `/members/invite-status/:batchId` instead, which is what
+ * these assertions read. Polling rather than asserting once matters: the send
+ * is deliberately not awaited by the route, so it has usually but not always
+ * finished by the time the response is consumed.
+ */
+async function mailOutcome(klass, cookie, res, email) {
+  const { batchId } = res.body;
+  expect(batchId).toBeTruthy();
+
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const status = await request(app)
+      .get(`${BASE}/classes/${klass._id}/members/invite-status/${batchId}`)
+      .set("Cookie", cookie);
+
+    if (status.body.done) {
+      const update = status.body.updates.find((entry) => entry.email === email);
+      expect(update).toBeDefined();
+      return update.mailed;
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  throw new Error(`the invite batch carrying ${email} never finished`);
+}
+
 beforeAll(async () => {
   await connect();
   app = buildApp();
@@ -93,7 +126,8 @@ describe("POST /classes/:classId/members/invite — invitation mail", () => {
     const res = await invite(klass, cookie, { emails: ["asha@example.com"], role: "student" });
 
     expect(res.status).toBe(201);
-    expect(res.body.results[0]).toMatchObject({ status: "added", mailed: true });
+    expect(res.body.results[0]).toMatchObject({ status: "added", mailed: null });
+    expect(await mailOutcome(klass, cookie, res, "asha@example.com")).toBe(true);
     expect(sendMail).toHaveBeenCalledTimes(1);
     expect(sendMail.mock.calls[0][0]).toBe("asha@example.com");
   });
@@ -191,7 +225,8 @@ describe("POST /classes/:classId/members/invite — invitation mail", () => {
       createAccounts: true,
     });
 
-    expect(res.body.results[0]).toMatchObject({ status: "account_created", mailed: true });
+    expect(res.body.results[0]).toMatchObject({ status: "account_created", mailed: null });
+    expect(await mailOutcome(klass, cookie, res, "newcomer@example.com")).toBe(true);
     // The welcome mail carries the set-password link (the other mailSender call
     // is the admin's "user created" notice).
     const welcome = mailSender.mock.calls.filter((call) => call[0] === "newcomer@example.com");
@@ -215,7 +250,8 @@ describe("POST /classes/:classId/members/invite — invitation mail", () => {
       createAccounts: true,
     });
 
-    expect(res.body.results[0]).toMatchObject({ status: "account_created", mailed: false });
+    expect(res.body.results[0]).toMatchObject({ status: "account_created", mailed: null });
+    expect(await mailOutcome(klass, cookie, res, "newcomer@example.com")).toBeFalsy();
     // The account and the enrolment still stand — only the mail failed.
     const membership = await LmMembership.findOne({ classId: klass._id, email: "newcomer@example.com" });
     expect(membership.status).toBe("active");
@@ -231,7 +267,8 @@ describe("POST /classes/:classId/members/invite — invitation mail", () => {
       createAccounts: false,
     });
 
-    expect(res.body.results[0]).toMatchObject({ status: "invited", mailed: true });
+    expect(res.body.results[0]).toMatchObject({ status: "invited", mailed: null });
+    expect(await mailOutcome(klass, cookie, res, "newcomer@example.com")).toBe(true);
     expect(sendMail).toHaveBeenCalledTimes(1);
   });
 
@@ -249,7 +286,8 @@ describe("POST /classes/:classId/members/invite — invitation mail", () => {
     const res = await invite(klass, cookie, { emails: ["asha@example.com"], role: "student" });
 
     expect(res.status).toBe(201);
-    expect(res.body.results[0]).toMatchObject({ status: "added", mailed: false });
+    expect(res.body.results[0]).toMatchObject({ status: "added", mailed: null });
+    expect(await mailOutcome(klass, cookie, res, "asha@example.com")).toBeFalsy();
     const membership = await LmMembership.findOne({ classId: klass._id, email: "asha@example.com" });
     expect(membership.status).toBe("active");
   });

@@ -156,7 +156,8 @@ exports.createCoursework = async (req, res) => {
   if (status === "published") {
     await seedSubmissions(coursework, req.lmClass);
     await LmClass.updateOne({ _id: req.lmClass._id }, { $inc: { "stats.courseworkCount": 1 } });
-    await notifyClass({
+    // Not awaited — a teacher saving classwork should not wait on SMTP.
+    notifyClass({
       klass: req.lmClass,
       userIds: coursework.audience.length ? coursework.audience : null,
       excludeUserId: req.lmUser.id,
@@ -271,7 +272,8 @@ exports.updateCoursework = async (req, res) => {
   // it, which is what `wasPublished` guards.
   if (!wasPublished && coursework.status === "published") {
     await LmClass.updateOne({ _id: req.lmClass._id }, { $inc: { "stats.courseworkCount": 1 } });
-    await notifyClass({
+    // Not awaited — a teacher saving classwork should not wait on SMTP.
+    notifyClass({
       klass: req.lmClass,
       userIds: coursework.audience.length ? coursework.audience : null,
       excludeUserId: req.lmUser.id,

@@ -253,6 +253,88 @@ describe('learningModule examEngine — scoreAttempt', () => {
   });
 });
 
+/**
+ * What correcting an answer key depends on: marking reads the key as it stands
+ * *now*, not as it stood when the paper was submitted. Neither
+ * `PATCH /quizzes/:id/answer-key` nor `POST /quizzes/:id/regrade` can work if
+ * scoring is anchored to the moment of submission.
+ */
+describe('learningModule examEngine — re-marking a submitted paper', () => {
+  const SAT = {
+    questionOrder: ['q1', 'q4'],
+    optionOrder: {},
+    startedAt: new Date(),
+    // Student picked option 1 on q1 and got it wrong under the original key.
+    responses: [
+      { questionId: 'q1', selected: ['1'] },
+      { questionId: 'q4', selected: ['0'] },
+    ],
+  };
+
+  it('awards the marks the corrected key implies', () => {
+    const before = engine.scoreAttempt(QUIZ, SAT);
+    // 2 marks for q1 missed and penalised, 1 for q4 correct.
+    expect(before.score).toBe(0);
+    expect(before.totalWrong).toBe(1);
+
+    // The paper was authored with the wrong option ticked on q1.
+    const corrected = {
+      ...QUIZ,
+      questions: QUIZ.questions.map((question) =>
+        question._id === 'q1' ? { ...question, correctAnswers: ['1'] } : question,
+      ),
+    };
+
+    const after = engine.scoreAttempt(corrected, SAT);
+    expect(after.score).toBe(3);
+    expect(after.totalCorrect).toBe(2);
+    expect(after.negativeApplied).toBe(0);
+    expect(after.passed).toBe(true);
+  });
+
+  it('accepts a second right answer on a multi-select question', () => {
+    const corrected = {
+      ...QUIZ,
+      questions: QUIZ.questions.map((question) =>
+        question._id === 'q2' ? { ...question, correctAnswers: ['0'] } : question,
+      ),
+    };
+    const sat = {
+      questionOrder: ['q2'],
+      optionOrder: {},
+      startedAt: new Date(),
+      responses: [{ questionId: 'q2', selected: ['0'] }],
+    };
+    expect(engine.scoreAttempt(QUIZ, sat).score).toBe(0);
+    expect(engine.scoreAttempt(corrected, sat).score).toBe(3);
+  });
+
+  it('follows a mark value the teacher changed after the sitting', () => {
+    const reweighted = {
+      ...QUIZ,
+      questions: QUIZ.questions.map((question) =>
+        question._id === 'q4' ? { ...question, marks: 5 } : question,
+      ),
+    };
+    const result = engine.scoreAttempt(reweighted, SAT);
+    // q4 correct at its new value, q1 still wrong and still penalised.
+    expect(result.score).toBe(4);
+    expect(result.maxScore).toBe(7);
+  });
+
+  it('drops a question removed from the paper after the cohort sat it', () => {
+    const trimmed = {
+      ...QUIZ,
+      questions: QUIZ.questions.filter((question) => question._id !== 'q1'),
+    };
+    const result = engine.scoreAttempt(trimmed, SAT);
+    expect(result.responses).toHaveLength(1);
+    expect(result.maxScore).toBe(1);
+    expect(result.score).toBe(1);
+    expect(result.percent).toBe(100);
+  });
+});
+
 describe('learningModule examEngine — windows and timing', () => {
   const at = (iso) => new Date(iso);
 

@@ -579,7 +579,8 @@ exports.publishQuiz = async (req, res) => {
   if (!scheduled && !quiz.announcedAt) {
     quiz.announcedAt = now;
     await quiz.save();
-    await notifyClass({
+    // Not awaited — publishing a quiz should not wait on SMTP.
+    notifyClass({
       klass: req.lmClass,
       excludeUserId: req.lmUser.id,
       type: "quiz",
@@ -868,11 +869,19 @@ exports.saveAttemptDraft = async (req, res) => {
 };
 
 /**
- * Marks and closes an attempt, mirroring the result into the gradebook.
- * Shared by the student submit path, the auto-submit path and termination.
+ * Marks an attempt against the quiz's *current* answer key, in place.
+ *
+ * Deliberately touches nothing but the marks: not the status, not
+ * `submittedAt`, not the clock. That is what lets the same function serve both
+ * the student's submit — which sets those separately — and the two staff paths
+ * that re-mark a sitting that is already closed and must stay closed.
+ *
+ * Marking always reads the key as it stands now rather than as it stood at
+ * submission time, which is the whole point of a re-evaluation: a question
+ * whose correct option was wrong when the cohort sat it is fixed by correcting
+ * the question and marking again.
  */
-async function finaliseAttempt(attempt, quiz, req, reason = "completed") {
-  const now = new Date();
+function applyScore(attempt, quiz) {
   const scored = engine.scoreAttempt(quiz.toObject ? quiz.toObject() : quiz, attempt);
 
   attempt.responses = scored.responses;
@@ -885,6 +894,18 @@ async function finaliseAttempt(attempt, quiz, req, reason = "completed") {
   attempt.totalUnattempted = scored.totalUnattempted;
   attempt.negativeApplied = scored.negativeApplied;
   attempt.sectionScores = scored.sectionScores;
+
+  return scored;
+}
+
+/**
+ * Marks and closes an attempt, mirroring the result into the gradebook.
+ * Shared by the student submit path, the auto-submit path and termination.
+ */
+async function finaliseAttempt(attempt, quiz, req, reason = "completed") {
+  const now = new Date();
+  const scored = applyScore(attempt, quiz);
+
   attempt.status = reason === "terminated" ? "terminated" : reason === "expired" ? "expired" : "submitted";
   if (reason === "terminated") attempt.terminationReason = req?.body?.reason || "Proctoring rule breached";
   attempt.submittedAt = now;
@@ -1030,30 +1051,32 @@ function buildReview(quiz, attempt) {
 }
 
 /**
- * What spends the student's budget for leaving the test.
+ * What counts as leaving the test.
  *
- * A fullscreen exit counts alongside tab switches whenever the paper asked for
- * fullscreen, because that is what the brief promises them: "leaving
- * fullscreen, or switching to another window or tab, is recorded — you may do
- * so N times". Counting only the tab switches left the harder-to-miss half of
- * that sentence unenforced, so a student could press Escape all day and the
- * auto-submit the teacher switched on would never arrive. On a paper that
- * never asked for fullscreen the exit is still recorded, but it costs nothing:
- * the student was never told it would.
+ * All three are one thing to a student — the paper stopped being the only thing
+ * on their screen — and all three now end the attempt, so they are treated
+ * alike rather than weighed against a budget. A quiz is sat in fullscreen with
+ * nothing else in front of it, and the brief says exactly that.
  */
-const countsAsLeaving = (type, settings) =>
-  type === "tab_switch" ||
-  type === "blur" ||
-  (type === "fullscreen_exit" && Boolean(settings.requireFullscreen));
+const countsAsLeaving = (type) =>
+  type === "tab_switch" || type === "blur" || type === "fullscreen_exit";
 
-// One departure can reach us as two events — a browser that drops fullscreen as
-// it loses focus fires both — and charging twice for one Escape would halve a
-// budget the student was quoted in full.
-const LEAVE_COALESCE_MS = 2000;
+/** How the auto-submit is written onto the attempt, per departure. */
+const TERMINATION_REASON = {
+  tab_switch: "Switched away from the test tab",
+  blur: "Switched to another window or application",
+  fullscreen_exit: "Left fullscreen during the test",
+};
 
 /**
- * Records a proctoring event, and ends the attempt when the budget for leaving
- * the test is exhausted and the teacher asked for that.
+ * Records a proctoring event, and ends the attempt the moment the student
+ * leaves the test.
+ *
+ * There is no allowance: the first tab change, window change or fullscreen exit
+ * submits the paper. One departure can still reach us as two events — a browser
+ * that drops fullscreen as it loses focus fires both — but that no longer needs
+ * coalescing, because the first one already finished the attempt and the second
+ * finds a sitting that is no longer `in_progress`.
  */
 exports.recordViolation = async (req, res) => {
   const attempt = await LmQuizAttempt.findOne({
@@ -1069,45 +1092,35 @@ exports.recordViolation = async (req, res) => {
   if (!allowed.includes(type)) return res.status(400).json({ message: "Unknown violation type." });
 
   const quiz = await LmQuiz.findById(attempt.quizId);
-  const settings = quiz?.settings || {};
 
-  const now = new Date();
-  const previous = attempt.violations[attempt.violations.length - 1];
-  const coalesced =
-    previous &&
-    countsAsLeaving(previous.type, settings) &&
-    now - new Date(previous.at) < LEAVE_COALESCE_MS;
-
-  attempt.violations.push({ type, at: now });
-  if (countsAsLeaving(type, settings) && !coalesced) attempt.tabSwitches += 1;
+  const leaving = countsAsLeaving(type);
+  attempt.violations.push({ type, at: new Date() });
+  if (leaving) attempt.tabSwitches += 1;
   await attempt.save();
 
-  const overBudget = !settings.allowTabChange && attempt.tabSwitches > (settings.maxTabSwitches || 0);
-
-  if (overBudget && settings.autoSubmitOnTabLimit) {
+  if (leaving) {
     const finished = await finaliseAttempt(
       attempt,
       quiz,
-      { body: { reason: `Left the test ${attempt.tabSwitches} time(s), over the limit of ${settings.maxTabSwitches}` } },
+      { body: { reason: TERMINATION_REASON[type] || "Left the test" } },
       "terminated",
     );
     return res.json({
       status: finished.status,
       terminated: true,
       tabSwitches: finished.tabSwitches,
-      message: "Your test was submitted automatically because you left the test too many times.",
+      remaining: 0,
+      message:
+        "Your test was submitted automatically because you left the test screen. " +
+        "The paper had to be taken in fullscreen without changing tab or window.",
     });
   }
 
   return res.json({
     status: attempt.status,
     tabSwitches: attempt.tabSwitches,
-    warning: overBudget
-      ? "You have left the test more times than allowed. This has been recorded."
-      : null,
-    remaining: settings.allowTabChange
-      ? null
-      : Math.max(0, (settings.maxTabSwitches || 0) - attempt.tabSwitches),
+    warning: null,
+    remaining: null,
   });
 };
 
@@ -1363,19 +1376,281 @@ exports.reopenAttempt = async (req, res) => {
   return res.json({ attempt: fresh, mode, deadlineOverride });
 };
 
+/* ───────────────── correcting the answer key ──────────────── */
+
+/**
+ * Re-mark every finished sitting against the answer key as it stands now.
+ *
+ * What it is for is the key itself having been wrong: a question published with
+ * the wrong option ticked, a mark value that should have been two, a
+ * question dropped from the paper after the cohort sat it. Correcting the quiz
+ * fixes nothing on its own, because each attempt carries the numbers worked out
+ * at the moment it was submitted — this is what makes the correction reach the
+ * marks that were already awarded.
+ *
+ * In-progress sittings are skipped rather than marked: they have no result yet,
+ * and one will be worked out from the corrected key when the student submits.
+ */
+async function regradeAllAttempts(quiz, req) {
+  const attempts = await LmQuizAttempt.find({
+    quizId: quiz._id,
+    status: { $in: ["submitted", "expired", "terminated"] },
+  });
+
+  const now = new Date();
+  const changes = [];
+  const touched = new Set();
+
+  for (const attempt of attempts) {
+    const before = { score: attempt.score, percent: attempt.percent, passed: attempt.passed };
+    applyScore(attempt, quiz);
+    attempt.regradedAt = now;
+    attempt.regradedByName = req.lmUser.name;
+    attempt.updated_at = now;
+    await attempt.save();
+    touched.add(String(attempt.studentId));
+
+    if (attempt.score !== before.score || attempt.passed !== before.passed) {
+      changes.push({
+        attemptId: attempt._id,
+        studentId: attempt.studentId,
+        studentName: attempt.studentName || attempt.studentEmail,
+        rollNumber: attempt.rollNumber,
+        before,
+        after: { score: attempt.score, percent: attempt.percent, passed: attempt.passed },
+      });
+    }
+  }
+
+  // The gradebook mirrors the *best* of a student's attempts, so it has to be
+  // rebuilt from what the re-mark left rather than written per attempt: a
+  // student's second sitting overtaking their first is exactly the kind of
+  // thing a re-evaluation causes.
+  for (const studentId of touched) {
+    await remirrorGradebook(quiz, req.lmClass._id, studentId);
+  }
+
+  // Only the students whose result actually moved hear about it. Telling a
+  // whole cohort their marks were "reviewed" when nothing changed for most of
+  // them invites a flood of queries about nothing.
+  for (const change of changes) {
+    await notifyUser({
+      userId: change.studentId,
+      klass: req.lmClass,
+      type: "quiz",
+      title: `Your result for "${quiz.title}" was revised`,
+      body: `The paper was re-evaluated. Your score is now ${change.after.score}/${quiz.totalMarks} (was ${change.before.score}).`,
+      link: `/learning/class/${req.lmClass._id}/quiz/${quiz._id}`,
+      actorName: req.lmUser.name,
+    });
+  }
+
+  return {
+    regraded: attempts.length,
+    changed: changes.length,
+    changes,
+    regradedAt: now,
+  };
+}
+
+exports.regradeQuiz = async (req, res) => {
+  const quiz = await LmQuiz.findOne({ _id: req.params.quizId, classId: req.lmClass._id });
+  if (!quiz) return res.status(404).json({ message: "Quiz not found." });
+  return res.json(await regradeAllAttempts(quiz, req));
+};
+
+/** The answer-key fields of one question, for the before/after in the response. */
+const keyOf = (question) => ({
+  questionId: question._id,
+  question: question.question,
+  type: question.type,
+  options: question.options,
+  correctAnswers: (question.correctAnswers || []).map(String),
+  marks: question.marks,
+  negativeMarks: question.negativeMarks,
+  tolerancePercent: question.tolerancePercent,
+  toleranceAbs: question.toleranceAbs,
+  explanation: question.explanation,
+});
+
+/** Answer indices off the wire, kept to options the question actually has. */
+const sanitiseKey = (values, question) => {
+  if (question.type === "numerical") {
+    return [String((Array.isArray(values) ? values[0] : values) ?? "").trim()].filter(Boolean);
+  }
+  const seen = new Set();
+  const picked = (Array.isArray(values) ? values : [values])
+    .map((value) => Number(value))
+    .filter((index) => Number.isInteger(index) && index >= 0 && index < (question.options || []).length)
+    .filter((index) => (seen.has(index) ? false : seen.add(index)))
+    .map(String);
+  // Single-answer types cannot carry two right answers; `sameSet` marking would
+  // then be unsatisfiable and every student would score zero on the question.
+  return question.type === "msq" ? picked : picked.slice(0, 1);
+};
+
+/**
+ * Correct the answer key of a quiz people have already sat, and re-mark them.
+ *
+ * The fault this addresses is in the paper, not in any one student's sitting: a
+ * question published with the wrong option ticked, a mark value that should
+ * have been two, a tolerance too tight for the numbers the question asks for.
+ * Every student who answered it is affected identically, so the fix belongs to
+ * the key and the re-mark belongs to the whole cohort — which is why this
+ * endpoint does both, and why there is no per-student equivalent.
+ *
+ * It writes only the fields that decide marks, matched by question `_id`:
+ *
+ *  - **Question text and options are untouched, deliberately.** A recorded
+ *    response is an *index* into the options as authored. Reordering or
+ *    rewording them under a cohort that has already answered silently changes
+ *    what every stored answer means, and no re-mark can recover the original
+ *    intent. Rewriting a question is the editor's job, before anybody sits it.
+ *  - **Questions are matched, never replaced.** Sending a whole `questions`
+ *    array through `updateQuiz` from a stale page would rewrite the paper; here
+ *    an unknown id is skipped and anything not named is left exactly as it was.
+ */
+exports.updateAnswerKey = async (req, res) => {
+  const quiz = await LmQuiz.findOne({ _id: req.params.quizId, classId: req.lmClass._id });
+  if (!quiz) return res.status(404).json({ message: "Quiz not found." });
+
+  const incoming = Array.isArray(req.body.questions) ? req.body.questions : [];
+  const changes = [];
+
+  incoming.forEach((entry) => {
+    const question = quiz.questions.id(entry.questionId);
+    if (!question) return;
+
+    const before = keyOf(question);
+
+    if (entry.correctAnswers !== undefined) {
+      question.correctAnswers = sanitiseKey(entry.correctAnswers, question);
+    }
+    if (entry.marks !== undefined) {
+      question.marks = Math.max(0, Number(entry.marks) || 0);
+    }
+    if (entry.negativeMarks !== undefined) {
+      question.negativeMarks =
+        entry.negativeMarks === null || entry.negativeMarks === ""
+          ? null
+          : Math.max(0, Number(entry.negativeMarks) || 0);
+    }
+    if (entry.tolerancePercent !== undefined) {
+      question.tolerancePercent = Math.max(0, Number(entry.tolerancePercent) || 0);
+    }
+    if (entry.toleranceAbs !== undefined) {
+      question.toleranceAbs = Math.max(0, Number(entry.toleranceAbs) || 0);
+    }
+    if (entry.explanation !== undefined) {
+      question.explanation = String(entry.explanation || "");
+    }
+
+    const after = keyOf(question);
+    const moved =
+      after.correctAnswers.join() !== before.correctAnswers.join() ||
+      after.marks !== before.marks ||
+      after.negativeMarks !== before.negativeMarks ||
+      after.tolerancePercent !== before.tolerancePercent ||
+      after.toleranceAbs !== before.toleranceAbs;
+
+    if (moved || after.explanation !== before.explanation) {
+      changes.push({ questionId: question._id, before, after, affectsMarks: moved });
+    }
+  });
+
+  if (!changes.length) {
+    return res.json({ quiz, changed: 0, regrade: null });
+  }
+
+  quiz.updated_at = new Date();
+  // `pre('save')` recomputes totalMarks, so a changed mark value carries through
+  // to the paper's total without a second write.
+  await quiz.save();
+
+  // Re-marking is the default rather than an extra step: a corrected key that
+  // has not reached the marks it decides is the exact state this endpoint
+  // exists to prevent anybody being left in.
+  const regrade =
+    req.body.regrade === false || !changes.some((change) => change.affectsMarks)
+      ? null
+      : await regradeAllAttempts(quiz, req);
+
+  return res.json({ quiz, changed: changes.length, changes, regrade });
+};
+
 /* ────────────────────────────── analytics ─────────────────────────────── */
 
 exports.getQuizResults = async (req, res) => {
   const quiz = await LmQuiz.findOne({ _id: req.params.quizId, classId: req.lmClass._id }).lean();
   if (!quiz) return res.status(404).json({ message: "Quiz not found." });
 
-  const attempts = await LmQuizAttempt.find({ quizId: quiz._id }).sort({ percent: -1 }).lean();
+  const now = new Date();
+  const raw = await LmQuizAttempt.find({ quizId: quiz._id }).sort({ percent: -1 }).lean();
+
+  /**
+   * What the invigilation view needs on top of the stored attempt.
+   *
+   * `answeredCount` cannot be read off `attempted`, which only exists once a
+   * paper has been marked — mid-sitting every response is unmarked, so a live
+   * attempt would show nothing done however far through it is. Counting the
+   * responses that actually carry something is the only measure available
+   * while the paper is still being written.
+   *
+   * `deadline` is computed here rather than in the browser because it is the
+   * one the server will itself enforce, override and all; a client that
+   * recomputed it from the quiz settings would show the wrong clock to exactly
+   * the students whose sitting was reopened.
+   */
+  const attempts = raw.map((attempt) => {
+    const responses = attempt.responses || [];
+    const answered = responses.filter(
+      (response) => (response.selected || []).length > 0 || String(response.text || "").trim() !== "",
+    ).length;
+    const stamps = responses
+      .map((response) => response.answeredAt)
+      .filter(Boolean)
+      .map((date) => new Date(date).getTime());
+
+    return {
+      ...attempt,
+      answeredCount: answered,
+      questionCount: (attempt.questionOrder || []).length,
+      lastActivityAt: new Date(
+        Math.max(
+          ...stamps,
+          new Date(attempt.currentServedAt || attempt.startedAt).getTime(),
+          new Date(attempt.startedAt).getTime(),
+        ),
+      ),
+      deadline:
+        attempt.status === "in_progress" ? engine.questionDeadline(quiz, attempt, null, now) : null,
+    };
+  });
+
   const finished = attempts.filter((attempt) => attempt.status !== "in_progress");
-  const enrolled = await LmMembership.countDocuments({
+
+  // The full student roster, not just a count: an invigilator watching a test
+  // run needs the names of who has not appeared, which is unrecoverable from a
+  // number. Removed and invited rows are left out — neither is somebody who is
+  // expected to be sitting the paper right now.
+  const roster = await LmMembership.find({
     classId: req.lmClass._id,
     role: "student",
     status: "active",
-  });
+  })
+    .select("userId name email rollNumber")
+    .sort({ rollNumber: 1, name: 1 })
+    .lean();
+  const enrolled = roster.length;
+  const sat = new Set(attempts.map((attempt) => String(attempt.studentId)));
+  const notStartedStudents = roster
+    .filter((member) => member.userId && !sat.has(String(member.userId)))
+    .map((member) => ({
+      studentId: member.userId,
+      studentName: member.name || member.email,
+      studentEmail: member.email,
+      rollNumber: member.rollNumber,
+    }));
 
   // Per-question difficulty across the cohort.
   const perQuestion = quiz.questions.map((question) => {
@@ -1443,12 +1718,17 @@ exports.getQuizResults = async (req, res) => {
   return res.json({
     quiz,
     attempts,
+    notStartedStudents,
+    // The clock every countdown on the results page is measured against. A
+    // browser whose own clock is minutes out would otherwise show an
+    // invigilator time remaining that the server disagrees with.
+    serverTime: now,
     summary: {
       enrolled,
       started: attempts.length,
       submitted: finished.length,
       inProgress: attempts.length - finished.length,
-      notStarted: Math.max(0, enrolled - attempts.length),
+      notStarted: notStartedStudents.length,
       average: percents.length ? Math.round((percents.reduce((a, b) => a + b, 0) / percents.length) * 10) / 10 : null,
       median: sorted.length ? sorted[Math.floor(sorted.length / 2)] : null,
       highest: sorted.length ? sorted[sorted.length - 1] : null,
@@ -1462,6 +1742,11 @@ exports.getQuizResults = async (req, res) => {
       totalNegative: Math.round(finished.reduce((sum, a) => sum + (a.negativeApplied || 0), 0) * 100) / 100,
       flagged: finished.filter((attempt) => (attempt.violations || []).length > 0).length,
       terminated: finished.filter((attempt) => attempt.status === "terminated").length,
+      lastRegradedAt:
+        attempts.reduce((latest, attempt) => {
+          const at = attempt.regradedAt ? new Date(attempt.regradedAt) : null;
+          return at && (!latest || at > latest) ? at : latest;
+        }, null) || null,
     },
     perQuestion,
     perSection: [...sectionTotals.values()].map((section) => ({

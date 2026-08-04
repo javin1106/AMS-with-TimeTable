@@ -528,14 +528,14 @@ uploadPkl() {
         sse({ type: 'start', total: rollNos.length, sem: semSafe, subject: subject.trim(), embeddingFile });
 
         // Helper: find the GT batch folder that contains a given roll number.
-        // When instituteWise=true scans all batch folders; otherwise only dept-matching ones.
+        // Always scans every batch folder — dept-scoped filtering was dropped
+        // because Subject.dept / the dept param is frequently blank or doesn't
+        // literally match the batch folder name, which silently produced
+        // "not found" for every student unless Institute Wise was ticked.
         async function findStudentDir(rollNo) {
             if (!fs.existsSync(GROUND_TRUTH_DIR)) return null;
             const batchFolders = await fsPromises.readdir(GROUND_TRUTH_DIR);
-            const candidates = instituteWise
-                ? batchFolders
-                : batchFolders.filter(b => b.toUpperCase().includes((dept || '').toUpperCase()));
-            for (const batch of candidates) {
+            for (const batch of batchFolders) {
                 const candidate = path.join(GROUND_TRUTH_DIR, batch, rollNo);
                 if (fs.existsSync(candidate)) return { dir: candidate, batch };
             }
@@ -546,9 +546,7 @@ uploadPkl() {
             const found = await findStudentDir(rollNo);
 
             if (!found) {
-                const reason = instituteWise
-                    ? 'Not found in any department — check roll no and verify ground truth exists'
-                    : 'Not found in dept ground truth — try Institute Wise search';
+                const reason = 'Not found in any department — check roll no and verify ground truth exists';
                 sse({ type: 'student', rollNo, status: 'failed', reason });
                 failed++;
                 failedList.push({ rollNo, reason });

@@ -89,7 +89,7 @@ function buildDefaultPeriods() {
     numRuns: 1,
     runDurationSec: 120,
     checkIntervalMin: 5,
-    presentLogic: "majority",
+    minRunsPresent: 1,
     stopForDay: false,
   }));
 }
@@ -110,7 +110,7 @@ exports.updateGlobal = async (req, res) => {
     const doc = await getOrCreateDefault();
     const allowed = [
       "active",
-      "globalPresentLogic",
+      "globalMinRunsPresent",
       "globalNumRuns",
       "globalRunDurationSec",
       "globalCheckIntervalMin",
@@ -140,7 +140,7 @@ exports.updatePeriod = async (req, res) => {
       "numRuns",
       "runDurationSec",
       "checkIntervalMin",
-      "presentLogic",
+      "minRunsPresent",
       "stopForDay",
     ];
     for (const key of allowed) {

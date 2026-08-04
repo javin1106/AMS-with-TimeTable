@@ -84,7 +84,10 @@ exports.register = async (req, res, next) => {
           isFirstLogin: false,
         });
 
-        notifyUserCreated(user);
+        const isStudentOnly = (roles || []).every((r) => String(r).toUpperCase() === "STUDENT");
+        if (!isStudentOnly) {
+          notifyUserCreated(user);
+        }
 
         sendWelcomeEmail({
           email,
@@ -97,24 +100,6 @@ exports.register = async (req, res, next) => {
                         : ""
                     }.</p>`,
           accountCreated: true,
-        });
-
-        // Generate a JWT token
-        const maxAge = 3 * 60 * 60; // 3 hours in seconds
-        const token = jwt.sign(
-          { id: user._id, name: email, email: email, role: user.role },
-          jwtSecret,
-          {
-            expiresIn: maxAge,
-          }
-        );
-
-        // Set the JWT token as a cookie
-        res.cookie("jwt", token, {
-          httpOnly: true,
-          maxAge: maxAge * 1000,
-          secure: true,
-          sameSite: "none",
         });
 
         const userResponse = user.toObject();

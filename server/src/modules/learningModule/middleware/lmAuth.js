@@ -11,7 +11,7 @@ const LmMembership = require("../models/lmMembership");
 // platform's middlewares.
 const readAuthToken = require("../../readAuthToken");
 
-const PLATFORM_ADMIN_ROLES = ["admin", "iams-admin", "SUPERADMIN"];
+const PLATFORM_ADMIN_ROLES = ["admin", "iams-admin", "lm-admin"];
 const TEACHER_PLATFORM_ROLES = ["FACULTY", "ITTC", "TTADMIN", "iams-dept-admin"];
 const STUDENT_PLATFORM_ROLES = ["STUDENT"];
 

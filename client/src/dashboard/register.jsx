@@ -52,11 +52,11 @@ const ROLE_GROUPS = [
     ],
   },
   {
-    group: 'Diabetics Module',
+    group: 'Learning Module',
     roles: [
-      { value: 'dm-admin', label: 'Admin' },
-      { value: 'doctor', label: 'Doctor' },
-      { value: 'patient', label: 'Patient' },
+      { value: 'STUDENT', label: 'Student' },
+      { value: 'FACULTY', label: 'Teacher' },
+      { value: 'lm-admin', label: 'LM Admin' },
     ],
   },
 ];

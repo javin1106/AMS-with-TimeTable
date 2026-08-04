@@ -27,7 +27,7 @@ import {
 } from '@chakra-ui/react';
 
 import lmApi from '../api/lmApi';
-import { EmptyState, ErrorState, Loading, SectionCard } from '../components/common';
+import { buttonTextStyles, EmptyState, ErrorState, Loading, SectionCard } from '../components/common';
 import { formatDate } from '../format';
 
 /**
@@ -68,6 +68,7 @@ function Row({ row, highlight, onOpen }) {
             textAlign: 'left',
             cursor: 'pointer',
             _hover: { bg: highlight ? bg : hoverBg },
+            ...buttonTextStyles,
           }
         : {})}
     >
@@ -504,6 +505,7 @@ function TeacherView({ week, all, classId }) {
                   py={1.5}
                   borderRadius="md"
                   _hover={{ bg: 'blackAlpha.50' }}
+                  {...buttonTextStyles}
                 >
                   <Text fontSize="sm">{row.studentName}</Text>
                   <Badge colorScheme="gray" borderRadius="full">

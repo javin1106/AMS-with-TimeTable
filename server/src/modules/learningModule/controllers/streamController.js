@@ -209,7 +209,9 @@ exports.createAnnouncement = async (req, res) => {
 
   if (status === "published") {
     await LmClass.updateOne({ _id: req.lmClass._id }, { $inc: { "stats.announcementCount": 1 } });
-    await notifyClass({
+    // Not awaited — same reasoning as releaseScheduled() above: no teacher's
+    // "post" click should wait on SMTP.
+    notifyClass({
       klass: req.lmClass,
       userIds: announcement.audience.length ? announcement.audience : null,
       excludeUserId: req.lmUser.id,
@@ -265,7 +267,8 @@ exports.updateAnnouncement = async (req, res) => {
 
   if (published) {
     await LmClass.updateOne({ _id: req.lmClass._id }, { $inc: { "stats.announcementCount": 1 } });
-    await notifyClass({
+    // Not awaited — same reasoning as releaseScheduled() above.
+    notifyClass({
       klass: req.lmClass,
       userIds: announcement.audience.length ? announcement.audience : null,
       excludeUserId: announcement.authorId,

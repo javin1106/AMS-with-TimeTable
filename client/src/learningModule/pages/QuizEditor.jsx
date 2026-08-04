@@ -871,37 +871,21 @@ export default function QuizEditor() {
               subtitle="Deterrents, not guarantees — a determined student can defeat any of them. What makes them useful is that every event is recorded on the attempt for you to review."
             >
               <Stack spacing={3}>
-                <Checkbox
-                  size="sm"
-                  isChecked={!settings.allowTabChange}
-                  onChange={(e) => setSetting('allowTabChange', !e.target.checked)}
-                >
-                  Record when a student leaves the test tab or window
-                </Checkbox>
-                {!settings.allowTabChange && (
-                  <Box pl={6}>
-                    <HStack>
-                      <FormControl maxW="140px">
-                        <FormLabel fontSize="xs">Allowed switches</FormLabel>
-                        <Input
-                          size="sm"
-                          type="number"
-                          min={0}
-                          value={settings.maxTabSwitches}
-                          onChange={(e) => setSetting('maxTabSwitches', Number(e.target.value) || 0)}
-                        />
-                      </FormControl>
-                    </HStack>
-                    <Checkbox
-                      mt={2}
-                      size="sm"
-                      isChecked={settings.autoSubmitOnTabLimit}
-                      onChange={(e) => setSetting('autoSubmitOnTabLimit', e.target.checked)}
-                    >
-                      Submit the test automatically once that limit is passed
-                    </Checkbox>
-                  </Box>
-                )}
+                {/* Not a checkbox, because it is not a choice any more: every
+                    paper is sat in fullscreen and the first departure submits
+                    it. Stated here so a teacher setting the paper knows exactly
+                    what their class will be held to. */}
+                <Box p={3} bg="orange.50" borderRadius="md" borderWidth="1px" borderColor="orange.200">
+                  <Text fontSize="sm" fontWeight="600" mb={1}>
+                    Always on: fullscreen lockdown
+                  </Text>
+                  <Text fontSize="xs" color="gray.700">
+                    Every test runs in fullscreen. Leaving fullscreen, or switching to another tab,
+                    window or application, submits the student&apos;s attempt immediately and records
+                    the reason on it. There is no allowance to configure — your students are told
+                    this on the pre-test screen before they can start.
+                  </Text>
+                </Box>
 
                 <Checkbox
                   size="sm"
@@ -909,13 +893,6 @@ export default function QuizEditor() {
                   onChange={(e) => setSetting('preventMobile', e.target.checked)}
                 >
                   Block mobile devices (checked server-side on start)
-                </Checkbox>
-                <Checkbox
-                  size="sm"
-                  isChecked={settings.requireFullscreen}
-                  onChange={(e) => setSetting('requireFullscreen', e.target.checked)}
-                >
-                  Require fullscreen, and record when it is exited
                 </Checkbox>
                 <Checkbox
                   size="sm"

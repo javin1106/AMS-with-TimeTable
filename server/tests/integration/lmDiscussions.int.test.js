@@ -158,9 +158,12 @@ describe("removing a discussion", () => {
     const again = await start(klass, cookie, { title: "Trying again" });
     expect(again.status).toBe(429);
 
-    // …but it is gone from the forum, with no tombstone: nobody saw it.
+    // …and it stays in the forum as a tombstone. Every removal leaves one,
+    // whoever did it — see the note on the model — but a withdrawal is not
+    // moderation, so the label does not say staff took it down.
     const after = await list(klass, cookie);
-    expect(after.body.discussions).toHaveLength(0);
+    expect(after.body.discussions).toHaveLength(1);
+    expect(after.body.discussions[0]).toMatchObject({ removed: true, title: "Removed" });
   });
 
   it("leaves a visible tombstone when staff take one down", async () => {

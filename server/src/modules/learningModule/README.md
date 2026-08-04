@@ -287,6 +287,77 @@ an attempt that no longer exists. `reopenCount` / `reopenedByName` stay on the
 record — including across a restart, so the fact that a student sat a paper twice
 survives the wiping of what they wrote the first time.
 
+### Watching a test run
+
+`GET /quizzes/:quizId/results` doubles as the invigilation feed, and the results
+page opens on it. Three groups, kept apart because the action each calls for is
+different — watch, let back in, chase:
+
+- **Writing now.** Progress is counted as *responses carrying something*, not as
+  `attempted`: that flag is only written when a paper is marked, so mid-sitting
+  every response is unmarked and a live attempt would otherwise read as nothing
+  done however far through it is. Each row also carries `deadline`, computed
+  server-side by `questionDeadline` so a reopened sitting shows the clock that
+  will actually be enforced, and `serverTime` comes back alongside so the
+  countdown is measured against the server rather than an invigilator's laptop.
+- **Submitted or closed.** Sorted so the sittings that ended by *something other
+  than the student finishing* — terminated, expired — come first. Those are who
+  the invigilator is looking for, and each has a one-click `Let back in`
+  (`reopen mode: continue`).
+- **Not started.** Names, from the roster, not a count: who has not appeared is
+  unrecoverable from a number.
+
+The page polls only while that view is on screen and only while the teacher
+leaves auto-refresh on; the analytics tabs read a finished cohort and gain
+nothing from re-fetching. A background poll never blanks the page into its
+loading state, and a failed one leaves the last good data up.
+
+### Correcting the answer key after a cohort has sat the paper
+
+A question published with the wrong option ticked is not one student's problem —
+everybody who answered it was marked against the same wrong key. So the fix is
+to the key, and the re-mark is to the whole cohort. There is deliberately **no**
+per-student answer editing: it would be the wrong shape of tool for the fault,
+and an exam record staff can hand-edit is a weaker record than one they cannot.
+
+| | What it does |
+| --- | --- |
+| `PATCH /quizzes/:quizId/answer-key` | Corrects the marking fields of named questions, then re-marks every finished sitting |
+| `POST /quizzes/:quizId/regrade` | Re-marks every finished sitting against the key as it stands, changing nothing |
+
+Both go through `applyScore`, which marks an attempt in place from the quiz's
+**current** key and touches nothing else — not the status, not `submittedAt`,
+not the clock. That is what lets `finaliseAttempt` (which sets those separately)
+and the staff paths (which must leave a closed sitting closed) share one marking
+routine.
+
+Points to keep in mind:
+
+- **Question text and options are not editable here, on purpose.** A recorded
+  response is an *index* into the options as authored. Reordering or rewording
+  them under a cohort that has already answered silently changes what every
+  stored answer means, and no re-mark recovers the original intent. Rewriting a
+  question belongs in the editor, before anybody sits it.
+- **Questions are matched by `_id` and patched, never replaced.** Pushing a whole
+  `questions` array through `updateQuiz` from a stale page would rewrite the
+  paper; here an unknown id is skipped and anything not named is left alone.
+- **Re-marking is the default, not a second step.** A corrected key that has not
+  reached the marks it decides is the exact state the endpoint exists to prevent
+  anybody being left in. It is skipped only when nothing mark-affecting changed
+  (an explanation reworded, say), or when the caller passes `regrade: false`.
+- **A regrade skips in-progress sittings** — they have no result yet, and will
+  be marked from the corrected key when submitted — and rebuilds the gradebook
+  through `remirrorGradebook` per student rather than per attempt, because the
+  mirror is best-of and a re-mark is exactly what makes a second sitting
+  overtake a first.
+- **Single-answer types keep one right answer.** `sanitiseKey` truncates: two
+  correct options on an `mcq` would make `sameSet` marking unsatisfiable and
+  score the whole cohort zero on that question.
+- **Only students whose result moved are notified**, and the attempt keeps
+  `regradedAt` / `regradedByName` so a student querying a changed mark can be
+  told when and by whom it changed. Telling a cohort their marks were "reviewed"
+  when nothing changed for most of them invites a flood of queries about nothing.
+
 ### Question types and marking
 
 Four types: `mcq` (single), `msq` (multiple), `truefalse`, `numerical`. Every
@@ -325,16 +396,20 @@ devtools. What makes them useful is that **every event is recorded on the
 attempt** for the teacher to review, and the enforcement decision is the
 server's, not the browser's.
 
+- **Leaving the test ends it, on every paper.** `tab_switch`, `blur` and
+  `fullscreen_exit` all finalise the attempt as `terminated` on the first
+  offence, with the departure written into `terminationReason`. This is not
+  configurable: the old `allowTabChange` / `maxTabSwitches` /
+  `autoSubmitOnTabLimit` / `requireFullscreen` settings are gone, and a quiz
+  still carrying them in the database has them ignored. One departure reaching
+  us as two events (a browser that drops fullscreen as it blurs) needs no
+  coalescing — the second report finds an attempt that is no longer
+  `in_progress` and is answered with its status.
+- Every sitting is fullscreen. The client watches `fullscreenchange` for the
+  whole sitting, in both delivery modes, so the watch cannot be bypassed by a
+  stale "still fullscreen"; the fullscreen gate on the sitting is only for a
+  browser that *refused* the request, since an exit submits rather than pauses.
 - `preventMobile` — checked server-side from the User-Agent when starting.
-- `allowTabChange` / `maxTabSwitches` / `autoSubmitOnTabLimit` — leaving the
-  test is counted; passing the budget warns, or ends the attempt if configured.
-  Tab and window blur always count, and a fullscreen exit counts too when the
-  paper required fullscreen, which is what the brief promises the student.
-  Events landing within two seconds of each other are one departure: a browser
-  that drops fullscreen as it blurs would otherwise charge twice for one Escape.
-- `requireFullscreen` — the sitting is gated behind fullscreen, and exits are
-  recorded. The client watches `fullscreenchange` for the whole sitting, in both
-  delivery modes, so the gate cannot be bypassed by a stale "still fullscreen".
 - `disableCopyPaste`, `disableRightClick`.
 
 Every event lands in `attempt.violations` with a timestamp, and terminated
@@ -841,7 +916,7 @@ answers the wrong people.
 
 1. an active membership with role `teacher` or `co-teacher`
 2. being the class owner
-3. **holding a platform admin role** — `admin`, `iams-admin` or `SUPERADMIN`
+3. **holding a platform admin role** — `admin`, `iams-admin` or `lm-admin`
 
 Route 3 is deliberate: it lets support open a class without being enrolled. It is
 also a standing grant over *every* class in the installation — answer keys,
@@ -1243,8 +1318,15 @@ POST   /attempts/:id/reopen      T   let one student back in — `mode: continue
                                      shut them out again
 DELETE /attempts/:id             T   delete one student's response and its score
 
-GET    /quizzes/:quizId/results      T   attempts, question/section analysis
+GET    /quizzes/:quizId/results      T   attempts, question/section analysis, and
+                                         the live invigilation feed — who is
+                                         writing, who stopped, who never started
 GET    /quizzes/:quizId/results.csv  T   full export
+PATCH  /quizzes/:quizId/answer-key   T   correct the key of a paper already sat —
+                                         correct answers, marks, tolerances — and
+                                         re-mark the cohort against it
+POST   /quizzes/:quizId/regrade      T   re-mark every finished sitting against
+                                         the answer key as it stands now
 
 GET    /tutorials                            parameterised tutorials
 POST   /tutorials                        T   create

@@ -130,6 +130,14 @@ const lmQuizAttemptSchema = new mongoose.Schema({
   // survives the wiping of what they wrote the first time.
   reopenCount: { type: Number, default: 0 },
 
+  // Last time these marks were recomputed other than by the student submitting
+  // — a re-evaluation of the whole paper after its answer key was corrected.
+  // Kept on the attempt so a result that looks wrong against the key can be
+  // told apart from one that has already been put right, and so a student
+  // querying a changed mark can be told when and by whom it changed.
+  regradedAt: { type: Date, default: null },
+  regradedByName: { type: String, default: '' },
+
   startedAt: { type: Date, default: Date.now },
   submittedAt: { type: Date, default: null },
   durationSec: { type: Number, default: 0 },

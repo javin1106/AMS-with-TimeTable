@@ -7,7 +7,7 @@ const { previewRolls } = require('../controllers/erpSyncController');
 const ctrl = new EmbeddingController();
 
 // POST /attendancemodule/embeddings/erp-rolls
-//   { subjectId, degree?, department?, semester?, abbreviation?, instituteWise? }
+//   { subjectId, degree?, department?, semester?, abbreviation? }
 // ERP roster lookup backing the Manual Generation tab's "Fetch from ERP"
 // button — fills the roll-number textarea and persists the roster onto the
 // Subject, the same way the ERP Sync page's Fetch does. It lives on this

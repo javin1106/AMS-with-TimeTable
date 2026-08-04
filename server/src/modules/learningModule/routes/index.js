@@ -31,6 +31,7 @@ const leaderboardController = require("../controllers/leaderboardController");
 const discussionController = require("../controllers/discussionController");
 const bugReportController = require("../controllers/bugReportController");
 const profileController = require("../controllers/profileController");
+const adminController = require("../controllers/adminController");
 
 const router = express.Router();
 
@@ -85,6 +86,11 @@ router.patch("/bugs/:reportId", asyncRoute(bugReportController.reviewBugReport))
 
 router.get("/me/profile", asyncRoute(profileController.getMyProfile));
 
+// Platform-wide stats for the lm-admin dashboard. Admin-only, checked in the
+// handler for the same reason the bug queue is — there is no class to hang a
+// requireTeacher off.
+router.get("/admin/summary", asyncRoute(adminController.getSummary));
+
 router.post("/join", asyncRoute(memberController.joinByCode));
 router.post("/claim-invites", asyncRoute(memberController.claimInvites));
 router.get("/preview/:code", asyncRoute(memberController.previewByCode));
@@ -118,6 +124,7 @@ classRouter.delete("/topics/:topicId", requireTeacher, asyncRoute(classControlle
 // people
 classRouter.get("/members", asyncRoute(memberController.listMembers));
 classRouter.post("/members/invite", requireTeacher, asyncRoute(memberController.inviteMembers));
+classRouter.get("/members/invite-status/:batchId", requireTeacher, asyncRoute(memberController.inviteStatus));
 classRouter.post("/members/:membershipId/decide", requireTeacher, asyncRoute(memberController.decideJoinRequest));
 classRouter.patch("/members/:membershipId", requireTeacher, asyncRoute(memberController.updateMember));
 classRouter.delete("/members/:membershipId", requireTeacher, asyncRoute(memberController.removeMember));
@@ -209,11 +216,17 @@ classRouter.post("/attempts/:attemptId/violation", requireClassStudent, asyncRou
 classRouter.post("/attempts/:attemptId/submit", requireClassStudent, asyncRoute(quizController.submitAttempt));
 classRouter.get("/attempts/:attemptId", asyncRoute(quizController.getAttempt));
 
-// quizzes — putting one student's sitting right. Staff only: both of these
-// rewrite an exam record, and `reopen` hands out a fresh deadline that the quiz
+// quizzes — putting one student's sitting right. Staff only: every one of these
+// rewrites an exam record, and `reopen` hands out a fresh deadline that the quiz
 // window would otherwise refuse.
 classRouter.post("/attempts/:attemptId/reopen", requireTeacher, asyncRoute(quizController.reopenAttempt));
 classRouter.delete("/attempts/:attemptId", requireTeacher, asyncRoute(quizController.deleteAttempt));
+// Correcting the paper itself after a cohort has sat it, and re-marking them
+// all against it. Teacher-only rather than collaborator-editable: a quiz
+// collaborator may edit the paper, but moving marks that have already been
+// released to a class is the class staff's call.
+classRouter.patch("/quizzes/:quizId/answer-key", requireTeacher, asyncRoute(quizController.updateAnswerKey));
+classRouter.post("/quizzes/:quizId/regrade", requireTeacher, asyncRoute(quizController.regradeQuiz));
 
 // quizzes — analytics
 classRouter.get("/quizzes/:quizId/results", requireTeacher, asyncRoute(quizController.getQuizResults));

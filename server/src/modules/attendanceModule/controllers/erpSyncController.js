@@ -480,24 +480,24 @@ function rollSetsEqual(a, b) {
 }
 
 // Same scan the xlsx upload flow uses (embeddingController.uploadRollNosXlsx):
-// a roll is "missed" when no ground_truth/{batch}/{roll} folder exists —
-// across all batch folders when instituteWise, else dept-matching ones only.
-function computeMissedGroundTruth(rollNos, dept, instituteWise) {
+// a roll is "missed" when no ground_truth/{batch}/{roll} folder exists.
+// Always scans every batch folder — dept-scoped filtering was dropped because
+// Subject.dept is frequently blank or doesn't literally match the batch
+// folder name, which silently marked every roll as missing unless Institute
+// Wise was ticked.
+function computeMissedGroundTruth(rollNos) {
     if (!fs.existsSync(GROUND_TRUTH_DIR)) return [...rollNos];
     const allBatches = fs.readdirSync(GROUND_TRUTH_DIR);
-    const batches = instituteWise
-        ? allBatches
-        : allBatches.filter(b => b.toUpperCase().includes((dept || '').toUpperCase()));
     const missed = [];
     for (const rollNo of rollNos) {
-        const found = batches.some(batch =>
+        const found = allBatches.some(batch =>
             fs.existsSync(path.join(GROUND_TRUTH_DIR, batch, rollNo)));
         if (!found) missed.push(rollNo);
     }
     return missed;
 }
 
-async function syncSubjectRolls(subject, instituteWise, isFirstYear = false, degreeOverride = null) {
+async function syncSubjectRolls(subject, isFirstYear = false, degreeOverride = null) {
     const previousRollNos = subject.enrolledRollNos || [];
     const { rollNos, faculty: erpFaculty } = await fetchRollsFromErp(subject, degreeOverride);
     if (rollNos.length === 0) {
@@ -508,10 +508,7 @@ async function syncSubjectRolls(subject, instituteWise, isFirstYear = false, deg
     // regeneration entirely when nothing actually changed since last sync.
     const rollsChanged = !rollSetsEqual(previousRollNos, rollNos);
 
-    // First-year subjects always scan institute-wide — their students' GT
-    // folders never live under the teaching department's batch folders.
-    const effectiveInstituteWise = instituteWise || isFirstYear;
-    const missedGroundTruth = computeMissedGroundTruth(rollNos, subject.dept, effectiveInstituteWise);
+    const missedGroundTruth = computeMissedGroundTruth(rollNos);
 
     // Faculty cross-check against the timetable module (sem + abbreviation);
     // first-year subjects match on the derived student semester (1/2), since
@@ -813,8 +810,8 @@ async function listSubjects(req, res) {
 }
 
 // POST /erp-sync/fetch-rolls
-//   { subjectId, instituteWise, degree?, dept? }            — backed by a Subject
-//   { dept, sem, abbreviation, instituteWise, degree? }     — timetable only
+//   { subjectId, degree?, dept? }            — backed by a Subject
+//   { dept, sem, abbreviation, degree? }     — timetable only
 //
 // Two shapes, because the ERP needs no Subject document: department + semester
 // + abbreviation fully specify a roster request, and the timetable supplies
@@ -835,7 +832,7 @@ async function fetchRolls(req, res) {
         if (!erpConfigured()) {
             return res.status(503).json({ error: 'ERP_PORTAL_KEY not configured on the server.' });
         }
-        const { subjectId, instituteWise, degree, dept, sem, abbreviation } = req.body;
+        const { subjectId, degree, dept, sem, abbreviation } = req.body;
         const hasRealSubject = subjectId && mongoose.Types.ObjectId.isValid(subjectId);
 
         if (hasRealSubject) {
@@ -850,7 +847,7 @@ async function fetchRolls(req, res) {
 
             const firstYearCodes = await getFirstYearCodes();
             const isFirstYear = firstYearCodes.has(subject.code);
-            const result = await syncSubjectRolls(subject, !!instituteWise, isFirstYear, degree);
+            const result = await syncSubjectRolls(subject, isFirstYear, degree);
             return res.json({ ...result, persisted: true });
         }
 
@@ -874,7 +871,7 @@ async function fetchRolls(req, res) {
                 error: 'ERP returned no roll numbers',
             });
         }
-        const missedGroundTruth = computeMissedGroundTruth(rollNos, dept, !!instituteWise);
+        const missedGroundTruth = computeMissedGroundTruth(rollNos);
         return res.json({
             ok: true,
             subject: abbreviation,
@@ -894,7 +891,7 @@ async function fetchRolls(req, res) {
     }
 }
 
-// POST /erp-sync/fetch-rolls-bulk  { dept, sem?, instituteWise, degree? }
+// POST /erp-sync/fetch-rolls-bulk  { dept, sem?, degree? }
 // sem optional — omitted syncs every semester's subjects for the department.
 // Sequential on purpose — kinder to the ERP server than a parallel burst.
 async function fetchRollsBulk(req, res) {
@@ -902,7 +899,7 @@ async function fetchRollsBulk(req, res) {
         if (!erpConfigured()) {
             return res.status(503).json({ error: 'ERP_PORTAL_KEY not configured on the server.' });
         }
-        const { dept, sem, instituteWise, degree } = req.body;
+        const { dept, sem, degree } = req.body;
         if (!dept) return res.status(400).json({ error: 'dept is required' });
 
         // Same subject set the tab lists — dept-owned subjects plus
@@ -913,7 +910,7 @@ async function fetchRollsBulk(req, res) {
         for (const subject of subjects) {
             try {
                 results.push(await syncSubjectRolls(
-                    subject, !!instituteWise, !!subject.__isFirstYear, degree));
+                    subject, !!subject.__isFirstYear, degree));
             } catch (err) {
                 results.push({
                     subjectId: subject._id,
@@ -930,7 +927,7 @@ async function fetchRollsBulk(req, res) {
 }
 
 // POST /attendancemodule/embeddings/erp-rolls
-//   { subjectId?, degree?, department?, semester?, abbreviation?, instituteWise? }
+//   { subjectId?, degree?, department?, semester?, abbreviation? }
 //
 // Backs the Embedding Generation page's Manual Generation tab, which uses it
 // to fill the roll-number textarea from the ERP. The four ERP fields default
@@ -951,7 +948,7 @@ async function previewRolls(req, res) {
         if (!erpConfigured()) {
             return res.status(503).json({ error: 'ERP_PORTAL_KEY not configured on the server.' });
         }
-        const { subjectId, degree, department, semester, abbreviation, instituteWise } = req.body;
+        const { subjectId, degree, department, semester, abbreviation } = req.body;
 
         // Overrides ride on a copy of the Subject so buildErpPayload sees them,
         // while _id (and so the persistence target) stays intact.
@@ -997,7 +994,7 @@ async function previewRolls(req, res) {
 
         const firstYearCodes = await getFirstYearCodes();
         const isFirstYear = firstYearCodes.has(subject.code);
-        const result = await syncSubjectRolls(subject, !!instituteWise, isFirstYear, degree);
+        const result = await syncSubjectRolls(subject, isFirstYear, degree);
         if (!result.ok) return res.status(502).json({ error: result.error });
 
         res.json({
