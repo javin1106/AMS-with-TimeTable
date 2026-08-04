@@ -887,13 +887,25 @@ export default function QuizEditor() {
                   </Text>
                 </Box>
 
-                <Checkbox
-                  size="sm"
-                  isChecked={settings.preventMobile}
-                  onChange={(e) => setSetting('preventMobile', e.target.checked)}
-                >
-                  Block mobile devices (checked server-side on start)
-                </Checkbox>
+                {/* Named honestly. The check is on the User-Agent string, which
+                    a browser chooses for itself and any student can change from
+                    the devtools device toolbar in one click. It turns away the
+                    student who wandered in on a phone; it stops nobody who does
+                    not want to be stopped. Promising otherwise is worse than the
+                    gap, because a teacher plans around the promise. */}
+                <Box>
+                  <Checkbox
+                    size="sm"
+                    isChecked={settings.preventMobile}
+                    onChange={(e) => setSetting('preventMobile', e.target.checked)}
+                  >
+                    Discourage mobile devices
+                  </Checkbox>
+                  <Text fontSize="xs" opacity={0.6} ml={6}>
+                    Turns away phones that identify themselves as phones. Trivially bypassed — treat it as a
+                    nudge, not a control.
+                  </Text>
+                </Box>
                 <Checkbox
                   size="sm"
                   isChecked={settings.disableCopyPaste}

@@ -420,9 +420,15 @@ export default function QuizBrief() {
                   else before you start, and turn off anything that can pop up over the screen.
                 </ListItem>
                 <ListItem>• Every one of these events is recorded on your attempt for your teacher.</ListItem>
+                <ListItem>
+                  • The clock is kept by the server. Closing the tab does not pause it, and the test
+                  is submitted for you when the time runs out.
+                </ListItem>
                 {settings.disableCopyPaste && <ListItem>• Copy and paste are disabled.</ListItem>}
                 {settings.disableRightClick && <ListItem>• Right-click is disabled.</ListItem>}
-                {settings.preventMobile && <ListItem>• Mobile devices are not permitted.</ListItem>}
+                {settings.preventMobile && (
+                  <ListItem>• Please sit this on a laptop or desktop, not a phone.</ListItem>
+                )}
               </List>
             </Box>
           </SectionCard>

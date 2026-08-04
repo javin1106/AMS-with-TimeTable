@@ -270,6 +270,7 @@ export default function QuizAttempt() {
     settings: settings || {},
     active: sitting,
     onViolation: (type) => lmApi.recordViolation(classId, attemptId, type),
+    onHeartbeat: () => lmApi.heartbeat(classId, attemptId),
     onTerminated: async () => {
       finishedRef.current = true;
       const finished = await lmApi.getAttempt(classId, attemptId).catch(() => null);

@@ -243,6 +243,11 @@ const lmApi = {
     request(`/classes/${classId}/attempts/${attemptId}/save`, { method: 'POST', body: { answers } }),
   recordViolation: (classId, attemptId, type) =>
     request(`/classes/${classId}/attempts/${attemptId}/violation`, { method: 'POST', body: { type } }),
+  // Sent on a timer while a paper is open. Its absence is the signal — a client
+  // that has had its reporting blocked stops sending these, and the server notes
+  // the silence.
+  heartbeat: (classId, attemptId) =>
+    request(`/classes/${classId}/attempts/${attemptId}/heartbeat`, { method: 'POST', body: {} }),
   submitAttempt: (classId, attemptId, answers, expired = false) =>
     request(`/classes/${classId}/attempts/${attemptId}/submit`, {
       method: 'POST',

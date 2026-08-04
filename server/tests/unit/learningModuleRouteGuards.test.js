@@ -244,6 +244,7 @@ const STUDENT_REACHABLE = [
   [`POST ${C}/attempts/:attemptId/answer`, 'ownership checked in the handler'],
   [`POST ${C}/attempts/:attemptId/save`, 'ownership checked in the handler'],
   [`POST ${C}/attempts/:attemptId/violation`, 'the caller reporting on their own sitting'],
+  [`POST ${C}/attempts/:attemptId/heartbeat`, 'ownership checked; enforces the deadline server-side'],
   [`POST ${C}/attempts/:attemptId/submit`, 'ownership checked in the handler'],
 
   [`POST ${C}/notebook-attempts/:attemptId/submit`, 'ownership checked in the handler'],

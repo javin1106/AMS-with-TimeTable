@@ -743,6 +743,18 @@ exports.getCurrentQuestion = async (req, res) => {
     return exports.getCurrentQuestion(req, res);
   }
 
+  // Refuse to hand out another question after the paper has closed. Without
+  // this, reopening a stale tab resumed a sitting whose time was long gone.
+  noteDevice(attempt, req);
+  const timing = await enforceDeadline(attempt, quiz, req, question);
+  if (timing.expiredAttempt) {
+    return res.json({
+      done: true,
+      expired: true,
+      attempt: attemptForStudent(timing.expiredAttempt, quiz),
+    });
+  }
+
   // Stamp the serve time once per question, so the server-side clock cannot be
   // reset by reloading the page.
   const existing = attempt.responses.find((r) => String(r.questionId) === String(questionId));
@@ -768,6 +780,68 @@ exports.getCurrentQuestion = async (req, res) => {
 };
 
 /**
+ * Notes the machine an attempt is being driven from, and flags a change.
+ *
+ * Every request on an attempt goes through this. A User-Agent or IP that moves
+ * mid-sitting is the visible trace of the two things browser-side proctoring
+ * cannot see at all: a second device, and somebody talking to the API directly
+ * with a token lifted out of localStorage.
+ *
+ * Recorded, never enforced. A student legitimately moving from wifi to mobile
+ * data changes IP, and a browser that updates itself changes User-Agent, so
+ * blocking on this would fail honest people. It goes in front of the teacher
+ * instead.
+ */
+function noteDevice(attempt, req) {
+  const userAgent = String(req.get?.("User-Agent") || "").slice(0, 400);
+  const ip = String(req.ip || "").slice(0, 64);
+
+  if (!attempt.device) attempt.device = {};
+
+  const changes = [];
+  if (attempt.device.userAgent && userAgent && attempt.device.userAgent !== userAgent) {
+    changes.push("browser");
+  }
+  if (attempt.device.ip && ip && attempt.device.ip !== ip) changes.push("network");
+
+  if (!attempt.device.userAgent) attempt.device.userAgent = userAgent;
+  if (!attempt.device.ip) attempt.device.ip = ip;
+
+  if (changes.length) {
+    attempt.violations.push({
+      type: "device_changed",
+      at: new Date(),
+      detail: `${changes.join(" and ")} changed mid-attempt`,
+    });
+    // Track the latest, so a third change is noticed rather than compared
+    // against the original forever.
+    attempt.device.userAgent = userAgent || attempt.device.userAgent;
+    attempt.device.ip = ip || attempt.device.ip;
+  }
+}
+
+/**
+ * The one place the clock is enforced.
+ *
+ * Returns `{ expiredAttempt }` when the sitting is over — the caller must stop
+ * and hand that back rather than continuing — and `{ questionExpired }` when only
+ * the current question's clock has run out, in which case the answer is not
+ * counted but the paper carries on.
+ *
+ * Before this existed, `questionDeadline` was computed and *reported* to the
+ * client and never compared against anything: an answer posted an hour after the
+ * paper closed was accepted, and `submitAttempt` asked the client whether it had
+ * run out of time.
+ */
+async function enforceDeadline(attempt, quiz, req, question = null) {
+  const state = engine.deadlineState(quiz, attempt, question);
+  if (!state.attemptExpired) return state;
+
+  const finished = await finaliseAttempt(attempt, quiz, req, "expired");
+  return { ...state, expiredAttempt: finished };
+}
+
+/**
  * Records the answer to the current question and advances.
  *
  * Time spent is computed from the server's own serve timestamp, so a client
@@ -790,8 +864,31 @@ exports.answerAndAdvance = async (req, res) => {
   const direction = req.body.direction === "back" ? "back" : "forward";
   const questionId = attempt.questionOrder[attempt.cursor];
 
-  if (questionId) {
-    const question = quiz.questions.id(questionId);
+  const currentQuestion = questionId ? quiz.questions.id(questionId) : null;
+
+  noteDevice(attempt, req);
+  const timing = await enforceDeadline(attempt, quiz, req, currentQuestion);
+  if (timing.expiredAttempt) {
+    return res.json({
+      done: true,
+      expired: true,
+      attempt: attemptForStudent(timing.expiredAttempt, quiz),
+    });
+  }
+
+  // The question's own clock ran out. The paper continues, but this answer does
+  // not count — that is what a per-question limit means — and the attempt
+  // carries a note saying so.
+  if (timing.questionExpired) {
+    attempt.violations.push({
+      type: "late_answer",
+      at: new Date(),
+      detail: `answer for question ${attempt.cursor + 1} arrived after its time limit`,
+    });
+  }
+
+  if (questionId && !timing.questionExpired) {
+    const question = currentQuestion;
     const orders = optionOrderOf(attempt);
     const selected = engine.normaliseSelected(req.body.selected, orders[String(questionId)]);
     const now = new Date();
@@ -847,6 +944,19 @@ exports.saveAttemptDraft = async (req, res) => {
   }
 
   const quiz = await LmQuiz.findById(attempt.quizId).lean();
+
+  // An autosave after the paper closed is how a tab left open overnight used to
+  // keep writing answers.
+  noteDevice(attempt, req);
+  const timing = await enforceDeadline(attempt, quiz, req, null);
+  if (timing.expiredAttempt) {
+    return res.status(400).json({
+      message: "Time is up for this quiz — it has been submitted automatically.",
+      code: "EXPIRED",
+      attempt: attemptForStudent(timing.expiredAttempt, quiz),
+    });
+  }
+
   const orders = optionOrderOf(attempt);
   const allowed = new Set(attempt.questionOrder.map(String));
 
@@ -988,7 +1098,12 @@ exports.submitAttempt = async (req, res) => {
     });
   }
 
-  const reason = req.body.expired ? "expired" : "completed";
+  // Derived, not taken from the request. `req.body.expired` was the client
+  // telling the server whether it had run out of time, which made the whole
+  // timer advisory: submitting late as `expired: false` was recorded as a normal
+  // on-time completion.
+  const { attemptExpired } = engine.deadlineState(quiz, attempt, null);
+  const reason = attemptExpired ? "expired" : "completed";
   const finished = await finaliseAttempt(attempt, quiz, req, reason);
   const now = new Date();
   const reveal = engine.resultsVisible(quiz, now);
@@ -1827,4 +1942,157 @@ exports.exportResultsCsv = async (req, res) => {
 };
 
 exports.buildReview = buildReview;
+/* ─────────────────────── abandoned-attempt sweep ──────────────────────── */
+
+// How long a page may go without checking in before it is noted. Three missed
+// 30-second heartbeats, so a brief hiccup is not held against anybody.
+const HEARTBEAT_GRACE_MS = 95 * 1000;
+
+/**
+ * Records that a sitting stopped checking in.
+ *
+ * Deliberately a note and not a termination. The commonest cause is a student's
+ * wifi, and ending their paper for it would be worse than the problem. But it is
+ * also exactly what blocking the proctoring requests in devtools looks like,
+ * which until now was indistinguishable from flawless behaviour — so it is worth
+ * writing down where a teacher will see it.
+ *
+ * Latched with `heartbeatLostAt` so an hour offline is one violation rather than
+ * one per sweep.
+ */
+function noteHeartbeatLoss(attempt, now = new Date()) {
+  if (attempt.heartbeatLostAt) return false;
+  if (!attempt.lastSeenAt) return false;
+
+  const silentFor = now.getTime() - new Date(attempt.lastSeenAt).getTime();
+  if (silentFor < HEARTBEAT_GRACE_MS) return false;
+
+  attempt.heartbeatLostAt = now;
+  attempt.violations.push({
+    type: "heartbeat_lost",
+    at: now,
+    detail: `page stopped responding for ${Math.round(silentFor / 1000)}s`,
+  });
+  return true;
+}
+
+/**
+ * Finalises attempts whose time has run out but which nobody came back to.
+ *
+ * Closing the tab used to be a clean escape: the attempt stayed `in_progress`
+ * for ever, so it never scored, never appeared as a completed sitting, and left
+ * the student able to claim they were never marked. Nothing else in the system
+ * expires them, because every other check happens on a request the student
+ * chooses to make.
+ *
+ * Bounded per run so a backlog cannot stall the process, and it re-reads the
+ * quiz per attempt rather than trusting a cached copy, since a teacher may have
+ * changed the window in between.
+ */
+async function reapExpiredAttempts({ limit = 200, now = new Date() } = {}) {
+  const stale = await LmQuizAttempt.find({ status: "in_progress" })
+    .sort({ startedAt: 1 })
+    .limit(limit);
+
+  const quizCache = new Map();
+  let expired = 0;
+  let flagged = 0;
+
+  for (const attempt of stale) {
+    const key = String(attempt.quizId);
+    if (!quizCache.has(key)) {
+      // eslint-disable-next-line no-await-in-loop
+      quizCache.set(key, await LmQuiz.findById(attempt.quizId));
+    }
+    const quiz = quizCache.get(key);
+    // An attempt whose quiz has been deleted has no deadline to judge it by;
+    // leave it rather than guess.
+    if (!quiz) continue;
+
+    const { attemptExpired } = engine.deadlineState(quiz, attempt, null, now);
+
+    if (attemptExpired) {
+      // eslint-disable-next-line no-await-in-loop
+      await finaliseAttempt(attempt, quiz, { body: {} }, "expired");
+      expired += 1;
+      continue;
+    }
+
+    if (noteHeartbeatLoss(attempt, now)) {
+      flagged += 1;
+      // eslint-disable-next-line no-await-in-loop
+      await attempt.save();
+    }
+  }
+
+  return { scanned: stale.length, expired, flagged };
+}
+
+/**
+ * Starts the sweep on an interval.
+ *
+ * `unref` so the timer never holds the process open — a test run or a graceful
+ * shutdown should not wait on it. Interval is generous because nothing depends
+ * on the sweep for correctness: every path a student can take enforces the
+ * deadline itself, and this only catches the sittings nobody came back to.
+ */
+function startAttemptReaper({ intervalMs = 5 * 60 * 1000 } = {}) {
+  const timer = setInterval(() => {
+    reapExpiredAttempts().catch((error) => {
+      console.error("[LearningModule] attempt reaper", error.message);
+    });
+  }, intervalMs);
+  timer.unref?.();
+  return timer;
+}
+
+/* ─────────────────────────────── heartbeat ────────────────────────────── */
+
+/**
+ * The page saying it is still there.
+ *
+ * Cheap on purpose — it is called every thirty seconds per sitting student — so
+ * it writes two fields and answers with the deadline. It also enforces the
+ * deadline, which means a tab left running gets submitted at the right moment
+ * even if the student never touches it again.
+ */
+exports.heartbeat = async (req, res) => {
+  const attempt = await LmQuizAttempt.findOne({
+    _id: req.params.attemptId,
+    classId: req.lmClass._id,
+    studentId: req.lmUser.id,
+  });
+  if (!attempt) return res.status(404).json({ message: "Attempt not found." });
+  if (attempt.status !== "in_progress") {
+    return res.json({ status: attempt.status, finished: true });
+  }
+
+  const quiz = await LmQuiz.findById(attempt.quizId);
+  if (!quiz) return res.status(404).json({ message: "Quiz not found." });
+
+  noteDevice(attempt, req);
+  const timing = await enforceDeadline(attempt, quiz, req, null);
+  if (timing.expiredAttempt) {
+    return res.json({
+      status: timing.expiredAttempt.status,
+      finished: true,
+      expired: true,
+      attempt: attemptForStudent(timing.expiredAttempt, quiz),
+    });
+  }
+
+  const now = new Date();
+  // Cleared on return so a student who reconnects is not permanently marked; the
+  // violation already recorded stays, which is the part a teacher needs.
+  attempt.lastSeenAt = now;
+  attempt.heartbeatLostAt = null;
+  await attempt.save();
+
+  return res.json({ status: "in_progress", deadline: timing.deadline, serverTime: now });
+};
+
+exports.reapExpiredAttempts = reapExpiredAttempts;
+exports.startAttemptReaper = startAttemptReaper;
+exports.noteHeartbeatLoss = noteHeartbeatLoss;
+exports.HEARTBEAT_GRACE_MS = HEARTBEAT_GRACE_MS;
 exports.finaliseAttempt = finaliseAttempt;
