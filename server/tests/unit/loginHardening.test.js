@@ -19,7 +19,11 @@ const request = require('supertest');
 const bcrypt = require('bcryptjs');
 
 const User = require('../../src/models/usermanagement/user');
-const { applyAuthRateLimits, accountKey } = require('../../src/modules/usermanagement/loginRateLimit');
+const {
+  applyAuthRateLimits,
+  accountKey,
+  ceiling,
+} = require('../../src/modules/usermanagement/loginRateLimit');
 const { login } = require('../../src/modules/usermanagement/controllers/usercontroller');
 
 const PASSWORD = 'correct-horse-battery-staple';
@@ -245,6 +249,151 @@ describe('login — throttling', () => {
       codes.push(res.status);
     }
     expect(codes.every((code) => code === 200)).toBe(true);
+  });
+});
+
+describe('login — surviving a shared campus address', () => {
+  /**
+   * Every request in these tests comes from one address, which is the real
+   * deployment: the institute leaves through NAT, and the app sits behind a
+   * proxy. A per-IP limit that counts successes would turn a lecture theatre
+   * signing in together into an outage.
+   */
+
+  it('does not count successful sign-ins against the address', async () => {
+    stubLookup(userDoc());
+    const app = makeApp({ throttled: true });
+
+    // Comfortably past the failure ceiling, all from the same address.
+    const codes = [];
+    for (let i = 0; i < 40; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await request(app).post('/auth/login')
+        .send({ email: `student${i}@nitj.ac.in`, password: PASSWORD });
+      codes.push(res.status);
+    }
+
+    expect(codes).not.toContain(429);
+  });
+
+  it('still lets a bystander in after another account is ground down', async () => {
+    // The per-account limiter fires; the address limiter must not have picked up
+    // the collateral.
+    stubLookup(null);
+    const app = makeApp({ throttled: true });
+    for (let i = 0; i < 20; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await request(app).post('/auth/login')
+        .send({ email: 'victim@nitj.ac.in', password: 'guess' });
+    }
+
+    stubLookup(userDoc());
+    const bystander = await request(app).post('/auth/login')
+      .send({ email: 'asha@nitj.ac.in', password: PASSWORD });
+    expect(bystander.status).toBe(200);
+  });
+
+  it('does catch one host spraying many accounts', async () => {
+    // The case the per-account limiter is blind to: a single guess against each
+    // of many mailboxes. Driven with a low ceiling so the test does not have to
+    // send two hundred requests to prove the mechanism.
+    jest.resetModules();
+    const previous = process.env.AUTH_IP_FAILURE_LIMIT;
+    process.env.AUTH_IP_FAILURE_LIMIT = '4';
+    try {
+      // eslint-disable-next-line global-require
+      const fresh = require('../../src/modules/usermanagement/loginRateLimit');
+      const app = express();
+      app.use(express.json());
+      fresh.applyAuthRateLimits(app);
+      app.post('/auth/login', login);
+
+      stubLookup(null);
+      const codes = [];
+      for (let i = 0; i < 6; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const res = await request(app).post('/auth/login')
+          .send({ email: `spray${i}@nitj.ac.in`, password: 'guess' });
+        codes.push(res.status);
+      }
+
+      // Each account is on its first failure, so only the address limiter can
+      // have produced these.
+      expect(codes.slice(0, 4)).toEqual([401, 401, 401, 401]);
+      expect(codes.slice(4)).toEqual([429, 429]);
+    } finally {
+      if (previous === undefined) delete process.env.AUTH_IP_FAILURE_LIMIT;
+      else process.env.AUTH_IP_FAILURE_LIMIT = previous;
+      jest.resetModules();
+    }
+  });
+
+  it('turns the address limiter into a pass-through when disabled', async () => {
+    jest.resetModules();
+    const previous = process.env.AUTH_IP_FAILURE_LIMIT;
+    process.env.AUTH_IP_FAILURE_LIMIT = '0';
+    try {
+      // eslint-disable-next-line global-require
+      const fresh = require('../../src/modules/usermanagement/loginRateLimit');
+      const app = express();
+      app.use(express.json());
+      fresh.applyAuthRateLimits(app);
+      app.post('/auth/login', login);
+
+      stubLookup(null);
+      const codes = [];
+      for (let i = 0; i < 12; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const res = await request(app).post('/auth/login')
+          .send({ email: `spray${i}@nitj.ac.in`, password: 'guess' });
+        codes.push(res.status);
+      }
+      // Every account is on its first failure and the address limit is off, so
+      // nothing should throttle.
+      expect(codes).not.toContain(429);
+    } finally {
+      if (previous === undefined) delete process.env.AUTH_IP_FAILURE_LIMIT;
+      else process.env.AUTH_IP_FAILURE_LIMIT = previous;
+      jest.resetModules();
+    }
+  });
+});
+
+describe('rate-limit ceilings from the environment', () => {
+  /**
+   * These exist so that a limit which turns out to be wrong for the institute
+   * can be lifted with a restart rather than a deploy.
+   */
+  const withEnv = (value, run) => {
+    const previous = process.env.TEST_CEILING;
+    if (value === undefined) delete process.env.TEST_CEILING;
+    else process.env.TEST_CEILING = value;
+    try {
+      run();
+    } finally {
+      if (previous === undefined) delete process.env.TEST_CEILING;
+      else process.env.TEST_CEILING = previous;
+    }
+  };
+
+  it('falls back when unset or blank', () => {
+    withEnv(undefined, () => expect(ceiling('TEST_CEILING', 42)).toBe(42));
+    withEnv('', () => expect(ceiling('TEST_CEILING', 42)).toBe(42));
+  });
+
+  it('reads a number', () => {
+    withEnv('150', () => expect(ceiling('TEST_CEILING', 42)).toBe(150));
+  });
+
+  it('treats zero as no limit', () => {
+    // Null is the signal the limiter turns into a pass-through.
+    withEnv('0', () => expect(ceiling('TEST_CEILING', 42)).toBeNull());
+  });
+
+  it('ignores nonsense rather than disabling the limit by accident', () => {
+    // A typo'd env var must not silently switch a protection off.
+    withEnv('abc', () => expect(ceiling('TEST_CEILING', 42)).toBe(42));
+    withEnv('-5', () => expect(ceiling('TEST_CEILING', 42)).toBe(42));
   });
 });
 

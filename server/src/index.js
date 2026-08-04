@@ -34,6 +34,30 @@ if (!process.env.MONGO_URL || !process.env.JWT_SECRET) {
   console.warn('ENV CHECK: MONGO_URL and/or JWT_SECRET are NOT set — check the server .env');
 }
 
+// Where the app's own proxy is, so that req.ip is the client rather than the
+// load balancer.
+//
+// Off by default, and deliberately: trusting a proxy that is not there means
+// trusting whatever X-Forwarded-For a caller sends, which makes every per-IP
+// limit bypassable by adding a header. Left unset, req.ip is the socket peer —
+// honest, but a single value for all traffic once there *is* a proxy in front,
+// which is why nothing security-critical is keyed on it (see loginRateLimit.js).
+//
+// Set TRUST_PROXY to the number of proxies in front of this app (usually `1`),
+// or to a list Express understands, e.g. `loopback, 10.0.0.0/8`.
+if (process.env.TRUST_PROXY) {
+  const raw = process.env.TRUST_PROXY.trim();
+  const hops = Number(raw);
+  app.set("trust proxy", Number.isFinite(hops) ? hops : raw);
+} else {
+  // Said once at boot rather than per request: it is a deployment fact, and the
+  // per-request version of this warning is pure log noise.
+  console.warn(
+    "TRUST_PROXY is not set — req.ip is the socket peer, so per-IP rate limits and " +
+      "logged addresses will show the proxy, not the client.",
+  );
+}
+
 // Security headers
 app.use(helmet({
   contentSecurityPolicy: false,
