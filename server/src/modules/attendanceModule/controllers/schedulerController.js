@@ -47,9 +47,10 @@ function currentSession() {
   return `${start}-${String(start + 1).slice(2)}`;
 }
 
-// Merge per-student status across multiple ML runs according to presentLogic
-// (any_run | all_runs | first_run | majority). Returns { attendance, summary }.
-function mergeRunResults(runResults, presentLogic) {
+// Merge per-student status across multiple ML runs. A student is Present if
+// detected as present in at least minRunsPresent of the runs (out of the
+// total runs actually completed). Returns { attendance, summary }.
+function mergeRunResults(runResults, minRunsPresent) {
   const rollMap = {};
   for (const r of runResults) {
     for (const [rollNo, data] of Object.entries(r.attendance || {})) {
@@ -60,11 +61,7 @@ function mergeRunResults(runResults, presentLogic) {
     attendance: Object.fromEntries(
       Object.entries(rollMap).map(([rollNo, entries]) => {
         const presentCount = entries.filter((e) => e.status === 'present').length;
-        const isPresent =
-          presentLogic === 'any_run'   ? presentCount > 0 :
-          presentLogic === 'all_runs'  ? presentCount === entries.length :
-          presentLogic === 'first_run' ? entries[0].status === 'present' :
-          /* majority */                  presentCount > entries.length / 2;
+        const isPresent = presentCount >= minRunsPresent;
         const best = entries.reduce((p, c) => (c.avg_confidence > p.avg_confidence ? c : p), entries[0]);
         return [rollNo, { ...best, status: isPresent ? 'present' : (entries.some(e => e.status === 'review') ? 'review' : 'absent') }];
       }),
@@ -307,14 +304,16 @@ async function runRoom({ room, roomOverride, slot, date, config }) {
   const periodCfg = (config.periods || []).find((p) => p.periodKey === slot) || {};
   const numRuns = config.globalNumRuns ?? 1;
   const runDurationSec = config.globalRunDurationSec ?? 120;
-  const presentLogic = config.globalPresentLogic ?? 'majority';
+  // Clamp to numRuns — a stale/higher setting can't require more runs than
+  // will actually happen this period.
+  const minRunsPresent = Math.min(config.globalMinRunsPresent ?? 1, numRuns);
   const startMin = timeStrToMin(periodCfg.startTime);
   const endMin   = timeStrToMin(periodCfg.endTime);
   const periodDurationMin = endMin > startMin ? endMin - startMin : 50;
   const checkIntervalMin = numRuns > 1 ? Math.max(1, Math.floor(periodDurationMin / numRuns)) : 0;
 
   // 6. Call Python ML service — numRuns times, checkIntervalMin apart
-  push(`Plan: ${numRuns} run(s), ${runDurationSec}s each, ${checkIntervalMin}min apart, logic=${presentLogic}`);
+  push(`Plan: ${numRuns} run(s), ${runDurationSec}s each, ${checkIntervalMin}min apart, present if seen in >=${minRunsPresent}/${numRuns} runs`);
   // Shadow comparisons (diagnostic only) fire once per period — on the run
   // nearest the middle of the numRuns runs. Which models run (and which is
   // the PRIMARY decision-maker) is decided Python-side by
@@ -379,8 +378,8 @@ async function runRoom({ room, roomOverride, slot, date, config }) {
     return { room, status: 'error', reason: 'All ML runs failed', ctx, cameras, pkl, log };
   }
 
-  // Merge per-student status across runs according to presentLogic
-  const mlResult = mergeRunResults(runResults, presentLogic);
+  // Merge per-student status across runs according to minRunsPresent
+  const mlResult = mergeRunResults(runResults, minRunsPresent);
 
 
   // 8. Save report

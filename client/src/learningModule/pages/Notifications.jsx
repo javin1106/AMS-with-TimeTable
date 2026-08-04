@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Badge, Box, Button, Flex, HStack, Heading, IconButton, Text } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
-import { EmptyState, ErrorState, Loading } from '../components/common';
+import { buttonTextStyles, EmptyState, ErrorState, Loading } from '../components/common';
 import { relativeTime } from '../format';
 
 const TYPE_ICONS = {
@@ -108,6 +108,7 @@ export default function Notifications() {
               minW={0}
               textAlign="left"
               onClick={() => open(notification)}
+              {...buttonTextStyles}
             >
               <Text fontSize="sm" fontWeight={notification.read ? '500' : '700'}>
                 {notification.title}

@@ -807,6 +807,57 @@ const onDiscussion = ({ req, discussion, at = new Date() }) =>
   });
 
 /**
+ * A forum topic withdrawn or removed — undoes the points `onDiscussion` paid,
+ * if any were paid. Deleting the ledger row rather than leaving it standing:
+ * the discussion itself no longer exists for anyone to see, so a leaderboard
+ * entry claiming credit for it would be a total nobody could explain, which is
+ * the one thing the ledger design promises never to be. Freeing the `refId`
+ * this way is also safe — a discussion, once removed, cannot be un-removed to
+ * earn it again.
+ */
+const onDiscussionRemoved = ({ discussion }) =>
+  safely(async () => {
+    await LmPoints.deleteOne({
+      classId: discussion.classId,
+      studentId: discussion.authorId,
+      kind: "comment",
+      refId: discussion._id,
+    });
+
+    // "Opened The Floor" is earned at three started discussions still on the
+    // board; removing one can take the count back under that line, and a
+    // badge nobody can reproduce from the profile that supposedly earned it
+    // is worse than not having it.
+    const started = await LmPoints.countDocuments({
+      classId: discussion.classId,
+      studentId: discussion.authorId,
+      kind: "comment",
+      reason: /^Started "/,
+    });
+    if (started < 3) {
+      await LmBadge.deleteOne({
+        classId: discussion.classId,
+        studentId: discussion.authorId,
+        badge: "opened-the-floor",
+      });
+    }
+
+    // "Went Viral" is earned by one specific discussion, and there is only
+    // ever one on a student's record (the badge index is unique per
+    // classId+studentId+badge) — so if it exists and its frozen detail names
+    // *this* thread, it goes with it rather than outliving the thread it was
+    // about.
+    const viral = await LmBadge.findOne({
+      classId: discussion.classId,
+      studentId: discussion.authorId,
+      badge: "went-viral",
+    }).lean();
+    if (viral && viral.detail.startsWith(`"${discussion.title}" — `)) {
+      await LmBadge.deleteOne({ _id: viral._id });
+    }
+  });
+
+/**
  * A thread of somebody's reached twenty replies.
  *
  * Awarded to the *author*, not the replier — the badge is for having asked
@@ -1220,5 +1271,6 @@ module.exports = {
   onShortAnswer,
   onComment,
   onDiscussion,
+  onDiscussionRemoved,
   onDiscussionPopular,
 };

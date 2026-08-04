@@ -386,8 +386,9 @@ export default function QuizBrief() {
                 You get <b>one attempt</b> — once you submit, this test cannot be taken again.
               </ListItem>
               <ListItem>
-                <ListIcon as="span">🏁</ListIcon>
-                Pass mark: {settings.passPercent}%.
+                <ListIcon as="span">🖥️</ListIcon>
+                The test runs in <b>fullscreen only</b>. Leaving fullscreen, or switching to another
+                tab, window or application, <b>submits your test immediately</b>.
               </ListItem>
               {settings.allowCalculator !== false && (
                 <ListItem>
@@ -403,35 +404,33 @@ export default function QuizBrief() {
               )}
             </List>
 
-            {(!settings.allowTabChange || settings.disableCopyPaste || settings.disableRightClick || settings.requireFullscreen || settings.preventMobile) && (
-              <Box mt={4} p={3} bg="orange.50" borderRadius="md" borderWidth="1px" borderColor="orange.200">
-                <Text fontSize="sm" fontWeight="600" mb={1}>
-                  Monitored conditions
-                </Text>
-                <List spacing={1} fontSize="xs">
-                  {!settings.allowTabChange && (
-                    <ListItem>
-                      • Leaving this tab or window
-                      {settings.requireFullscreen ? ', or leaving fullscreen,' : ''} is recorded. You may
-                      do so at most {settings.maxTabSwitches} time(s)
-                      {settings.autoSubmitOnTabLimit
-                        ? ' — beyond that your test is submitted automatically.'
-                        : '.'}
-                    </ListItem>
-                  )}
-                  {settings.requireFullscreen && (
-                    <ListItem>
-                      • The test runs in fullscreen — leaving it stops the paper until you return.
-                    </ListItem>
-                  )}
-                  {settings.disableCopyPaste && <ListItem>• Copy and paste are disabled.</ListItem>}
-                  {settings.disableRightClick && <ListItem>• Right-click is disabled.</ListItem>}
-                  {settings.preventMobile && (
-                    <ListItem>• Please sit this on a laptop or desktop, not a phone.</ListItem>
-                  )}
-                </List>
-              </Box>
-            )}
+            {/* Always shown: leaving the test now ends it on the first offence,
+                so the rule is never conditional on how the paper was set up. */}
+            <Box mt={4} p={3} bg="orange.50" borderRadius="md" borderWidth="1px" borderColor="orange.200">
+              <Text fontSize="sm" fontWeight="600" mb={1}>
+                Monitored conditions
+              </Text>
+              <List spacing={1} fontSize="xs">
+                <ListItem>
+                  • The test is taken in fullscreen. Pressing Escape, or otherwise leaving fullscreen,
+                  submits your test at once — there is no warning and no second chance.
+                </ListItem>
+                <ListItem>
+                  • Switching to another tab, window or application does the same. Close everything
+                  else before you start, and turn off anything that can pop up over the screen.
+                </ListItem>
+                <ListItem>• Every one of these events is recorded on your attempt for your teacher.</ListItem>
+                <ListItem>
+                  • The clock is kept by the server. Closing the tab does not pause it, and the test
+                  is submitted for you when the time runs out.
+                </ListItem>
+                {settings.disableCopyPaste && <ListItem>• Copy and paste are disabled.</ListItem>}
+                {settings.disableRightClick && <ListItem>• Right-click is disabled.</ListItem>}
+                {settings.preventMobile && (
+                  <ListItem>• Please sit this on a laptop or desktop, not a phone.</ListItem>
+                )}
+              </List>
+            </Box>
           </SectionCard>
 
           {hasInstructions && (

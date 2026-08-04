@@ -59,7 +59,7 @@ describe('learningModule useProctoring', () => {
   it('tracks fullscreen even before a sitting is active', () => {
     setFullscreen(true);
     const { result } = renderHook(() =>
-      useProctoring({ settings: { requireFullscreen: true }, active: false }),
+      useProctoring({ settings: {}, active: false }),
     );
     expect(result.current.isFullscreen).toBe(true);
 
@@ -72,7 +72,7 @@ describe('learningModule useProctoring', () => {
     const onViolation = vi.fn().mockResolvedValue({});
     const { rerender, result } = renderHook(
       ({ active }) =>
-        useProctoring({ settings: { requireFullscreen: true }, active, onViolation }),
+        useProctoring({ settings: {}, active, onViolation }),
       { initialProps: { active: false } },
     );
 
@@ -84,5 +84,27 @@ describe('learningModule useProctoring', () => {
     rerender({ active: true });
     setFullscreen(false);
     expect(onViolation).toHaveBeenCalledWith('fullscreen_exit');
+  });
+
+  /**
+   * Leaving is no longer a per-quiz option, so the empty settings object below
+   * is the point of the test: a paper that configures nothing is still locked
+   * down, because the server ends the attempt on the first departure and the
+   * report is what tells it one happened.
+   */
+  it('reports leaving the tab and the window on a paper that configures nothing', () => {
+    const onViolation = vi.fn().mockResolvedValue({});
+    renderHook(() => useProctoring({ settings: {}, active: true, onViolation }));
+
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(onViolation).toHaveBeenCalledWith('tab_switch');
+
+    act(() => {
+      window.dispatchEvent(new Event('blur'));
+    });
+    expect(onViolation).toHaveBeenCalledWith('blur');
   });
 });

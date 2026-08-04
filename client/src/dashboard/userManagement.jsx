@@ -60,6 +60,7 @@ const ROLE_OPTIONS = [
   { value: 'dm-admin', label: 'Diabetics Module Admin' },
   { value: 'iams-admin', label: 'iLEED Admin' },
   { value: 'iams-dept-admin', label: 'iLEED Department Admin' },
+  { value: 'lm-admin', label: 'LM Admin' },
 ];
 
 const userEmails = (user) =>

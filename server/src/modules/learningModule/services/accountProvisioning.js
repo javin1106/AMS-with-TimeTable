@@ -122,32 +122,14 @@ async function provisionAccounts({
 
       notifyUserCreated(user);
 
-      // Awaited, and its answer kept: this mail carries the set-password link,
-      // so an account whose welcome mail never left is an account nobody can
-      // sign in to. The invite screen reports it rather than showing the
-      // teacher a clean "account created".
-      // eslint-disable-next-line no-await-in-loop
-      const mailed = await sendWelcomeEmail({
-        email,
-        frontendBase,
-        // Matches the banner on the invite mail (notifyService), so both routes
-        // into a class are topped identically.
-        banner: 'Welcome to XCEED Learning!',
-        heading: `You have been added to ${klass?.name || 'a class'}`,
-        // No class code here on purpose: this account was created for this
-        // exact address and enrolled as active in the same request, so there is
-        // nothing left to join manually. Offering a code only prompts "do I
-        // need to enter this?".
-        intro: `<p>${esc(invitedByName)} added you to the class
-                  <strong>${esc(klass?.name || '')}</strong>${klass?.section ? ` (${esc(klass.section)})` : ''}
-                  on the XCEED platform (NIT Jalandhar), and created an account for you with the
-                  role <strong>${platformRole}</strong>.</p>
-                <p>Once you have set your password, open the <strong>Learning</strong> module —
-                  the class is already on your dashboard.</p>`,
-        accountCreated: true,
-      });
-
-      results.set(email, { user, created: true, roleAdded: true, mailed });
+      // The welcome mail — the one that carries the set-password link — is
+      // sent by the caller afterwards, in the background (see
+      // sendWelcomeMailFor() below and memberController.inviteMembers).
+      // Provisioning must return fast even when SMTP is slow or unreachable:
+      // this used to await the send here, so inviting a class of sixty people
+      // held the request open for as long as sixty mail attempts took, and
+      // the teacher just saw the button spin.
+      results.set(email, { user, created: true, roleAdded: true });
     } catch (error) {
       // A duplicate here means a concurrent invite won the race — re-read
       // rather than reporting a failure the teacher can do nothing about.
@@ -167,4 +149,33 @@ async function provisionAccounts({
   return results;
 }
 
-module.exports = { provisionAccounts, roleForClassRole, isValidEmail, GRANTABLE_ROLES };
+/**
+ * The welcome mail for a freshly provisioned account, split out of
+ * provisionAccounts() so it can be sent after the invite response has
+ * already gone back to the teacher, instead of holding the request open.
+ *
+ * @returns {Promise<boolean>} whether the mail actually left
+ */
+async function sendWelcomeMailFor({ email, klass, invitedByName = 'A teacher', frontendBase, platformRole }) {
+  return sendWelcomeEmail({
+    email,
+    frontendBase,
+    // Matches the banner on the invite mail (notifyService), so both routes
+    // into a class are topped identically.
+    banner: 'Welcome to XCEED Learning!',
+    heading: `You have been added to ${klass?.name || 'a class'}`,
+    // No class code here on purpose: this account was created for this exact
+    // address and enrolled as active in the same request, so there is
+    // nothing left to join manually. Offering a code only prompts "do I need
+    // to enter this?".
+    intro: `<p>${esc(invitedByName)} added you to the class
+              <strong>${esc(klass?.name || '')}</strong>${klass?.section ? ` (${esc(klass.section)})` : ''}
+              on the XCEED platform (NIT Jalandhar), and created an account for you with the
+              role <strong>${platformRole}</strong>.</p>
+            <p>Once you have set your password, open the <strong>Learning</strong> module —
+              the class is already on your dashboard.</p>`,
+    accountCreated: true,
+  });
+}
+
+module.exports = { provisionAccounts, roleForClassRole, isValidEmail, GRANTABLE_ROLES, sendWelcomeMailFor };

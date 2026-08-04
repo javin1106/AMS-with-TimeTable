@@ -37,19 +37,13 @@ const clock = (seconds) => {
 /**
  * What leaving the test screen costs, in the student's own terms.
  *
- * Spelled out at the moment they leave rather than only in the brief they read
- * ten minutes ago: a student who has just pressed Escape is the one person who
- * needs the number, and "this is recorded" on its own never tells them that a
- * submit is coming. Returns null when the paper does not police leaving.
+ * Spelled out on the sitting itself rather than only in the brief they read ten
+ * minutes ago: it is the one rule that ends the paper without warning, so it is
+ * said wherever a student can still act on it.
  */
-function leavingCost(settings, tabSwitches = 0) {
-  if (!settings || settings.allowTabChange) return null;
-  const budget = settings.maxTabSwitches || 0;
-  const left = Math.max(0, budget - tabSwitches);
-  return settings.autoSubmitOnTabLimit
-    ? `Leaving fullscreen, or switching to another window or tab, is recorded. You may do so ${budget} time(s) in all — ${left} left — and after that your test is submitted automatically.`
-    : `Leaving fullscreen, or switching to another window or tab, is recorded and shown to your teacher. You have done so ${tabSwitches} time(s).`;
-}
+const LEAVING_COST =
+  'Leaving fullscreen, or switching to another window, tab or application, submits your test ' +
+  'immediately. There are no warnings and no allowance.';
 
 /** Answer widget shared by both delivery modes. */
 function AnswerInput({ question, value, onChange, isDisabled }) {
@@ -384,7 +378,6 @@ export default function QuizAttempt() {
 
   const inFullscreen = proctoring.isFullscreen;
   const finished = Boolean(result) && Boolean(attempt) && attempt.status !== 'in_progress';
-  const leftFullscreenCost = leavingCost(settings, proctoring.tabSwitches);
 
   // The screen is handed back by leaving, not by submitting: the stage drops
   // fullscreen when it unmounts, so the result is read on the same canvas the
@@ -473,24 +466,23 @@ export default function QuizAttempt() {
         )}
       </Box>
     );
-  } else if (settings?.requireFullscreen && !inFullscreen) {
+  } else if (!inFullscreen) {
     /* ---- fullscreen gate ----
-       Normally never seen: the stage takes fullscreen on the brief and holds it
-       through to here. It is what is left when the browser refused — a cold tab
-       with no user gesture behind it, or a student who pressed Escape. */
+       What is left when the browser refused fullscreen — a cold tab with no
+       user gesture behind it, or a reload. A student who *left* fullscreen mid
+       sitting does not land here: that submits the paper, and the finished
+       branch above catches them first. */
     content = (
       <SectionCard title="Fullscreen required">
-        {leftFullscreenCost && (
-          <Alert status="error" borderRadius="md" mb={4}>
-            <AlertIcon />
-            <Box>
-              <Text fontWeight="600">You have left fullscreen</Text>
-              <Text fontSize="sm">{leftFullscreenCost}</Text>
-            </Box>
-          </Alert>
-        )}
+        <Alert status="warning" borderRadius="md" mb={4}>
+          <AlertIcon />
+          <Box>
+            <Text fontWeight="600">This test is taken in fullscreen only</Text>
+            <Text fontSize="sm">{LEAVING_COST}</Text>
+          </Box>
+        </Alert>
         <Text fontSize="sm" color="gray.600" mb={4}>
-          This test must be taken in fullscreen. Your clock is still running — go back in to carry on.
+          Your clock is still running — go back into fullscreen to carry on.
         </Text>
         <Button colorScheme="purple" onClick={requestQuizFullscreen}>
           Enter fullscreen and continue
@@ -540,11 +532,7 @@ export default function QuizAttempt() {
               )}
             </Box>
             <HStack>
-              {proctoring.remaining !== null && proctoring.remaining !== undefined && (
-                <Badge colorScheme={proctoring.remaining > 0 ? 'orange' : 'red'}>
-                  {proctoring.remaining} exit(s) left
-                </Badge>
-              )}
+              <Badge colorScheme="red">Fullscreen only</Badge>
               {remaining !== null && (
                 <Badge
                   colorScheme={remaining < 30 ? 'red' : remaining < 120 ? 'orange' : 'green'}
@@ -621,26 +609,13 @@ export default function QuizAttempt() {
           )}
         </Box>
 
-        {/* The paper does not demand fullscreen — the gate above never fires —
-            but pressing Escape still drops the student out of the screen they
-            were told to sit the test on, so it is said out loud rather than
-            passing silently, with what it costs when it costs something. Not
-            dismissible: it is true for exactly as long as they are out. */}
-        {!inFullscreen && (
-          <Alert status="warning" borderRadius="md" mb={4}>
-            <AlertIcon />
-            <Box flex="1">
-              <Text fontWeight="600">You are no longer in fullscreen</Text>
-              <Text fontSize="sm">
-                {leftFullscreenCost ||
-                  'Your clock is still running. Go back to fullscreen to carry on with the test on a clean screen.'}
-              </Text>
-            </Box>
-            <Button size="xs" colorScheme="orange" onClick={requestQuizFullscreen}>
-              Back to fullscreen
-            </Button>
-          </Alert>
-        )}
+        {/* The rule that ends the paper without warning, kept on screen for the
+            whole sitting rather than only in the brief: a student who is about
+            to reach for another window is the one person who needs it. */}
+        <Alert status="warning" borderRadius="md" mb={4} py={2}>
+          <AlertIcon />
+          <Text fontSize="sm">{LEAVING_COST}</Text>
+        </Alert>
 
         {notice && (
           <Alert status={notice.status || 'info'} borderRadius="md" mb={4}>

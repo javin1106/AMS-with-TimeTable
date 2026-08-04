@@ -280,7 +280,7 @@ describe("mailing the admins", () => {
     await seedAdmin();
     await User.create({
       name: "Super",
-      role: ["SUPERADMIN"],
+      role: ["lm-admin"],
       password: "hashed",
       email: ["super@example.com"],
     });

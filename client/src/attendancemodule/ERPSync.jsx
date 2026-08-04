@@ -8,8 +8,9 @@
 // stateless generation pipeline as the Embedding Generation page.
 //
 // Mirrors EmbeddingGeneration.jsx's functionality: dept → semester cascade,
-// "Search Institute Wise" widens ground-truth lookup across all departments
-// (otherwise restricted to the selected dept), live SSE per-student progress.
+// live SSE per-student progress. Ground-truth photo lookup always scans
+// every department's batch folders — Subject.dept is too unreliable to
+// scope that search by.
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { theme, styles, cssReset } from './config';
@@ -71,7 +72,6 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
   const [semester, setSemester] = useState('');
   const [availableSems, setAvailableSems] = useState([]);
   const [semsLoading, setSemsLoading] = useState(false);
-  const [instituteWise, setInstituteWise] = useState(false);
 
   const [subjects, setSubjects] = useState([]);
   const [erpConfigured, setErpConfigured] = useState(true);
@@ -193,7 +193,6 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
           dept,
           sem: subject.erpLookup?.semester || subject.sem,
           abbreviation: subject.erpLookup?.abbreviation || subject.subName,
-          instituteWise,
         }),
       });
       const data = await res.json();
@@ -277,9 +276,6 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
           dept,
           subjectCode: subject.subCode || '',
           rollNos,
-          // Institute-wide is automatic for first-year subjects — their
-          // students' GT folders live under other departments' batches.
-          instituteWise: instituteWise || !!subject.isFirstYear,
           // Absent for a timetable-only subject — there is no document to do
           // the bookkeeping on. The .pkl is still written either way.
           subjectId: subject._id || undefined,
@@ -427,18 +423,6 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
               subject record, falling back to its semester prefix
               ("B.Tech-ECE-5" → "B.Tech"). The per-row ERP lookup tooltip shows
               what was derived. */}
-          <label
-            title={semester === FIRST_YEAR_SENTINEL ? 'First-year subjects always search institute-wide' : undefined}
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13, color: theme.text, paddingBottom: 8, cursor: semester === FIRST_YEAR_SENTINEL ? 'not-allowed' : 'pointer' }}
-          >
-            <input
-              type="checkbox"
-              checked={instituteWise || semester === FIRST_YEAR_SENTINEL}
-              onChange={(e) => setInstituteWise(e.target.checked)}
-              disabled={busy || semester === FIRST_YEAR_SENTINEL}
-            />
-            Search Institute Wise{semester === FIRST_YEAR_SENTINEL ? ' (automatic for First Year)' : ''}
-          </label>
           <div style={{ flex: 1 }} />
           <button
             onClick={fetchAllRolls}
@@ -474,8 +458,6 @@ export default function ERPSync({ fixedDepartment, embedded = false }) {
               )}
             </div>
           )}
-          Institute Wise widens ground-truth lookup across all departments; unchecked restricts it
-          to {dept ? dept.replace(/_/g, ' ') : 'the selected department'} and this semester.
         </div>
       </section>
 

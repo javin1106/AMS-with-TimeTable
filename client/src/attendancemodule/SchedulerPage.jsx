@@ -41,29 +41,6 @@ export const SLOT_LABELS = {
   lunch2: 'Lunch Slot 2 — 12:50–13:30',
 };
 
-const LOGIC_OPTIONS = [
-  {
-    value: 'majority',
-    label: 'Majority Runs',
-    hint: 'Present if >50% of runs detect the student',
-  },
-  {
-    value: 'any_run',
-    label: 'Any Run',
-    hint: 'Present if detected in at least 1 run',
-  },
-  {
-    value: 'all_runs',
-    label: 'All Runs',
-    hint: 'Present only if detected in every run',
-  },
-  {
-    value: 'first_run',
-    label: 'First Run Only',
-    hint: 'Only the first run counts',
-  },
-];
-
 const DURATION_OPTIONS = [30, 60, 90, 120, 180, 300];
 
 // ── Shared UI atoms ──────────────────────────────────────────────────────────
@@ -527,13 +504,20 @@ function PeriodCard({ period, onSave }) {
 // ── Global run-settings editor ───────────────────────────────────────────────
 function GlobalEditor({ config, onSave }) {
   const [form, setForm] = useState({
-    globalPresentLogic: config?.globalPresentLogic || 'majority',
+    globalMinRunsPresent: config?.globalMinRunsPresent || 1,
     globalNumRuns: config?.globalNumRuns || 1,
     globalRunDurationSec: config?.globalRunDurationSec || 120,
   });
   const [saving, setSaving] = useState(false);
 
-  const update = (k, v) => setForm((p) => ({ ...p, [k]: v }));
+  const update = (k, v) => setForm((p) => {
+    const next = { ...p, [k]: v };
+    // minRunsPresent can never exceed the total number of runs
+    if (next.globalMinRunsPresent > next.globalNumRuns) {
+      next.globalMinRunsPresent = next.globalNumRuns;
+    }
+    return next;
+  });
 
   const handleSave = async () => {
     setSaving(true);
@@ -608,42 +592,23 @@ function GlobalEditor({ config, onSave }) {
         <strong>period duration ÷ number of runs</strong>.
       </div>
       <div style={{ marginBottom: 18 }}>
-        <Label>Present Logic</Label>
-        <div
-          style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}
-        >
-          {LOGIC_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              title={opt.hint}
-              onClick={() => update('globalPresentLogic', opt.value)}
-              style={{
-                padding: '7px 16px',
-                borderRadius: 6,
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: 'pointer',
-                border: '1px solid',
-                borderColor:
-                  form.globalPresentLogic === opt.value
-                    ? theme.accent
-                    : theme.border,
-                background:
-                  form.globalPresentLogic === opt.value
-                    ? theme.accentDim
-                    : 'transparent',
-                color:
-                  form.globalPresentLogic === opt.value
-                    ? theme.accent
-                    : theme.textMuted,
-              }}
-            >
-              {opt.label}
-            </button>
-          ))}
+        <Label>Runs Required to Mark Present</Label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 6 }}>
+          <select
+            value={form.globalMinRunsPresent}
+            onChange={(e) => update('globalMinRunsPresent', Number(e.target.value))}
+            style={{ ...styles.select, width: 90 }}
+          >
+            {Array.from({ length: form.globalNumRuns }, (_, i) => i + 1).map((n) => (
+              <option key={n} value={n}>{n}</option>
+            ))}
+          </select>
+          <span style={{ fontSize: 12, color: theme.textMuted }}>
+            out of {form.globalNumRuns} run{form.globalNumRuns > 1 ? 's' : ''}
+          </span>
         </div>
         <div style={{ fontSize: 10, color: theme.textMuted, marginTop: 5 }}>
-          {LOGIC_OPTIONS.find((o) => o.value === form.globalPresentLogic)?.hint}
+          A student is marked Present if detected in at least {form.globalMinRunsPresent} of the {form.globalNumRuns} run{form.globalNumRuns > 1 ? 's' : ''} for the period.
         </div>
       </div>
       <button

@@ -101,6 +101,9 @@ const TEACHER_ONLY = [
   `POST ${C}/quizzes`,
   `POST ${C}/attempts/:attemptId/reopen`,
   `DELETE ${C}/attempts/:attemptId`,
+  // Correcting the answer key of a paper already sat, and re-marking the cohort.
+  `PATCH ${C}/quizzes/:quizId/answer-key`,
+  `POST ${C}/quizzes/:quizId/regrade`,
   `GET ${C}/quizzes/:quizId/results`,
   `GET ${C}/quizzes/:quizId/results.csv`,
 
@@ -122,6 +125,9 @@ const TEACHER_ONLY = [
   `POST ${C}/gradebook/bulk`,
 
   `POST ${C}/members/invite`,
+  // Delivery outcome of an invite batch: who on the roll has a working address
+  // and who bounced. Staff-only for the same reason the invite itself is.
+  `GET ${C}/members/invite-status/:batchId`,
   `PATCH ${C}/members/:membershipId`,
   `DELETE ${C}/members/:membershipId`,
   `GET ${C}/members/:membershipId/progress`,

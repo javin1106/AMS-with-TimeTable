@@ -151,7 +151,15 @@ const lmQuizSchema = new mongoose.Schema({
     // arithmetic tested turns it off per quiz.
     allowCalculator: { type: Boolean, default: true },
 
-    /* ---- proctoring ---- */
+    /* ---- proctoring ----
+       Leaving the sitting is no longer a budget a teacher sets: every paper is
+       sat in fullscreen, and the first tab change, window change or fullscreen
+       exit submits the attempt. The old `allowTabChange` / `maxTabSwitches` /
+       `autoSubmitOnTabLimit` / `requireFullscreen` settings are gone — a quiz
+       carrying them from before simply has them ignored, because the rule no
+       longer varies by quiz, and a stored `requireFullscreen: false` must not
+       be able to unlock a paper written after the rule changed. */
+
     // Discourages phones; does not prevent them. The check is on the
     // User-Agent, which the browser chooses for itself — devtools' device
     // toolbar defeats it in one click. Kept because it does turn away the
@@ -159,12 +167,8 @@ const lmQuizSchema = new mongoose.Schema({
     // calls it a block, because a teacher who believes it is one plans around a
     // guarantee that does not exist.
     preventMobile: { type: Boolean, default: false },
-    allowTabChange: { type: Boolean, default: true },
-    maxTabSwitches: { type: Number, default: 3 },
-    autoSubmitOnTabLimit: { type: Boolean, default: false },
     disableCopyPaste: { type: Boolean, default: false },
     disableRightClick: { type: Boolean, default: false },
-    requireFullscreen: { type: Boolean, default: false },
   },
 
   // Publishing and starting are two separate clocks, and both are needed: the

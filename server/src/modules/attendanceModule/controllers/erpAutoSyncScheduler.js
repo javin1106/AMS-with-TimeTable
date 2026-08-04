@@ -63,7 +63,7 @@ async function runErpAutoSync() {
     const isFirstYear = firstYearCodes.has(subject.code);
 
     try {
-      const result = await syncSubjectRolls(subject, false, isFirstYear);
+      const result = await syncSubjectRolls(subject, isFirstYear);
 
       if (!result.ok) {
         failed += 1;
@@ -83,7 +83,6 @@ async function runErpAutoSync() {
         dept,
         subjectCode: subject.subCode || "",
         rollNos: result.rollNos,
-        instituteWise: isFirstYear,
         subjectId: subject._id,
         rosterExact: true,
       });

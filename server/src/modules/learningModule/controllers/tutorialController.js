@@ -438,7 +438,8 @@ exports.publishTutorial = async (req, res) => {
   await tutorial.save();
   await seedSubmissions(coursework, req.lmClass);
 
-  await notifyClass({
+  // Not awaited — publishing a tutorial should not wait on SMTP.
+  notifyClass({
     klass: req.lmClass,
     excludeUserId: req.lmUser.id,
     type: 'coursework',

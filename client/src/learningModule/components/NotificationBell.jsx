@@ -16,6 +16,7 @@ import {
   Text,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
+import { buttonTextStyles } from './common';
 import { relativeTime } from '../format';
 
 const POLL_MS = 60000;
@@ -147,6 +148,7 @@ export default function NotificationBell() {
                 bg={notification.read ? 'transparent' : 'blue.50'}
                 _hover={{ bg: 'gray.50' }}
                 onClick={() => open(notification)}
+                {...buttonTextStyles}
               >
                 <Text>{TYPE_ICONS[notification.type] || '🔔'}</Text>
                 <Box flex="1" minW={0}>

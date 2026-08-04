@@ -486,7 +486,8 @@ exports.startSession = async (req, res) => {
     presentedByName: req.lmUser.name,
   });
 
-  await notifyClass({
+  // Not awaited — presenting a Short should not wait on SMTP.
+  notifyClass({
     klass: req.lmClass,
     excludeUserId: req.lmUser.id,
     type: 'quiz',

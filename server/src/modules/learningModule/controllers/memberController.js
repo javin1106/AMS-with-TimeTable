@@ -3,8 +3,15 @@ const LmMembership = require("../models/lmMembership");
 const LmSubmission = require("../models/lmSubmission");
 const User = require("../../../models/usermanagement/user");
 const { notifyUser, sendInviteMail } = require("../services/notifyService");
-const { provisionAccounts, roleForClassRole } = require("../services/accountProvisioning");
+const { provisionAccounts, roleForClassRole, sendWelcomeMailFor } = require("../services/accountProvisioning");
 const { resolveFrontendBase } = require("../../usermanagement/controllers/welcomeMailer");
+const { createBatch, recordResult, getBatch } = require("../services/inviteBatches");
+
+// A few authenticated connections carry the whole invite, same reasoning as
+// mailerModule's sendBulkMail: wide enough that a class of sixty does not
+// wait in a strict queue, narrow enough not to trip the provider's flood
+// protection.
+const MAX_PARALLEL_MAIL = 4;
 
 const refreshStudentCount = async (classId) => {
   const studentCount = await LmMembership.countDocuments({
@@ -181,6 +188,13 @@ exports.inviteMembers = async (req, res) => {
   }
 
   const results = [];
+  // Every entry that owes a mail send is queued here instead of sent inline —
+  // see the comment above the loop this replaced. The membership rows and
+  // in-app notifications below are all that has to be true before the
+  // teacher's "invite" click can return; the mail is reported through
+  // /members/invite-status/:batchId as it actually goes out.
+  const pendingMail = [];
+
   for (const email of emails) {
     const user = userByEmail.get(email);
     const provisionResult = provisioned.get(email);
@@ -234,39 +248,92 @@ exports.inviteMembers = async (req, res) => {
       });
     }
 
-    // A freshly provisioned account already received the welcome email, which
-    // names the class and carries the set-password link — a second "you were
-    // invited" mail on top of it is just noise.
+    const entry = {
+      email,
+      status: provisionResult?.created ? "account_created" : user ? "added" : "invited",
+      platformRole: provisionResult?.created || provisionResult?.roleAdded ? roleForClassRole(role) : null,
+      roleAdded: Boolean(provisionResult?.roleAdded && !provisionResult?.created),
+      // Filled in once the background send for this address finishes — see
+      // /members/invite-status/:batchId.
+      mailed: null,
+    };
+    results.push(entry);
+
+    // A freshly provisioned account gets the welcome mail, which names the
+    // class and carries the set-password link — a second "you were invited"
+    // mail on top of it is just noise.
     //
     // Deliberately *not* gated on settings.emailNotifications: that setting is
     // "email the class when something is posted", and a teacher who turns off
     // post digests has not asked for their invitations to go out silently.
     // Sending the invite is an explicit, one-off action they just took.
-    let mailed;
-    if (provisionResult?.created) {
-      // The welcome mail stood in for the invite, so its outcome is the one
-      // worth reporting — that mail carries the set-password link, and an
-      // account that never received it is one nobody can sign in to.
-      mailed = provisionResult.mailed ?? null;
-    } else {
-      // eslint-disable-next-line no-await-in-loop
-      // `user` truthy means the row above was written as "active", so the mail
-      // drops the class code — there is nothing left for them to join.
-      mailed = await sendInviteMail(email, req.lmClass, req.lmUser.name, frontendBase, Boolean(user));
-    }
-
-    results.push({
+    pendingMail.push({
       email,
-      status: provisionResult?.created ? "account_created" : user ? "added" : "invited",
-      platformRole: provisionResult?.created || provisionResult?.roleAdded ? roleForClassRole(role) : null,
-      roleAdded: Boolean(provisionResult?.roleAdded && !provisionResult?.created),
-      // null when no mail was due at all.
-      mailed,
+      // `user` truthy means the row above was written as "active", so the
+      // invite mail drops the class code — there is nothing left to join.
+      enrolled: Boolean(user),
+      kind: provisionResult?.created ? "welcome" : "invite",
     });
   }
 
   await refreshStudentCount(req.lmClass._id);
-  return res.status(201).json({ results });
+
+  const batchId = pendingMail.length ? createBatch(req.lmClass._id, pendingMail.length) : null;
+  if (batchId) {
+    sendPendingInviteMail({
+      batchId,
+      pendingMail,
+      klass: req.lmClass,
+      inviterName: req.lmUser.name,
+      frontendBase,
+      platformRole: roleForClassRole(role),
+    }).catch((error) => console.error("[LearningModule] invite mail batch failed:", error.message));
+  }
+
+  return res.status(201).json({ results, batchId, mailPending: pendingMail.length });
+};
+
+/**
+ * Sends every mail a just-finished invite owes, a few connections wide, and
+ * records each outcome on the batch as it lands. Never awaited by the route —
+ * this is exactly the work that used to hold the response open.
+ */
+async function sendPendingInviteMail({ batchId, pendingMail, klass, inviterName, frontendBase, platformRole }) {
+  const queue = [...pendingMail];
+
+  const worker = async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      // eslint-disable-next-line no-await-in-loop
+      const mailed =
+        item.kind === "welcome"
+          ? await sendWelcomeMailFor({ email: item.email, klass, invitedByName: inviterName, frontendBase, platformRole })
+          : await sendInviteMail(item.email, klass, inviterName, frontendBase, item.enrolled);
+
+      recordResult(batchId, { email: item.email, mailed });
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(MAX_PARALLEL_MAIL, queue.length) }, () => worker()));
+}
+
+/**
+ * Polled by the invite modal while a batch's mail is still going out — see
+ * lmApi.inviteStatus. `batchId` is opaque and short-lived (in-memory,
+ * ~15 minutes), so an unknown or expired one is reported as already done
+ * rather than a 404 the UI would have to special-case.
+ */
+exports.inviteStatus = async (req, res) => {
+  const batch = getBatch(req.params.batchId);
+  if (!batch || batch.classId !== String(req.lmClass._id)) {
+    return res.json({ total: 0, completed: 0, done: true, updates: [] });
+  }
+  return res.json({
+    total: batch.total,
+    completed: batch.updates.length,
+    done: batch.done,
+    updates: batch.updates,
+  });
 };
 
 /** Approve or decline a pending join request. */
