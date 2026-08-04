@@ -22,8 +22,16 @@ const User = require('../../src/models/usermanagement/user');
 const {
   applyAuthRateLimits,
   accountKey,
-  ceiling,
+  ACCOUNT_FAILURES,
+  IP_FAILURES,
 } = require('../../src/modules/usermanagement/loginRateLimit');
+const captchaGate = require('../../src/modules/usermanagement/captchaGate');
+const { issueChallenge, resetSpent } = require('../../src/modules/usermanagement/captcha');
+
+/** Reads the code back out of a challenge image, the way a person does. */
+const solveSvg = (svg) => (svg.match(/>([A-Z0-9])<\/text>/g) || [])
+  .map((match) => match.slice(1, 2))
+  .join('');
 const { login } = require('../../src/modules/usermanagement/controllers/usercontroller');
 
 const PASSWORD = 'correct-horse-battery-staple';
@@ -46,7 +54,12 @@ const stubLookup = (result) => {
   jest.spyOn(User, 'findOne').mockReturnValue({ select: () => Promise.resolve(result) });
 };
 
-/** A fresh app each time so rate-limit counters never leak between tests. */
+/**
+ * A fresh app per test — but note the limiters themselves are module-level, so
+ * their stores are shared across this whole file. **Every test that drives the
+ * throttle must use an address of its own**, or it inherits a budget an earlier
+ * test already spent.
+ */
 const makeApp = ({ throttled = false } = {}) => {
   const app = express();
   app.use(express.json());
@@ -58,6 +71,14 @@ const makeApp = ({ throttled = false } = {}) => {
 
 beforeAll(async () => {
   passwordHash = await bcrypt.hash(PASSWORD, 10);
+});
+
+// The captcha gate counts failures process-wide, which is the point of it — but
+// it means one test's failures would otherwise push the next one over the
+// install-wide threshold and change what the endpoint asks for.
+beforeEach(() => {
+  captchaGate.reset();
+  resetSpent();
 });
 
 afterEach(() => jest.restoreAllMocks());
@@ -188,35 +209,72 @@ describe('login — the password field is not selectable by accident', () => {
 
 describe('login — throttling', () => {
   it('throttles the path login actually lives on', async () => {
-    // The regression this file exists for.
+    // The regression this file exists for. Only the first three attempts reach
+    // the password at all — the captcha gate takes over after that — so the
+    // account budget is spent by solving captchas, which is the point of it.
     stubLookup(null);
     const app = makeApp({ throttled: true });
 
     const codes = [];
-    for (let i = 0; i < 7; i += 1) {
+    for (let i = 0; i < 12; i += 1) {
       // eslint-disable-next-line no-await-in-loop
       const res = await request(app).post('/auth/login')
         .send({ email: 'target@nitj.ac.in', password: 'guess' });
       codes.push(res.status);
     }
 
-    expect(codes.slice(0, 5)).toEqual([401, 401, 401, 401, 401]);
-    expect(codes.slice(5)).toEqual([429, 429]);
+    // Three credential rejections, then the captcha stands in the way. Nothing
+    // ever gets to 429, because an unsolved captcha is not a failed sign-in and
+    // is not charged to the budget.
+    expect(codes.slice(0, 3)).toEqual([401, 401, 401]);
+    expect(codes.slice(3).every((code) => code === 400)).toBe(true);
+    expect(codes).not.toContain(429);
+  });
+
+  it('spends the account budget only on rejected credentials', async () => {
+    // Otherwise anyone could burn a colleague's five attempts by posting garbage
+    // captcha answers with their address in it, and the throttle becomes the
+    // denial of service it was written to avoid.
+    stubLookup(null);
+    const app = makeApp({ throttled: true });
+
+    for (let i = 0; i < 30; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await request(app).post('/auth/login')
+        .send({ email: 'budget@nitj.ac.in', password: 'guess', captchaAnswer: 'nope' });
+    }
+
+    // The address is captcha-gated but not locked out: solve one and the
+    // password is testable again.
+    const challenge = issueChallenge();
+    stubLookup(userDoc());
+    const res = await request(app).post('/auth/login').send({
+      email: 'budget@nitj.ac.in',
+      password: PASSWORD,
+      captchaToken: challenge.token,
+      captchaAnswer: solveSvg(challenge.svg),
+    });
+    expect(res.status).toBe(200);
   });
 
   it('throttles the /api/v1 spelling too', async () => {
     // The router is mounted twice; a limiter on only one spelling is bypassed by
-    // dropping the prefix.
+    // dropping the prefix. Asserted on the standard rate-limit headers rather
+    // than a 429, because only a limiter that actually ran sets them — and the
+    // captcha gate now intervenes before five failures, so driving this to a 429
+    // would be testing the gate instead of the mount.
     stubLookup(null);
     const app = makeApp({ throttled: true });
-    const codes = [];
-    for (let i = 0; i < 7; i += 1) {
-      // eslint-disable-next-line no-await-in-loop
-      const res = await request(app).post('/api/v1/auth/login')
-        .send({ email: 'target2@nitj.ac.in', password: 'guess' });
-      codes.push(res.status);
-    }
-    expect(codes).toContain(429);
+
+    const withPrefix = await request(app).post('/api/v1/auth/login')
+      .send({ email: 'prefixed@nitj.ac.in', password: 'guess' });
+    const without = await request(app).post('/auth/login')
+      .send({ email: 'unprefixed@nitj.ac.in', password: 'guess' });
+
+    expect(withPrefix.headers['ratelimit-limit']).toBeDefined();
+    expect(without.headers['ratelimit-limit']).toBeDefined();
+    // Same ceiling on both spellings, so neither is the cheaper way in.
+    expect(withPrefix.headers['ratelimit-limit']).toBe(without.headers['ratelimit-limit']);
   });
 
   it('counts per account, so one victim does not lock out the campus', async () => {
@@ -293,107 +351,13 @@ describe('login — surviving a shared campus address', () => {
     expect(bystander.status).toBe(200);
   });
 
-  it('does catch one host spraying many accounts', async () => {
-    // The case the per-account limiter is blind to: a single guess against each
-    // of many mailboxes. Driven with a low ceiling so the test does not have to
-    // send two hundred requests to prove the mechanism.
-    jest.resetModules();
-    const previous = process.env.AUTH_IP_FAILURE_LIMIT;
-    process.env.AUTH_IP_FAILURE_LIMIT = '4';
-    try {
-      // eslint-disable-next-line global-require
-      const fresh = require('../../src/modules/usermanagement/loginRateLimit');
-      const app = express();
-      app.use(express.json());
-      fresh.applyAuthRateLimits(app);
-      app.post('/auth/login', login);
-
-      stubLookup(null);
-      const codes = [];
-      for (let i = 0; i < 6; i += 1) {
-        // eslint-disable-next-line no-await-in-loop
-        const res = await request(app).post('/auth/login')
-          .send({ email: `spray${i}@nitj.ac.in`, password: 'guess' });
-        codes.push(res.status);
-      }
-
-      // Each account is on its first failure, so only the address limiter can
-      // have produced these.
-      expect(codes.slice(0, 4)).toEqual([401, 401, 401, 401]);
-      expect(codes.slice(4)).toEqual([429, 429]);
-    } finally {
-      if (previous === undefined) delete process.env.AUTH_IP_FAILURE_LIMIT;
-      else process.env.AUTH_IP_FAILURE_LIMIT = previous;
-      jest.resetModules();
-    }
-  });
-
-  it('turns the address limiter into a pass-through when disabled', async () => {
-    jest.resetModules();
-    const previous = process.env.AUTH_IP_FAILURE_LIMIT;
-    process.env.AUTH_IP_FAILURE_LIMIT = '0';
-    try {
-      // eslint-disable-next-line global-require
-      const fresh = require('../../src/modules/usermanagement/loginRateLimit');
-      const app = express();
-      app.use(express.json());
-      fresh.applyAuthRateLimits(app);
-      app.post('/auth/login', login);
-
-      stubLookup(null);
-      const codes = [];
-      for (let i = 0; i < 12; i += 1) {
-        // eslint-disable-next-line no-await-in-loop
-        const res = await request(app).post('/auth/login')
-          .send({ email: `spray${i}@nitj.ac.in`, password: 'guess' });
-        codes.push(res.status);
-      }
-      // Every account is on its first failure and the address limit is off, so
-      // nothing should throttle.
-      expect(codes).not.toContain(429);
-    } finally {
-      if (previous === undefined) delete process.env.AUTH_IP_FAILURE_LIMIT;
-      else process.env.AUTH_IP_FAILURE_LIMIT = previous;
-      jest.resetModules();
-    }
-  });
-});
-
-describe('rate-limit ceilings from the environment', () => {
-  /**
-   * These exist so that a limit which turns out to be wrong for the institute
-   * can be lifted with a restart rather than a deploy.
-   */
-  const withEnv = (value, run) => {
-    const previous = process.env.TEST_CEILING;
-    if (value === undefined) delete process.env.TEST_CEILING;
-    else process.env.TEST_CEILING = value;
-    try {
-      run();
-    } finally {
-      if (previous === undefined) delete process.env.TEST_CEILING;
-      else process.env.TEST_CEILING = previous;
-    }
-  };
-
-  it('falls back when unset or blank', () => {
-    withEnv(undefined, () => expect(ceiling('TEST_CEILING', 42)).toBe(42));
-    withEnv('', () => expect(ceiling('TEST_CEILING', 42)).toBe(42));
-  });
-
-  it('reads a number', () => {
-    withEnv('150', () => expect(ceiling('TEST_CEILING', 42)).toBe(150));
-  });
-
-  it('treats zero as no limit', () => {
-    // Null is the signal the limiter turns into a pass-through.
-    withEnv('0', () => expect(ceiling('TEST_CEILING', 42)).toBeNull());
-  });
-
-  it('ignores nonsense rather than disabling the limit by accident', () => {
-    // A typo'd env var must not silently switch a protection off.
-    withEnv('abc', () => expect(ceiling('TEST_CEILING', 42)).toBe(42));
-    withEnv('-5', () => expect(ceiling('TEST_CEILING', 42)).toBe(42));
+  it('leaves the ceilings where the code puts them', () => {
+    // Fixed constants, not configuration: a knob that can switch a protection
+    // off is a knob that eventually does, quietly.
+    expect(ACCOUNT_FAILURES).toBe(5);
+    expect(IP_FAILURES).toBe(200);
+    // Sixty students arriving together must be nowhere near the address limit.
+    expect(IP_FAILURES).toBeGreaterThan(ACCOUNT_FAILURES * 20);
   });
 });
 

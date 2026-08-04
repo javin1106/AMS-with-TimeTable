@@ -20,6 +20,8 @@ const {
   getTimetableDepartment,
   findDepartmentCoordinator,
 } = require("./facultyDepartment");
+const { issueChallenge, verifyChallenge } = require("../captcha");
+const captchaGate = require("../captchaGate");
 
 exports.register = async (req, res, next) => {
   const { email, password, roles, dept } = req.body;
@@ -182,9 +184,17 @@ const sessionUser = (user) => ({
   role: user.role,
 });
 
+/** A fresh captcha image for the login form. */
+exports.captcha = (req, res) => {
+  const { token, svg, expiresIn } = issueChallenge();
+  // No-store: a cached challenge is a challenge somebody else already solved.
+  res.set("Cache-Control", "no-store");
+  return res.status(200).json({ token, svg, expiresIn });
+};
+
 // login
 exports.login = async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, captchaToken, captchaAnswer } = req.body;
 
   // Typed, not merely present. A JSON body can carry `{"email": {"$ne": null}}`,
   // which reaches findOne as a Mongo operator and matches an arbitrary account.
@@ -194,6 +204,30 @@ exports.login = async (req, res) => {
   // allow it.
   if (typeof email !== "string" || typeof password !== "string" || !email || !password) {
     return res.status(400).json({ message: "Email and password are required." });
+  }
+
+  // Checked before the database and before bcrypt. The point of the captcha is
+  // to make an automated attempt cost something, which it only does if the
+  // attempt is refused before the server spends the ~100ms bcrypt costs.
+  //
+  // A failed captcha is not counted as a failed sign-in: it never got as far as
+  // testing a password, and counting it would let anybody push a colleague over
+  // the rate limit by posting nonsense with their address in it.
+  if (captchaGate.captchaRequired(email)) {
+    const check = verifyChallenge(captchaToken, captchaAnswer);
+    if (!check.ok) {
+      return res.status(400).json({
+        message:
+          check.reason === "expired" || check.reason === "reused"
+            ? "That challenge has expired. Please try the new one."
+            : "The characters did not match. Please try again.",
+        captchaRequired: true,
+        // Expired and already-spent tokens need a new image; a plain wrong
+        // answer does not, so the user is not made to re-read a fresh one for a
+        // typo.
+        captchaStale: check.reason !== "wrong",
+      });
+    }
   }
 
   try {
@@ -206,8 +240,16 @@ exports.login = async (req, res) => {
     const matches = await bcrypt.compare(password, user?.password || DUMMY_PASSWORD_HASH);
 
     if (!user || !matches) {
-      return res.status(401).json({ message: INVALID_CREDENTIALS });
+      captchaGate.noteFailure(email);
+      return res.status(401).json({
+        message: INVALID_CREDENTIALS,
+        // Told to the client so the next attempt can carry one, rather than
+        // making it discover the requirement by being refused again.
+        captchaRequired: captchaGate.captchaRequired(email),
+      });
     }
+
+    captchaGate.noteSuccess(email);
 
     const maxAge = 3 * 60 * 60; // 3 hours in seconds
     const token = jwt.sign({ id: user._id, email, role: user.role }, jwtSecret, {
