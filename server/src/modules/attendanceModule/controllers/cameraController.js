@@ -492,10 +492,14 @@ class CameraController {
         try {
             if (global.activeNodeRecordings && global.activeNodeRecordings.has(recordingId)) {
                 const rec = global.activeNodeRecordings.get(recordingId);
-                if (rec.proc.stdin && rec.proc.stdin.writable) {
-                    rec.proc.stdin.write('q\n');
-                } else {
-                    rec.proc.kill();
+                try {
+                    if (rec.proc.stdin && rec.proc.stdin.writable) {
+                        rec.proc.stdin.write('q\n');
+                    } else {
+                        rec.proc.kill();
+                    }
+                } catch (e) {
+                    console.error("[cameraController] Error stopping recording proc:", e);
                 }
                 global.activeNodeRecordings.delete(recordingId);
             }
