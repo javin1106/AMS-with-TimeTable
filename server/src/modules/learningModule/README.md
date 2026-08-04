@@ -841,7 +841,7 @@ answers the wrong people.
 
 1. an active membership with role `teacher` or `co-teacher`
 2. being the class owner
-3. **holding a platform admin role** — `admin`, `iams-admin` or `SUPERADMIN`
+3. **holding a platform admin role** — `admin`, `iams-admin` or `lm-admin`
 
 Route 3 is deliberate: it lets support open a class without being enrolled. It is
 also a standing grant over *every* class in the installation — answer keys,

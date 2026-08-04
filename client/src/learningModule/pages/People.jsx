@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import {
   Avatar,
@@ -43,9 +43,90 @@ function InviteModal({ isOpen, onClose, classId, onDone }) {
   const [grantRoleToExisting, setGrantRoleToExisting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState(null);
+  // Mail for an invite goes out in the background after the membership rows
+  // are already written — see memberController.inviteMembers. `mailProgress`
+  // tracks that batch so the modal can show "sending N of M" instead of
+  // sitting on a spinner for as long as the slowest SMTP attempt takes.
+  const [mailProgress, setMailProgress] = useState(null);
+  const pollRef = useRef(null);
   const toast = useToast();
 
   const platformRole = role === 'co-teacher' ? 'FACULTY' : 'STUDENT';
+
+  const stopPolling = () => {
+    if (pollRef.current) {
+      clearTimeout(pollRef.current);
+      pollRef.current = null;
+    }
+  };
+
+  useEffect(() => stopPolling, []);
+
+  const finish = (finalResults) => {
+    const count = (status) => finalResults.filter((r) => r.status === status).length;
+    const failures = finalResults.filter((r) => r.status === 'error');
+    // `mailed === false` means the person was enrolled but the invitation
+    // email did not leave — worth saying out loud rather than reporting a
+    // clean success.
+    const unmailed = finalResults.filter((r) => r.mailed === false);
+
+    toast({
+      status: failures.length || unmailed.length ? 'warning' : 'success',
+      title: 'Invites processed',
+      description: [
+        count('account_created') && `${count('account_created')} account(s) created`,
+        count('added') && `${count('added')} enrolled`,
+        count('invited') && `${count('invited')} invited by email`,
+        count('already_member') && `${count('already_member')} already in the class`,
+        failures.length && `${failures.length} failed`,
+        unmailed.length && `${unmailed.length} enrolled but the email could not be sent`,
+      ]
+        .filter(Boolean)
+        .join(', '),
+      duration: 8000,
+    });
+
+    if (!failures.length && !unmailed.length) {
+      setEmails('');
+      setReport(null);
+      onClose();
+    }
+  };
+
+  // Polls /members/invite-status/:batchId until every queued mail has an
+  // outcome, folding each address's result into the report as it lands so
+  // the "Result" list fills in live rather than appearing all at once.
+  const pollMailStatus = (batchId) => {
+    pollRef.current = setTimeout(async () => {
+      let status;
+      try {
+        status = await lmApi.inviteStatus(classId, batchId);
+      } catch {
+        // A transient failure to poll is not worth surfacing — the next tick
+        // tries again, and the batch itself is unaffected either way.
+        pollMailStatus(batchId);
+        return;
+      }
+
+      const byEmail = new Map(status.updates.map((u) => [u.email, u.mailed]));
+      let merged;
+      setReport((prev) => {
+        merged = (prev || []).map((entry) =>
+          byEmail.has(entry.email) ? { ...entry, mailed: byEmail.get(entry.email) } : entry,
+        );
+        return merged;
+      });
+      setMailProgress({ completed: status.completed, total: status.total });
+
+      if (status.done) {
+        setMailProgress(null);
+        onDone();
+        finish(merged);
+        return;
+      }
+      pollMailStatus(batchId);
+    }, 1200);
+  };
 
   const submit = async () => {
     const list = emails
@@ -56,43 +137,24 @@ function InviteModal({ isOpen, onClose, classId, onDone }) {
 
     setBusy(true);
     setReport(null);
+    setMailProgress(null);
+    stopPolling();
     try {
       const result = await lmApi.inviteMembers(classId, list, role, {
         createAccounts,
         grantRoleToExisting,
       });
-      const count = (status) => result.results.filter((r) => r.status === status).length;
-      const failures = result.results.filter((r) => r.status === 'error');
-      // `mailed === false` means the person was enrolled but the invitation
-      // email did not leave — worth saying out loud rather than reporting a
-      // clean success.
-      const unmailed = result.results.filter((r) => r.mailed === false);
-
-      toast({
-        status: failures.length || unmailed.length ? 'warning' : 'success',
-        title: 'Invites processed',
-        description: [
-          count('account_created') && `${count('account_created')} account(s) created`,
-          count('added') && `${count('added')} enrolled`,
-          count('invited') && `${count('invited')} invited by email`,
-          count('already_member') && `${count('already_member')} already in the class`,
-          failures.length && `${failures.length} failed`,
-          unmailed.length && `${unmailed.length} enrolled but the email could not be sent`,
-        ]
-          .filter(Boolean)
-          .join(', '),
-        duration: 8000,
-      });
-
       setReport(result.results);
-      if (!failures.length && !unmailed.length) {
-        setEmails('');
-        onDone();
-        onClose();
-        return;
-      }
-      // Keep the dialog open when something failed so the teacher can see which.
+      // Membership rows are already written — the roster and counts are
+      // correct now, regardless of how long the mail queue below takes.
       onDone();
+
+      if (result.batchId) {
+        setMailProgress({ completed: 0, total: result.mailPending });
+        pollMailStatus(result.batchId);
+      } else {
+        finish(result.results);
+      }
     } catch (error) {
       toast({ status: 'error', title: 'Could not invite', description: error.message });
     } finally {
@@ -164,6 +226,26 @@ function InviteModal({ isOpen, onClose, classId, onDone }) {
             </Text>
           </Box>
 
+          {mailProgress && (
+            <Box mt={4}>
+              <Flex justify="space-between" mb={1}>
+                <Text fontSize="xs" color="gray.600">
+                  Sending invite emails…
+                </Text>
+                <Text fontSize="xs" color="gray.600">
+                  {mailProgress.completed} of {mailProgress.total}
+                </Text>
+              </Flex>
+              <Progress
+                value={mailProgress.total ? (mailProgress.completed / mailProgress.total) * 100 : 0}
+                size="xs"
+                colorScheme="blue"
+                borderRadius="full"
+                isIndeterminate={mailProgress.total === 0}
+              />
+            </Box>
+          )}
+
           {report && (
             <Box mt={4}>
               <Text fontSize="sm" fontWeight="600" mb={1}>
@@ -189,6 +271,9 @@ function InviteModal({ isOpen, onClose, classId, onDone }) {
                           : entry.status.replace(/_/g, ' ')}
                     </Badge>
                     {entry.mailed === false && <Badge colorScheme="orange">email failed</Badge>}
+                    {entry.mailed === null && ['account_created', 'added', 'invited'].includes(entry.status) && (
+                      <Badge colorScheme="blue">sending…</Badge>
+                    )}
                   </HStack>
                 </Flex>
               ))}

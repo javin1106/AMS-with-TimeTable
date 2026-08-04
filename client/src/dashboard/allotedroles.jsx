@@ -88,6 +88,13 @@ const ROLE_META = {
     icon: FiBookOpen,
     accent: 'teal',
   },
+  'lm-admin': {
+    name: 'Learning Module Admin',
+    link: '/learning/lm-admin',
+    description: 'Bug reports, feedback and usage stats for the Learning module',
+    icon: FiShield,
+    accent: 'purple',
+  },
   // Synthetic entries: not platform roles, but the standing a user holds
   // inside the Learning module. Appended only when they actually have classes,
   // so they never displace a real role or the single-role auto-redirect.

@@ -31,6 +31,7 @@ const leaderboardController = require("../controllers/leaderboardController");
 const discussionController = require("../controllers/discussionController");
 const bugReportController = require("../controllers/bugReportController");
 const profileController = require("../controllers/profileController");
+const adminController = require("../controllers/adminController");
 
 const router = express.Router();
 
@@ -85,6 +86,11 @@ router.patch("/bugs/:reportId", asyncRoute(bugReportController.reviewBugReport))
 
 router.get("/me/profile", asyncRoute(profileController.getMyProfile));
 
+// Platform-wide stats for the lm-admin dashboard. Admin-only, checked in the
+// handler for the same reason the bug queue is — there is no class to hang a
+// requireTeacher off.
+router.get("/admin/summary", asyncRoute(adminController.getSummary));
+
 router.post("/join", asyncRoute(memberController.joinByCode));
 router.post("/claim-invites", asyncRoute(memberController.claimInvites));
 router.get("/preview/:code", asyncRoute(memberController.previewByCode));
@@ -118,6 +124,7 @@ classRouter.delete("/topics/:topicId", requireTeacher, asyncRoute(classControlle
 // people
 classRouter.get("/members", asyncRoute(memberController.listMembers));
 classRouter.post("/members/invite", requireTeacher, asyncRoute(memberController.inviteMembers));
+classRouter.get("/members/invite-status/:batchId", requireTeacher, asyncRoute(memberController.inviteStatus));
 classRouter.post("/members/:membershipId/decide", requireTeacher, asyncRoute(memberController.decideJoinRequest));
 classRouter.patch("/members/:membershipId", requireTeacher, asyncRoute(memberController.updateMember));
 classRouter.delete("/members/:membershipId", requireTeacher, asyncRoute(memberController.removeMember));

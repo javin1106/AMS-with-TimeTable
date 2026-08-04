@@ -438,7 +438,8 @@ const publishAsMaterial = async (req, session, kind) => {
   log(session, "publish", `${isNotes ? "Notes" : "Tutorial"} published as "${title}".`);
   await session.save();
 
-  await notifyClass({
+  // Not awaited — publishing studio material should not wait on SMTP.
+  notifyClass({
     klass: req.lmClass,
     excludeUserId: req.lmUser.id,
     type: "material",

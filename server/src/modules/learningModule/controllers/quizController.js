@@ -579,7 +579,8 @@ exports.publishQuiz = async (req, res) => {
   if (!scheduled && !quiz.announcedAt) {
     quiz.announcedAt = now;
     await quiz.save();
-    await notifyClass({
+    // Not awaited — publishing a quiz should not wait on SMTP.
+    notifyClass({
       klass: req.lmClass,
       excludeUserId: req.lmUser.id,
       type: "quiz",

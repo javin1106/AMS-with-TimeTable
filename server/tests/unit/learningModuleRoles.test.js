@@ -28,7 +28,7 @@ describe('learningModule roles — implicit teacher over every class', () => {
   it('grants it to exactly the three platform admin roles', () => {
     expect(isPlatformAdmin(['admin'])).toBe(true);
     expect(isPlatformAdmin(['iams-admin'])).toBe(true);
-    expect(isPlatformAdmin(['SUPERADMIN'])).toBe(true);
+    expect(isPlatformAdmin(['lm-admin'])).toBe(true);
   });
 
   it('does not grant it to any teaching role', () => {

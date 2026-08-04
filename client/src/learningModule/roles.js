@@ -2,7 +2,7 @@
 // server/src/modules/learningModule/middleware/lmAuth.js. The API stays the
 // authority — this only decides what the UI bothers to render.
 const TEACHER_PLATFORM_ROLES = ['FACULTY', 'ITTC', 'TTADMIN', 'iams-dept-admin'];
-const ADMIN_PLATFORM_ROLES = ['admin', 'iams-admin', 'SUPERADMIN'];
+const ADMIN_PLATFORM_ROLES = ['admin', 'iams-admin', 'lm-admin'];
 
 export const rolesOf = (value) =>
   (Array.isArray(value) ? value : [value]).filter(Boolean).map((role) => String(role));

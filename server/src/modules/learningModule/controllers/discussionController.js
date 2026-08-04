@@ -15,7 +15,7 @@ const MAX_BODY = 8000;
 
 const forClient = (discussion, req) => ({
   _id: discussion._id,
-  title: discussion.removed ? "Removed by staff" : discussion.title,
+  title: discussion.removed ? "Removed" : discussion.title,
   body: discussion.body,
   removed: Boolean(discussion.removed),
   removedByName: discussion.removedByName || "",
@@ -38,10 +38,10 @@ const forClient = (discussion, req) => ({
 exports.listDiscussions = async (req, res) => {
   const discussions = await LmDiscussion.find({
     classId: req.lmClass._id,
-    // A thread a student withdrew is simply gone; one staff took down leaves a
-    // tombstone, so the class can see moderation happened rather than quietly
-    // finding a post missing.
-    $or: [{ removed: false }, { removedByStaff: true }],
+    // Removed threads stay in the list as a tombstone, whoever removed them —
+    // a post that just quietly vanishes is worse than one flagged as gone,
+    // and it is the only way faculty can tell a withdrawn thread from one that
+    // was never posted.
   })
     // Pinned first, then whatever was talked about most recently — a thread
     // with a new reply is more use at the top than one posted more recently
@@ -106,7 +106,8 @@ exports.createDiscussion = async (req, res) => {
 
   await game.onDiscussion({ req, discussion });
 
-  await notifyClass({
+  // Not awaited — starting a discussion should not wait on SMTP.
+  notifyClass({
     klass: req.lmClass,
     excludeUserId: req.lmUser.id,
     type: "discussion",
@@ -157,11 +158,15 @@ exports.updateDiscussion = async (req, res) => {
  * Staff can remove anything. The author can remove their own only while nobody
  * has replied — once a conversation exists it is not theirs alone to end.
  *
- * Either way the row survives as a flag, and the week is *not* given back.
- * Deleting the row would delete the rate-limit entry with it, and post → delete
- * → post is not a limit. Only a staff removal leaves a visible tombstone; a
- * student withdrawing their own unanswered thread just disappears, since there
- * is nothing for the class to be told about.
+ * Either way the row survives as a flag rather than being deleted, and the
+ * week is *not* given back: deleting the row would delete the rate-limit entry
+ * with it, and post → delete → post is not a limit. It also leaves a visible
+ * tombstone regardless of who removed it — a thread that just vanished would
+ * leave the class, and faculty checking a point award against it, looking at
+ * a gap with no explanation.
+ *
+ * Any points the discussion earned when it was posted are undone alongside
+ * it, so a removed thread never leaves an unexplained line on the leaderboard.
  */
 exports.deleteDiscussion = async (req, res) => {
   const discussion = await LmDiscussion.findOne({
@@ -188,5 +193,7 @@ exports.deleteDiscussion = async (req, res) => {
   discussion.updated_at = new Date();
   await discussion.save();
 
-  return res.json({ removed: true, tombstone: byStaff });
+  await game.onDiscussionRemoved({ discussion });
+
+  return res.json({ removed: true, tombstone: true });
 };

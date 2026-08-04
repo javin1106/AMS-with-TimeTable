@@ -206,7 +206,8 @@ exports.publishNotebook = async (req, res) => {
 
   if (announce) {
     const codeCells = (notebook.cells || []).filter((cell) => cell.type === 'code' && !cell.hidden).length;
-    await notifyClass({
+    // Not awaited — publishing a notebook should not wait on SMTP.
+    notifyClass({
       klass: req.lmClass,
       excludeUserId: req.lmUser.id,
       type: 'coursework',

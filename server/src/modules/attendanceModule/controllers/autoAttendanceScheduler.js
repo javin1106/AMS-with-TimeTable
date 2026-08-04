@@ -284,9 +284,10 @@ async function resolveCameras(room, roomOverride) {
 }
 
 // ── Merge per-student status across runs ─────────────────────────────────────
-// No "Review" outcome — a student present in at least one run is Present;
-// otherwise (all-review, all-absent, or a review/absent mix) Absent.
-function mergeStudentStatus(slotResults) {
+// No "Review" outcome — a student present in at least minRunsPresent of the
+// runs made so far is Present; otherwise Absent. minRunsPresent defaults to 1
+// (i.e. "any run"), matching the pre-existing behavior when unset.
+function mergeStudentStatus(slotResults, minRunsPresent = 1) {
   const rollMap = {};
   for (const sr of slotResults) {
     for (const s of sr.students) {
@@ -300,7 +301,7 @@ function mergeStudentStatus(slotResults) {
     );
     const presentCount = entries.filter((e) => e.status === "present").length;
 
-    const finalStatus = presentCount > 0 ? "P" : "A";
+    const finalStatus = presentCount >= minRunsPresent ? "P" : "A";
     // Model's original call, captured at merge time — updateStudentStatus()
     // (manual/ERP override) only ever touches finalStatus, so this stays the
     // pre-override value for later before/after comparisons.
@@ -333,6 +334,7 @@ async function saveCheckResult({
   mlResult,
   room,
   alertConfidence = 0.6,
+  minRunsPresent = 1,
 }) {
   try {
     saveFrameSnapshots(mlResult.frame_files || []);
@@ -401,7 +403,7 @@ async function saveCheckResult({
   }
   if (subjectMeta) report.subjectMeta = subjectMeta;
 
-  report.finalReport = mergeStudentStatus(report.slotResults);
+  report.finalReport = mergeStudentStatus(report.slotResults, minRunsPresent);
 
   for (const s of report.finalReport) {
     if (
@@ -581,6 +583,7 @@ async function runOneCheck({
       mlResult: res.data,
       room,
       alertConfidence: runConfig.alertConfidence,
+      minRunsPresent: runConfig.minRunsPresent,
     });
   } catch (err) {
     console.error(
@@ -640,12 +643,16 @@ async function runSlotAttendance({
     numRuns > 1 ? Math.max(1, Math.floor(periodDurationMin / numRuns)) : 0;
 
   const t = config.attendanceThresholds || {};
+  // Clamp to numRuns — a stale/higher setting can't require more runs than
+  // will actually happen this period.
+  const minRunsPresent = Math.min(config.globalMinRunsPresent ?? 1, numRuns);
   const runConfig = {
     runDurationSec,
     auto_present_threshold: t.auto_present_threshold ?? 0.6,
     review_threshold: t.review_threshold ?? 0.4,
     alertConfidence: t.alert_confidence ?? 0.6,
     camera_switch_sec: t.camera_switch_sec ?? 30,
+    minRunsPresent,
     // Max-of-K shadow comparison (diagnostic only) fires once per period —
     // on the check nearest the middle of the numRuns checks — not every run.
     middleRunIndex: Math.ceil(numRuns / 2),

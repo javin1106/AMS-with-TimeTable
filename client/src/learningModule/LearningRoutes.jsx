@@ -44,6 +44,7 @@ import Calendar from './pages/Calendar';
 import Notifications from './pages/Notifications';
 import Profile from './pages/Profile';
 import BugReports from './pages/BugReports';
+import LmAdmin from './pages/LmAdmin';
 
 /**
  * The whole learning module hangs off one route in App.jsx (`/learning/*`),
@@ -69,6 +70,7 @@ export default function LearningRoutes() {
         <Route path="notifications" element={<Notifications />} />
         <Route path="profile" element={<Profile />} />
         <Route path="bugs" element={<BugReports />} />
+        <Route path="lm-admin" element={<LmAdmin />} />
 
         <Route path="class/:classId" element={<ClassLayout />}>
           <Route index element={<Stream />} />

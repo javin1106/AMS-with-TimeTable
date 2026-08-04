@@ -149,6 +149,7 @@ const lmApi = {
         grantRoleToExisting: Boolean(options.grantRoleToExisting),
       },
     }),
+  inviteStatus: (classId, batchId) => request(`/classes/${classId}/members/invite-status/${batchId}`),
   decideJoinRequest: (classId, membershipId, approve) =>
     request(`/classes/${classId}/members/${membershipId}/decide`, { method: 'POST', body: { approve } }),
   updateMember: (classId, membershipId, body) =>
@@ -349,6 +350,9 @@ const lmApi = {
   // whether to show the queue at all.
   allBugReports: ({ status, kind } = {}) => request(`/bugs${qs({ status, kind })}`),
   reviewBug: (reportId, body) => request(`/bugs/${reportId}`, { method: 'PATCH', body }),
+
+  /* lm-admin dashboard — platform-wide stats, 403 for anyone else */
+  adminSummary: () => request('/admin/summary'),
 
   /* ---- discussion forum ---- */
   listDiscussions: (classId) => request(`/classes/${classId}/discussions`),

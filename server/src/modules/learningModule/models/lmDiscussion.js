@@ -48,9 +48,11 @@ const lmDiscussionSchema = new mongoose.Schema({
    * If the row went, so would the week's rate-limit entry — post, delete, post
    * again, indefinitely. Keeping it is what makes one-a-week mean one a week.
    *
-   * `removedByStaff` additionally decides whether the class sees a tombstone: a
-   * thread taken down by a teacher leaves a visible mark, because moderation
-   * that looks like the post never existed is worse than moderation.
+   * Every removal leaves a visible tombstone in the list, whoever did it —
+   * moderation that looks like the post never existed is worse than
+   * moderation. `removedByStaff` and `removedByName` only decide what the
+   * tombstone says: a teacher's name if staff took it down, nothing if the
+   * author withdrew their own unanswered thread.
    */
   removed: { type: Boolean, default: false },
   removedByStaff: { type: Boolean, default: false },
