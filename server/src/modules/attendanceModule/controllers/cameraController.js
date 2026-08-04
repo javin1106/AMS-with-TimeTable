@@ -588,10 +588,10 @@ class CameraController {
         
         const proc = spawn(ffmpegPath, [
             '-i', filePath,
-            '-vn', '-acodec', 'mp3', '-q:a', '2', '-f', 'mp3', 'pipe:1'
+            '-vn', '-c:a', 'libmp3lame', '-b:a', '128k', '-ar', '44100', '-ac', '2', '-f', 'mp3', 'pipe:1'
         ]);
         proc.stdout.pipe(res);
-        proc.stderr.on('data', () => {});
+        proc.stderr.on('data', (d) => { console.log('FFmpeg Audio Error:', d.toString()); });
     }
 
     async deleteRecording(req, res) {

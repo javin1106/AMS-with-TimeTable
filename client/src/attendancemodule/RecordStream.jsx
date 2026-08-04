@@ -406,26 +406,16 @@ async function handleSchedulerSubmit() {
 }
 
     async function handleDownload(url, suggestedName, type) {
-        showToast(type === 'audio' ? 'Preparing audio…' : 'Downloading video…', 'info');
+        showToast(type === 'audio' ? 'Preparing audio download…' : 'Starting video download…', 'info');
         try {
-            const res = await apiFetch(url);
-            if (!res.ok) {
-                let errMsg = `Download failed (${res.status})`;
-                try { const d = await res.json(); errMsg = d.error || errMsg; } catch {}
-                showToast(errMsg, 'error');
-                return;
-            }
-            const blob = await res.blob();
-            const blobUrl = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = blobUrl;
+            a.href = url;
             a.download = suggestedName || '';
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
         } catch {
-            showToast('Download failed — check server connection', 'error');
+            showToast('Download failed', 'error');
         }
     }
 
