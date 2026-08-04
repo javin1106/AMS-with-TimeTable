@@ -291,7 +291,7 @@ export default function QuizBrief() {
               {settings.requireFullscreen && <ListItem>• The test runs in fullscreen.</ListItem>}
               {settings.disableCopyPaste && <ListItem>• Copy and paste are disabled.</ListItem>}
               {settings.disableRightClick && <ListItem>• Right-click is disabled.</ListItem>}
-              {settings.preventMobile && <ListItem>• Mobile devices are not permitted.</ListItem>}
+              {settings.preventMobile && <ListItem>• Please sit this on a laptop or desktop, not a phone.</ListItem>}
             </List>
           </Box>
         )}

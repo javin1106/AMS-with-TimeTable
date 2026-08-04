@@ -141,6 +141,12 @@ const lmQuizSchema = new mongoose.Schema({
     allowReviewBeforeSubmit: { type: Boolean, default: true },
 
     /* ---- proctoring ---- */
+    // Discourages phones; does not prevent them. The check is on the
+    // User-Agent, which the browser chooses for itself — devtools' device
+    // toolbar defeats it in one click. Kept because it does turn away the
+    // student who wandered in on a phone by accident, but the UI no longer
+    // calls it a block, because a teacher who believes it is one plans around a
+    // guarantee that does not exist.
     preventMobile: { type: Boolean, default: false },
     allowTabChange: { type: Boolean, default: true },
     maxTabSwitches: { type: Number, default: 3 },

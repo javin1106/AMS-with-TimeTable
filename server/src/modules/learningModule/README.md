@@ -37,8 +37,8 @@ server/src/modules/learningModule/
 │                     variantGenerator, examEngine, shortsAggregator,
 │                     notebookService
 ├── controllers/      class, member, stream, comment, coursework, submission,
-│                     quiz, tutorial, shorts, notebook, audioStudio,
-│                     notification, dashboard, upload
+│                     quiz (+ the attempt reaper), tutorial, shorts, notebook,
+│                     audioStudio, notification, dashboard, upload
 ├── routes/index.js   the whole API surface
 └── uploads/          attachment storage (git-ignored)
 ```
@@ -274,22 +274,44 @@ timings and the student's mental model of the paper.
 - `questionsPerAttempt` — draw N at random from the bank per student, with
   `totalMarks` scaled to the drawn paper.
 
-### Proctoring
+### Proctoring — and what it honestly does
 
-Deterrents, not guarantees — a determined student defeats any of them with
-devtools. What makes them useful is that **every event is recorded on the
-attempt** for the teacher to review, and the enforcement decision is the
-server's, not the browser's.
+Split into two halves, because they are not the same kind of thing.
 
-- `preventMobile` — checked server-side from the User-Agent when starting.
-- `allowTabChange` / `maxTabSwitches` / `autoSubmitOnTabLimit` — tab and window
-  blur is counted; passing the budget warns, or ends the attempt if configured.
-- `requireFullscreen` — the sitting is gated behind fullscreen, and exits are
-  recorded.
-- `disableCopyPaste`, `disableRightClick`.
+**Server-enforced.** These cannot be declined by a modified client:
 
-Every event lands in `attempt.violations` with a timestamp, and terminated
-attempts carry a `terminationReason`.
+| | |
+| --- | --- |
+| The clock | `deadlineState` in `examEngine` is the only authority. Every handler that accepts work — `answerAndAdvance`, `saveAttemptDraft`, `submitAttempt`, `getCurrentQuestion`, `heartbeat` — calls it. Whether the attempt expired is **derived**, never read from the request. |
+| Per-question timing | Its own clock, separate from the paper's. Running out on one question means that answer does not count (`late_answer`); running out of paper time ends the sitting. |
+| Abandoned attempts | `reapExpiredAttempts` sweeps every 5 minutes and finalises `in_progress` attempts past their deadline. Closing the tab is not an escape. |
+| Device provenance | `noteDevice` records the User-Agent and IP on every request and raises `device_changed` when either moves mid-attempt — the visible trace of a second machine, or of somebody driving the API with a copied token. |
+| Silence | The page pings `POST …/heartbeat` every 30s. Three missed beats raise `heartbeat_lost`. That signal exists because blocking the proctoring requests in devtools previously looked identical to flawless behaviour. |
+
+A five-second grace sits on every deadline comparison so a click with one second
+left is not lost to latency or a laptop clock a couple of seconds out. It is
+applied to the whole-paper deadline too, so it cannot be accumulated question by
+question.
+
+**Deterrents only.** Reported by the student's own browser, so a determined
+student defeats any of them:
+
+tab/window blur counting, fullscreen gating, copy/cut/paste and right-click
+suppression, and `preventMobile`.
+
+`preventMobile` deserves naming plainly: it checks the User-Agent, which the
+browser chooses for itself, so the devtools device toolbar defeats it in one
+click. The UI calls it *"Discourage mobile devices"* and says so, because a
+teacher who believes it is a block plans around a guarantee that does not exist.
+
+Everything in this half still lands in `attempt.violations` with a timestamp, and
+the enforcement decision (warn vs terminate) is the server's. **The point is the
+record, not the prevention.**
+
+**And what nothing here touches:** a second device, a person in the room, a
+shared account, or somebody sitting the paper on a student's behalf. No browser
+API can see any of them. A quiz that genuinely matters needs an invigilated lab,
+not JavaScript — and the UI should not imply otherwise.
 
 ### Collaborators
 

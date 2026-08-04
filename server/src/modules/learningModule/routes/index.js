@@ -161,6 +161,7 @@ classRouter.get("/attempts/:attemptId/current", asyncRoute(quizController.getCur
 classRouter.post("/attempts/:attemptId/answer", asyncRoute(quizController.answerAndAdvance));
 classRouter.post("/attempts/:attemptId/save", asyncRoute(quizController.saveAttemptDraft));
 classRouter.post("/attempts/:attemptId/violation", asyncRoute(quizController.recordViolation));
+classRouter.post("/attempts/:attemptId/heartbeat", asyncRoute(quizController.heartbeat));
 classRouter.post("/attempts/:attemptId/submit", asyncRoute(quizController.submitAttempt));
 classRouter.get("/attempts/:attemptId", asyncRoute(quizController.getAttempt));
 
@@ -236,5 +237,17 @@ classRouter.post("/studio/sessions/:sessionId/publish/quiz", requireTeacher, asy
 
 // insights
 classRouter.get("/analytics", requireTeacher, asyncRoute(dashboardController.getClassAnalytics));
+
+/**
+ * Expires quiz attempts nobody came back to.
+ *
+ * Started here because this file is required exactly once at boot and is the
+ * module's own entry point, which keeps the learning module's footprint in
+ * server/src to the single mount in routes.js. The timer is unref'd, so it never
+ * keeps the process alive; set LM_DISABLE_ATTEMPT_REAPER=1 to turn it off.
+ */
+if (process.env.LM_DISABLE_ATTEMPT_REAPER !== "1") {
+  quizController.startAttemptReaper();
+}
 
 module.exports = router;

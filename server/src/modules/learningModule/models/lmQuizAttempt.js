@@ -98,16 +98,44 @@ const lmQuizAttemptSchema = new mongoose.Schema({
     {
       type: {
         type: String,
-        enum: ['tab_switch', 'blur', 'fullscreen_exit', 'copy', 'paste', 'right_click', 'mobile_detected'],
+        enum: [
+          'tab_switch', 'blur', 'fullscreen_exit', 'copy', 'paste', 'right_click', 'mobile_detected',
+          // The signals below are raised by the *server*, so unlike the ones
+          // above a modified client cannot decline to report them.
+          //
+          // heartbeat_lost: the page stopped checking in while the attempt was
+          //   still open. Usually a flaky connection; also what blocking the
+          //   proctoring requests looks like, which previously read as flawless
+          //   behaviour.
+          // late_answer:    an answer arrived after that question's clock ran
+          //   out and was not counted.
+          // device_changed: the User-Agent or IP moved mid-attempt — a second
+          //   machine, or somebody driving the API with a copied token.
+          'heartbeat_lost', 'late_answer', 'device_changed',
+        ],
       },
       at: { type: Date, default: Date.now },
+      // Free-text context for the server-raised kinds above; empty for the rest.
+      detail: { type: String, default: '' },
       _id: false,
     },
   ],
   device: {
     userAgent: { type: String, default: '' },
     isMobile: { type: Boolean, default: false },
+    // Recorded so a sitting driven from somewhere other than the browser that
+    // started it is visible afterwards. Not a control — an IP is not an
+    // identity, and campus NAT means most students share one — but a change
+    // mid-attempt is worth a teacher's attention.
+    ip: { type: String, default: '' },
   },
+
+  // Last time the page checked in. `null` until the first heartbeat, so an
+  // attempt started before this field existed is not retroactively suspicious.
+  lastSeenAt: { type: Date, default: null },
+  // Set once when a lost heartbeat has been recorded, so a student offline for an
+  // hour collects one violation rather than one per sweep.
+  heartbeatLostAt: { type: Date, default: null },
   // Set when the attempt was ended by the proctoring rules rather than by the
   // student, so a teacher can see why.
   terminationReason: { type: String, default: '' },

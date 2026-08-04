@@ -350,6 +350,69 @@ function resultsVisible(quiz, now = new Date()) {
 }
 
 /**
+ * How much slack to allow past a deadline before an answer is refused.
+ *
+ * A student who clicks with one second left should not lose the answer to
+ * network latency, and a laptop clock a couple of seconds out should not either.
+ * Small enough that it cannot be farmed: five seconds on a paper is noise, and
+ * the whole-paper deadline is checked with the same slack so it cannot be
+ * accumulated question by question.
+ */
+const DEADLINE_GRACE_MS = 5000;
+
+/**
+ * The hard end of the attempt: the paper clock and the closing time, with the
+ * per-question clock deliberately excluded.
+ *
+ * Separate from `questionDeadline` because the two mean different things when
+ * enforcing. Running out of time on one question ends that question; running out
+ * of paper time ends the sitting. Treating them alike would either finalise a
+ * paper the moment one question timed out, or let the paper run forever as long
+ * as each question was answered promptly.
+ */
+function attemptDeadline(quiz, attempt) {
+  const settings = quiz.settings || {};
+  const candidates = [];
+
+  if (settings.timeLimitMinutes > 0) {
+    candidates.push(new Date(new Date(attempt.startedAt).getTime() + settings.timeLimitMinutes * 60000));
+  }
+  if (settings.availableTo) candidates.push(new Date(settings.availableTo));
+
+  if (!candidates.length) return null;
+  return new Date(Math.min(...candidates.map((date) => date.getTime())));
+}
+
+/**
+ * What the server should do with a request that has just arrived on an attempt.
+ *
+ * The client's countdown is a courtesy — it can be paused in a debugger,
+ * rewritten from the console, or simply ignored by talking to the API directly —
+ * so nothing may depend on it. This is the function that decides, and every
+ * handler that accepts an answer calls it.
+ *
+ * @returns {{deadline: Date|null, attemptExpired: boolean, questionExpired: boolean}}
+ *   `attemptExpired` means the sitting is over and must be finalised.
+ *   `questionExpired` means only this question's clock has run out, so the
+ *   answer does not count but the paper continues.
+ */
+function deadlineState(quiz, attempt, question, now = new Date()) {
+  const at = now instanceof Date ? now.getTime() : now;
+  const hard = attemptDeadline(quiz, attempt);
+  const current = questionDeadline(quiz, attempt, question, new Date(at));
+
+  const past = (deadline) => Boolean(deadline && at > new Date(deadline).getTime() + DEADLINE_GRACE_MS);
+
+  return {
+    deadline: current,
+    attemptExpired: past(hard),
+    // Only meaningful when the paper itself has not run out; a caller that
+    // finalises on attemptExpired never needs to look at this.
+    questionExpired: !past(hard) && past(current),
+  };
+}
+
+/**
  * Deadline for the question currently in front of the student, whichever of the
  * per-question clock and the whole-paper clock runs out first.
  */
@@ -398,6 +461,9 @@ module.exports = {
   windowState,
   resultsVisible,
   questionDeadline,
+  attemptDeadline,
+  deadlineState,
+  DEADLINE_GRACE_MS,
   estimatedDurationSec,
   isMobileUserAgent,
   sameSet,

@@ -15,8 +15,25 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  * @param {(type: string) => Promise<object>} options.onViolation
  *        reports to the server; its response may ask us to stop (terminated)
  * @param {() => void} options.onTerminated
+ * @param {() => Promise<object>} [options.onHeartbeat]
+ *        called on a timer while the paper is open. Unlike the violation
+ *        reports, this one matters by its *absence*: a client whose reporting
+ *        has been blocked in devtools stops sending it, and the server records
+ *        the silence. It also lets the server end a paper whose time ran out
+ *        while the student sat looking at it.
  */
-export default function useProctoring({ settings = {}, active, onViolation, onTerminated }) {
+// Three of these may be missed before the server notes the silence, so a brief
+// hiccup costs nothing while a blocked client is visible within a couple of
+// minutes.
+const HEARTBEAT_MS = 30 * 1000;
+
+export default function useProctoring({
+  settings = {},
+  active,
+  onViolation,
+  onTerminated,
+  onHeartbeat,
+}) {
   const [tabSwitches, setTabSwitches] = useState(0);
   const [warning, setWarning] = useState(null);
   const [remaining, setRemaining] = useState(null);
@@ -44,6 +61,37 @@ export default function useProctoring({ settings = {}, active, onViolation, onTe
     },
     [onViolation, onTerminated],
   );
+
+  /* ---- still-here ping ---- */
+  useEffect(() => {
+    if (!active || !onHeartbeat) return undefined;
+
+    let cancelled = false;
+    const beat = async () => {
+      if (cancelled || terminatedRef.current) return;
+      try {
+        const result = await onHeartbeat();
+        if (cancelled) return;
+        // The server may have finalised the paper on its own clock — a tab left
+        // open past the deadline finds out here rather than on the next click.
+        if (result?.finished) {
+          terminatedRef.current = true;
+          if (result.expired) setWarning('Time is up — your test has been submitted.');
+          onTerminated?.();
+        }
+      } catch {
+        // Offline, or the request was blocked. Either way the server sees the
+        // gap; there is nothing useful to do here.
+      }
+    };
+
+    beat();
+    const timer = setInterval(beat, HEARTBEAT_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [active, onHeartbeat, onTerminated]);
 
   /* ---- leaving the window ---- */
   useEffect(() => {

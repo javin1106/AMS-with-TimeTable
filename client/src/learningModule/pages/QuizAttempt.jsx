@@ -255,6 +255,7 @@ export default function QuizAttempt() {
     settings: settings || {},
     active: Boolean(attempt) && attempt.status === 'in_progress' && !finishedRef.current,
     onViolation: (type) => lmApi.recordViolation(classId, attemptId, type),
+    onHeartbeat: () => lmApi.heartbeat(classId, attemptId),
     onTerminated: async () => {
       finishedRef.current = true;
       const finished = await lmApi.getAttempt(classId, attemptId).catch(() => null);
