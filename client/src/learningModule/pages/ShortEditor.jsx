@@ -125,6 +125,18 @@ function OptionRows({ slide, onChange }) {
     onChange({ options });
   };
 
+  const addOption = () => {
+    const options = [...slide.options, ''];
+    // A ranking key has to place every item, so a new row joins the key at the
+    // end rather than leaving the slide failing validation the moment it is
+    // added. Nothing to do when there is no key — the slide is a poll.
+    if (slide.type === 'ranking' && slide.correctAnswers.length) {
+      onChange({ options, correctAnswers: [...slide.correctAnswers, String(slide.options.length)] });
+      return;
+    }
+    onChange({ options });
+  };
+
   const removeOption = (index) => {
     const options = slide.options.filter((_, i) => i !== index);
     // A key referring to a removed option would mark the whole room wrong with
@@ -148,12 +160,14 @@ function OptionRows({ slide, onChange }) {
     });
   };
 
+  // The key for a ranking *is* an order, so there is no checkbox to tick — the
+  // controls below all write a permutation of the option indices.
+  const identityOrder = () => slide.options.map((_, i) => String(i));
+  const currentOrder = () =>
+    slide.correctAnswers.length ? [...slide.correctAnswers] : identityOrder();
+
   const moveInKey = (index, delta) => {
-    // For ranking the key *is* an order, so the control is "move up/down in the
-    // correct order" rather than a checkbox.
-    const order = slide.correctAnswers.length
-      ? [...slide.correctAnswers]
-      : slide.options.map((_, i) => String(i));
+    const order = currentOrder();
     const from = order.indexOf(String(index));
     const to = from + delta;
     if (from < 0 || to < 0 || to >= order.length) return;
@@ -161,24 +175,67 @@ function OptionRows({ slide, onChange }) {
     onChange({ correctAnswers: order });
   };
 
+  // Stating a rank outright, rather than nudging towards it. Swapping with
+  // whoever holds that rank keeps the key a complete permutation at every step,
+  // which is what the server requires — a half-assigned key is not a valid one.
+  const setRank = (index, rank) => {
+    const order = currentOrder();
+    const from = order.indexOf(String(index));
+    const to = rank - 1;
+    if (from < 0 || to < 0 || to >= order.length) return;
+    [order[from], order[to]] = [order[to], order[from]];
+    onChange({ correctAnswers: order });
+  };
+
   const keyOrder = slide.correctAnswers.length ? slide.correctAnswers : null;
+  // Unique per slide, so one slide's answer key is never a sibling of another's.
+  const keyPrefix = `answer-${slide._key}`;
 
   return (
     <VStack align="stretch" spacing={2}>
       {slide.options.map((option, index) => (
         <HStack key={index} spacing={2}>
           {isRanking ? (
-            <Badge minW="34px" textAlign="center" py={1}>
-              {keyOrder ? keyOrder.indexOf(String(index)) + 1 : '–'}
-            </Badge>
+            /* A rank the teacher picks, not only one they nudge towards with
+               the arrows. Until a key exists every row reads "–", which is the
+               honest state: an unkeyed ranking runs as an opinion poll. */
+            <Select
+              size="sm"
+              w="70px"
+              flexShrink={0}
+              value={keyOrder ? keyOrder.indexOf(String(index)) + 1 : ''}
+              title="Position in the correct order"
+              onChange={(event) =>
+                // Choosing "–" drops the key entirely: a ranking is keyed as a
+                // whole sequence or not at all, so there is no single row to
+                // un-rank on its own.
+                event.target.value
+                  ? setRank(index, Number(event.target.value))
+                  : onChange({ correctAnswers: [] })
+              }
+            >
+              <option value="">–</option>
+              {slide.options.map((_, rank) => (
+                <option key={rank} value={rank + 1}>
+                  {rank + 1}
+                </option>
+              ))}
+            </Select>
           ) : single ? (
+            /* The id and name are not decoration. A Radio inside a FormControl
+               but outside a RadioGroup inherits the *FormControl's* id, and its
+               root label points `htmlFor` at it — so every row would carry the
+               same id and every click would land on the first option. */
             <Radio
+              id={`${keyPrefix}-${index}`}
+              name={keyPrefix}
               isChecked={slide.correctAnswers.includes(String(index))}
               onChange={() => toggleCorrect(index)}
               title="Mark as the correct answer"
             />
           ) : (
             <Checkbox
+              id={`${keyPrefix}-${index}`}
               isChecked={slide.correctAnswers.includes(String(index))}
               onChange={() => toggleCorrect(index)}
               title="Mark as a correct answer"
@@ -227,12 +284,25 @@ function OptionRows({ slide, onChange }) {
 
       {!locked && (
         <HStack>
-          <Button size="xs" variant="outline" onClick={() => onChange({ options: [...slide.options, ''] })}>
+          <Button size="xs" variant="outline" onClick={addOption}>
             Add option
           </Button>
           {!isRanking && slide.correctAnswers.length > 0 && (
             <Button size="xs" variant="ghost" onClick={() => onChange({ correctAnswers: [] })}>
               Clear answer key (make it a poll)
+            </Button>
+          )}
+          {/* The obvious intent — "I typed them in the right order" — had no
+              control at all: every other way in swaps two rows, so the order as
+              listed could only be keyed by nudging one row away and back. */}
+          {isRanking && !slide.correctAnswers.length && slide.options.length > 1 && (
+            <Button
+              size="xs"
+              variant="outline"
+              colorScheme="purple"
+              onClick={() => onChange({ correctAnswers: slide.options.map((_, i) => String(i)) })}
+            >
+              Use the order shown as the answer
             </Button>
           )}
           {isRanking && slide.correctAnswers.length > 0 && (
@@ -337,7 +407,7 @@ function SlideCard({ slide, index, total, onChange, onMove, onRemove, onDuplicat
           <OptionRows slide={slide} onChange={onChange} />
           <FormHelperText fontSize="xs">
             {slide.type === 'ranking'
-              ? 'Set a correct order with the arrows, or leave it unset to run it as an opinion poll.'
+              ? 'Give each item its position in the correct order — pick a number, use the arrows, or take the order shown as it stands. Leave every position blank to run it as an opinion poll.'
               : 'Tick the correct answer to have it marked. Leave everything unticked to run it as a poll.'}
           </FormHelperText>
         </FormControl>

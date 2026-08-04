@@ -74,6 +74,10 @@ const C = '/classes/:classId';
 // Endpoints that expose an answer key, another student's work, or the ability to
 // change what the class sees.
 const TEACHER_ONLY = [
+  // Pin and close a forum thread. Staff moderation, and neither touches the
+  // text — removal is a separate route the author can also reach.
+  `PATCH ${C}/discussions/:discussionId`,
+
   `POST ${C}/notebooks`,
   `PATCH ${C}/notebooks/:notebookId`,
   `DELETE ${C}/notebooks/:notebookId`,
@@ -95,6 +99,8 @@ const TEACHER_ONLY = [
   `GET ${C}/short-sessions/:sessionId/report.csv`,
 
   `POST ${C}/quizzes`,
+  `POST ${C}/attempts/:attemptId/reopen`,
+  `DELETE ${C}/attempts/:attemptId`,
   `GET ${C}/quizzes/:quizId/results`,
   `GET ${C}/quizzes/:quizId/results.csv`,
 
@@ -121,6 +127,8 @@ const TEACHER_ONLY = [
   `GET ${C}/members/:membershipId/progress`,
 
   `GET ${C}/analytics`,
+
+  `PATCH ${C}/feedback/:feedbackId`,
 
   `POST ${C}/archive`,
   `POST ${C}/code/regenerate`,
@@ -153,6 +161,26 @@ const TEACHER_ONLY = [
  * table alone cannot express it.
  */
 const STUDENT_REACHABLE = [
+  // Open on purpose: a leaderboard only staff can read is a report, not a game.
+  // The response is aggregate scores and badge counts — no submissions, no
+  // marks — and the teacher-only class summary is gated inside the handler on
+  // `req.lmIsTeacher`.
+  [`GET ${C}/leaderboard`, 'aggregate points only; the staff summary is gated in the handler'],
+  [`GET ${C}/points-guide`, 'the rules themselves — nothing class-specific in it'],
+  // The forum is a student surface by design; starting a topic is the point.
+  [`GET ${C}/discussions`, 'class-visible threads only; withdrawn ones filtered out'],
+  [`POST ${C}/discussions`, 'one a week per student, enforced by a unique index'],
+  [`GET ${C}/discussions/:discussionId`, 'class-visible thread'],
+  [`DELETE ${C}/discussions/:discussionId`, 'author-only while unanswered; staff otherwise — checked in the handler'],
+  [`GET ${C}/my-points`, "scoped to the caller's own studentId"],
+  // Open on purpose: badges are meant to be seen, and the table already says
+  // how many each person holds. The handler narrows the *response* rather than
+  // refusing it — a classmate gets the badges without the ledger behind them,
+  // because a row reads `Sat "Midterm" — 42%`.
+  [
+    `GET ${C}/students/:studentId/points`,
+    'badges are class-visible; the handler withholds the ledger from everybody but the owner and staff',
+  ],
   [`GET ${C}/notebooks`, 'unpublished notebooks filtered out of the query'],
   [`GET ${C}/notebooks/:notebookId/attempt`, '403 unless published; seeds the caller their own copy'],
   [`GET ${C}/notebook-attempts/:attemptId`, 'ownership checked in the handler'],
@@ -169,6 +197,16 @@ const STUDENT_REACHABLE = [
   [`GET ${C}/studio/sessions/:sessionId`, 'transcript and quiz draft withheld'],
   [`GET ${C}/studio/sessions`, 'filtered to lectures whose material was published'],
   [`POST ${C}/studio/sessions/:sessionId/ask`, '403 unless the lecture was published to them'],
+
+  [
+    `GET ${C}/feedback`,
+    'students get only their own notes; staff get the class’s with every identifying field stripped by forTeacher()',
+  ],
+  [`POST ${C}/feedback`, 'requireClassStudent; the word filter and the strike ladder run before anything is written'],
+  [
+    `DELETE ${C}/feedback/:feedbackId`,
+    'platform-admin-only, checked in the handler — requireTeacher here would let the staff member a complaint is about delete it',
+  ],
 
   [`GET ${C}/topics`, 'topic names are not sensitive'],
   [`POST ${C}/leave`, 'acts on the caller’s own membership'],

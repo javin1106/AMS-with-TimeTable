@@ -172,6 +172,32 @@ function requireTeacher(req, res, next) {
   return next();
 }
 
+/**
+ * Sitting a test is for this class's students and nobody else.
+ *
+ * `loadClass` has already turned away everyone with no standing here at all;
+ * this is the other half of the rule — an *active student enrolment*, not
+ * merely access. Teaching staff, collaborators and platform admins reach a
+ * class through roles rather than the roll, and an attempt from one of them
+ * would land in the same results table as the cohort's, skewing every average
+ * the teacher then reads. So they are refused the paper rather than quietly
+ * scored alongside it.
+ *
+ * Membership is re-read from the request rather than trusted from the client:
+ * a student removed from the class mid-sitting fails the very next call.
+ */
+function requireClassStudent(req, res, next) {
+  const enrolled = req.lmMembership?.status === "active" && req.lmMembership.role === "student";
+  if (enrolled) return next();
+
+  return res.status(403).json({
+    code: req.lmIsTeacher ? "STAFF_CANNOT_SIT" : "NOT_ENROLLED",
+    message: req.lmIsTeacher
+      ? "Only students enrolled in this class can take the test. Staff accounts can read the paper in the quiz editor instead."
+      : "Only students enrolled in this class can take the test. Ask your teacher to add you to the class.",
+  });
+}
+
 function requireOwner(req, res, next) {
   const owns = String(req.lmClass.ownerId) === req.lmUser.id || req.lmUser.isAdmin;
   if (!owns) return res.status(403).json({ message: "Only the class owner can do that." });
@@ -193,10 +219,12 @@ module.exports = {
   requireClassCreator,
   loadClass,
   requireTeacher,
+  requireClassStudent,
   requireOwner,
   asyncRoute,
   isPlatformAdmin,
   hasLearningRole,
+  PLATFORM_ADMIN_ROLES,
   TEACHER_PLATFORM_ROLES,
   STUDENT_PLATFORM_ROLES,
 };

@@ -15,14 +15,16 @@ import {
   Stack,
   Text,
   Textarea,
+  useDisclosure,
   useToast,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import { AttachmentList, AttachmentPicker } from '../components/Attachments';
 import CommentThread from '../components/CommentThread';
+import MaterialModal from '../components/MaterialModal';
 import RichText from '../components/RichText';
 import { DueBadge, ErrorState, Loading, SectionCard, StateBadge } from '../components/common';
-import { WORK_TYPE_META, formatDateTime } from '../format';
+import { courseworkMeta, formatDateTime } from '../format';
 
 /** The student's "Your work" panel — draft, turn in, unsubmit, see the grade. */
 function YourWork({ classId, coursework, submission, onChanged }) {
@@ -169,12 +171,13 @@ function YourWork({ classId, coursework, submission, onChanged }) {
 }
 
 export default function CourseworkDetail() {
-  const { classId, isTeacher } = useOutletContext();
+  const { classId, klass, isTeacher, reloadClass } = useOutletContext();
   const { courseworkId } = useParams();
   const [item, setItem] = useState(null);
   const [me, setMe] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const { isOpen: isEditOpen, onOpen: onEditOpen, onClose: onEditClose } = useDisclosure();
   const navigate = useNavigate();
 
   const load = useCallback(async () => {
@@ -201,7 +204,7 @@ export default function CourseworkDetail() {
   if (error) return <ErrorState error={error} onRetry={load} />;
   if (!item) return null;
 
-  const meta = WORK_TYPE_META[item.workType] || WORK_TYPE_META.assignment;
+  const meta = courseworkMeta(item);
 
   // Material has its own tab; everything else reached this page from the stream.
   const isMaterial = item.workType === 'material';
@@ -235,7 +238,12 @@ export default function CourseworkDetail() {
                   {item.aiSourceSessionId && <Badge colorScheme="purple">✨ From a class recording</Badge>}
                 </HStack>
               </Box>
-              {isTeacher && item.workType !== 'material' && (
+              {isTeacher && isMaterial && (
+                <Button size="sm" colorScheme="blue" variant="outline" onClick={onEditOpen}>
+                  Edit
+                </Button>
+              )}
+              {isTeacher && !isMaterial && (
                 <Button
                   as={RouterLink}
                   to={`/learning/class/${classId}/work/${item._id}/grade`}
@@ -261,7 +269,8 @@ export default function CourseworkDetail() {
 
             <AttachmentList attachments={item.attachments} />
 
-            {isTeacher && item.submissions && (
+            {/* Material is never assigned or graded, so it has no counts. */}
+            {isTeacher && !isMaterial && item.submissions && (
               <Box mt={5}>
                 <Divider mb={3} />
                 <HStack spacing={5}>
@@ -313,6 +322,20 @@ export default function CourseworkDetail() {
           </Box>
         )}
       </Flex>
+
+      {isTeacher && isMaterial && (
+        <MaterialModal
+          isOpen={isEditOpen}
+          onClose={onEditClose}
+          classId={classId}
+          topics={klass?.topics || []}
+          initial={item}
+          onSaved={async () => {
+            await load();
+            reloadClass?.();
+          }}
+        />
+      )}
     </Box>
   );
 }

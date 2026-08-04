@@ -2,6 +2,7 @@ const LmCoursework = require("../models/lmCoursework");
 const LmSubmission = require("../models/lmSubmission");
 const LmMembership = require("../models/lmMembership");
 const { notifyUser } = require("../services/notifyService");
+const game = require("../services/gamification");
 
 async function loadOwnSubmission(req) {
   const coursework = await LmCoursework.findOne({
@@ -71,6 +72,10 @@ exports.turnIn = async (req, res) => {
   submission.maxPoints = coursework.points;
   submission.history.push({ action: "turned_in", actorName: req.lmUser.name, at: now });
   await submission.save();
+
+  // Rides on a save that has already succeeded, and swallows its own failures:
+  // nobody should be unable to turn work in because the leaderboard was busy.
+  await game.onSubmission({ req, coursework, late: isLate, at: now });
 
   await notifyUser({
     userId: coursework.createdBy,

@@ -243,3 +243,57 @@ describe('learningModule notebookService — validateCells', () => {
     expect(nb.validateCells(nb.prepareCells([{ type: 'code', source: '' }]))).toEqual([]);
   });
 });
+
+/**
+ * The submission summary.
+ *
+ * "Completed" drives what a teacher sees against each student, so the edges
+ * matter: a cell that ran and raised is not a cell that worked, and markdown is
+ * not a cell that runs at all. None of it is evidence — the outputs come from
+ * the student's browser — so these pin the arithmetic, not a grading rule.
+ */
+describe('learningModule notebookService — summariseAttempt', () => {
+  const ran = (overrides = {}) => ({
+    type: 'code',
+    executedAt: new Date(),
+    runCount: 1,
+    outputs: [],
+    ...overrides,
+  });
+
+  it('counts a notebook where every code cell ran cleanly as completed', () => {
+    const summary = nb.summariseAttempt([ran(), ran(), { type: 'markdown', source: '# Notes' }]);
+    expect(summary).toMatchObject({ codeCells: 2, cellsRun: 2, cellsErrored: 0, completed: true });
+  });
+
+  it('does not count a cell that ran and raised', () => {
+    // The student pressed run on everything, but the notebook does not work.
+    const summary = nb.summariseAttempt([
+      ran(),
+      ran({ outputs: [{ type: 'error', text: 'NameError' }] }),
+    ]);
+    expect(summary).toMatchObject({ cellsRun: 2, cellsErrored: 1, completed: false });
+  });
+
+  it('does not count a notebook with a cell left unrun', () => {
+    const summary = nb.summariseAttempt([ran(), { type: 'code', outputs: [], runCount: 0 }]);
+    expect(summary).toMatchObject({ codeCells: 2, cellsRun: 1, completed: false });
+  });
+
+  it('ignores markdown, which has nothing to run', () => {
+    const summary = nb.summariseAttempt([{ type: 'markdown', source: 'Read this' }, ran()]);
+    expect(summary).toMatchObject({ codeCells: 1, cellsRun: 1, completed: true });
+  });
+
+  it('treats a notebook with no code at all as not completed', () => {
+    // Otherwise a prose-only submission reports the same "worked through it" as
+    // a student who did the exercise.
+    expect(nb.summariseAttempt([{ type: 'markdown', source: 'Hi' }]).completed).toBe(false);
+    expect(nb.summariseAttempt([]).completed).toBe(false);
+  });
+
+  it('accepts stderr without calling it an error — warnings are not failures', () => {
+    const summary = nb.summariseAttempt([ran({ outputs: [{ type: 'stderr', text: 'DeprecationWarning' }] })]);
+    expect(summary).toMatchObject({ cellsErrored: 0, completed: true });
+  });
+});

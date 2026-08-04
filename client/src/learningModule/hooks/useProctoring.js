@@ -12,15 +12,21 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  * @param {object} options
  * @param {object} options.settings   the quiz's proctoring settings
  * @param {boolean} options.active    only watch while a sitting is in progress
- * @param {(type: string) => Promise<object>} options.onViolation
- *        reports to the server; its response may ask us to stop (terminated)
- * @param {() => void} options.onTerminated
+ * @param {(type: string) => Promise<object>} [options.onViolation]
+ *        reports to the server; its response may ask us to stop (terminated).
+ *        Omitting it leaves the deterrents in place and reports nothing, which
+ *        is what the pre-test brief wants: the same locked-down screen, with
+ *        nothing yet to record it against.
+ * @param {() => void} [options.onTerminated]
  */
 export default function useProctoring({ settings = {}, active, onViolation, onTerminated }) {
   const [tabSwitches, setTabSwitches] = useState(0);
   const [warning, setWarning] = useState(null);
   const [remaining, setRemaining] = useState(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  // Seeded from the document rather than `false`: the quiz stage is already
+  // fullscreen by the time a sitting mounts, and starting at false would flash
+  // the "fullscreen required" gate for a frame before the watcher corrected it.
+  const [isFullscreen, setIsFullscreen] = useState(() => Boolean(document.fullscreenElement));
   const terminatedRef = useRef(false);
 
   const report = useCallback(
@@ -92,52 +98,33 @@ export default function useProctoring({ settings = {}, active, onViolation, onTe
     return () => document.removeEventListener('contextmenu', block);
   }, [active, settings.disableRightClick, report]);
 
-  /* ---- fullscreen ---- */
+  /* ---- fullscreen ----
+     Watched whether or not the paper demands fullscreen, and whether or not a
+     sitting is live. A quiz that merely opened in fullscreen still owes the
+     student a word when they drop out of it — the screen reads `isFullscreen`
+     to say so — and `active` must not gate the *watching*: a state seeded at
+     mount and then never updated reads "still fullscreen" for the rest of the
+     sitting, which is exactly how a fullscreen gate comes to never fire.
+     Only the report is gated, on `active` and on `requireFullscreen`. */
   useEffect(() => {
-    if (!active || !settings.requireFullscreen) return undefined;
-
     const onChange = () => {
       const inFullscreen = Boolean(document.fullscreenElement);
       setIsFullscreen(inFullscreen);
-      if (!inFullscreen) report('fullscreen_exit');
+      if (!inFullscreen && active && settings.requireFullscreen) report('fullscreen_exit');
     };
     document.addEventListener('fullscreenchange', onChange);
     setIsFullscreen(Boolean(document.fullscreenElement));
     return () => document.removeEventListener('fullscreenchange', onChange);
   }, [active, settings.requireFullscreen, report]);
 
-  /**
-   * Fullscreens `target` — the caller passes the quiz element itself, so the
-   * surrounding app chrome (module header, class header, tabs) is left behind
-   * rather than blown up to fill the screen with it.
-   */
-  const enterFullscreen = useCallback(async (target) => {
-    const element = target instanceof Element ? target : document.documentElement;
-    try {
-      await element.requestFullscreen();
-      setIsFullscreen(true);
-      return true;
-    } catch {
-      // Browsers only grant this from a user gesture; the caller shows a prompt.
-      return false;
-    }
-  }, []);
-
-  const exitFullscreen = useCallback(async () => {
-    try {
-      if (document.fullscreenElement) await document.exitFullscreen();
-    } catch {
-      // Nothing useful to do if the browser refuses.
-    }
-  }, []);
-
+  // Entering and leaving fullscreen belongs to the quiz stage, not here: it
+  // owns an element that outlives both quiz screens, so one fullscreen covers
+  // the brief and the sitting. This hook only watches and reports.
   return {
     tabSwitches,
     warning,
     remaining,
     isFullscreen,
-    enterFullscreen,
-    exitFullscreen,
     dismissWarning: () => setWarning(null),
   };
 }

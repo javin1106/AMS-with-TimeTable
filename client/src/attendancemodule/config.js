@@ -8,6 +8,9 @@ const TIMETABLE_API = `${apiUrl}/timetablemodule`;
 
 // Dropdown options
 const DEGREES = ['BTECH', 'MTECH', 'BSC', 'MSC', 'MBA', 'PHD', 'INTEGRATED BSC-BED'];
+// Degrees as the ERP spells them in its roster request ("B.Tech", not "BTECH").
+// Kept separate from DEGREES above, which is the ground-truth folder format.
+const ERP_DEGREES = ['B.Tech', 'M.Tech', 'B.Sc.', 'M.Sc.', 'MBA', 'Ph.D.', 'Integrated B.Sc.-B.Ed.'];
 // DEPARTMENTS is intentionally removed — always fetched live from /departments
 const DEPARTMENTS = [];
 
@@ -223,4 +226,4 @@ const cssReset = `
     .ams-table tfoot td { padding: 10px 16px; background: #f0f2f9; font-weight: 700; font-size: 12px; border: none; border-top: 1px solid #e4e8f5; }
 `;
 
-export { API_BASE, TIMETABLE_API, DEGREES, DEPARTMENTS, YEARS, theme, styles, cssReset };
+export { API_BASE, TIMETABLE_API, DEGREES, ERP_DEGREES, DEPARTMENTS, YEARS, theme, styles, cssReset };

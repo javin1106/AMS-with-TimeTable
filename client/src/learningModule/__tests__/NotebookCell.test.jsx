@@ -108,6 +108,61 @@ describe('learningModule <NotebookCell />', () => {
     expect(screen.queryByLabelText('Run cell')).not.toBeInTheDocument();
   });
 
+  /* ---- markdown: prose first, source on request ---- */
+
+  it('renders an editable markdown cell as prose, not as source', () => {
+    // The whole point of the cell is the prose. Leaving the editor open meant a
+    // notebook of explanation arrived as a wall of ## and **.
+    render(<NotebookCell {...props} cell={{ _id: 'm1', type: 'markdown', source: '## Warm up' }} />);
+    expect(screen.getByText('Warm up')).toBeInTheDocument();
+    expect(screen.queryByTestId('editor')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /edit/i })).toBeInTheDocument();
+  });
+
+  it('swaps to the source when Edit is pressed, and back again', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    render(<NotebookCell {...props} cell={{ _id: 'm1', type: 'markdown', source: '## Warm up' }} />);
+
+    await user.click(screen.getByRole('button', { name: /edit/i }));
+    expect(screen.getByTestId('editor')).toHaveValue('## Warm up');
+
+    await user.click(screen.getByRole('button', { name: /done/i }));
+    expect(screen.queryByTestId('editor')).not.toBeInTheDocument();
+    expect(screen.getByText('Warm up')).toBeInTheDocument();
+  });
+
+  it('opens a brand-new markdown cell in the editor, since there is no prose yet', () => {
+    render(<NotebookCell {...props} cell={{ _id: 'm1', type: 'markdown', source: '' }} />);
+    expect(screen.getByTestId('editor')).toBeInTheDocument();
+  });
+
+  /* ---- run status ---- */
+
+  it('ticks a cell that ran without errors, which is all an assignment shows', () => {
+    // `x = 1` succeeds and displays nothing; without the tick that is
+    // indistinguishable from a cell that never ran.
+    render(<NotebookCell {...props} cell={codeCell({ runCount: 1, outputs: [] })} />);
+    expect(screen.getByLabelText('Ran successfully')).toBeInTheDocument();
+  });
+
+  it('marks a cell whose last run raised, rather than ticking it', () => {
+    render(
+      <NotebookCell
+        {...props}
+        cell={codeCell({ runCount: 1, outputs: [{ type: 'error', text: 'NameError' }] })}
+      />,
+    );
+    expect(screen.getByLabelText('Finished with an error')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Ran successfully')).not.toBeInTheDocument();
+  });
+
+  it('shows running rather than the previous tick while a cell is re-run', () => {
+    render(<NotebookCell {...props} running cell={codeCell({ runCount: 1 })} />);
+    expect(screen.getByText('Running…')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Ran successfully')).not.toBeInTheDocument();
+  });
+
   it('renders every output in order, so print-then-error reads correctly', () => {
     const { container } = render(
       <NotebookCell

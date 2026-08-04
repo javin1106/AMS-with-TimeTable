@@ -18,12 +18,26 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 const PYODIDE_URL =
   import.meta.env.VITE_PYODIDE_URL || 'https://cdn.jsdelivr.net/pyodide/v0.26.4/full/';
 
-export default function usePyodide(packages = []) {
+/**
+ * @param {string[]} [packages] PyPI names to install with micropip. Only needed
+ *        for things Pyodide does not ship — numpy, pandas, matplotlib, scipy
+ *        and friends are found by scanning `sources` and need no declaration.
+ * @param {string[]} [sources]  the notebook's cell sources, read at kernel
+ *        start so their imports are fetched during the startup wait rather
+ *        than stalling the first cell that needs one.
+ */
+export default function usePyodide(packages = [], sources = []) {
   // 'idle' until something actually needs Python — a notebook that is only
   // being read should not pull ten megabytes.
   const [status, setStatus] = useState('idle');
   const [detail, setDetail] = useState('');
   const [busyCellId, setBusyCellId] = useState(null);
+  // What the live kernel was actually started with, which is not the same as
+  // `packages` the moment someone edits the list: installs happen at startup
+  // only. A caller that can change the list mid-session needs to be able to see
+  // the difference and offer a restart, rather than letting the notebook fail
+  // on an import it believes it has already declared.
+  const [kernelPackages, setKernelPackages] = useState(null);
 
   const workerRef = useRef(null);
   // Resolver for the run currently in flight, keyed so a stale worker's late
@@ -31,6 +45,10 @@ export default function usePyodide(packages = []) {
   const pendingRef = useRef(null);
   const packagesRef = useRef(packages);
   packagesRef.current = packages;
+  // Read at start/restart rather than captured, so a kernel started after the
+  // notebook loads still sees the cells it has to scan.
+  const sourcesRef = useRef(sources);
+  sourcesRef.current = sources;
 
   const teardown = useCallback(() => {
     if (workerRef.current) {
@@ -42,6 +60,7 @@ export default function usePyodide(packages = []) {
       pendingRef.current = null;
     }
     setBusyCellId(null);
+    setKernelPackages(null);
   }, []);
 
   useEffect(() => teardown, [teardown]);
@@ -99,7 +118,13 @@ export default function usePyodide(packages = []) {
     setStatus('loading');
     setDetail('Starting Python…');
     const worker = spawn();
-    worker.postMessage({ type: 'init', indexURL: PYODIDE_URL, packages: packagesRef.current });
+    setKernelPackages([...packagesRef.current]);
+    worker.postMessage({
+      type: 'init',
+      indexURL: PYODIDE_URL,
+      packages: packagesRef.current,
+      sources: sourcesRef.current,
+    });
   }, [spawn]);
 
   /** Throws away the kernel and starts a clean one — the notebook "restart". */
@@ -108,7 +133,13 @@ export default function usePyodide(packages = []) {
     setStatus('loading');
     setDetail('Restarting Python…');
     const worker = spawn();
-    worker.postMessage({ type: 'init', indexURL: PYODIDE_URL, packages: packagesRef.current });
+    setKernelPackages([...packagesRef.current]);
+    worker.postMessage({
+      type: 'init',
+      indexURL: PYODIDE_URL,
+      packages: packagesRef.current,
+      sources: sourcesRef.current,
+    });
   }, [spawn, teardown]);
 
   /**
@@ -143,5 +174,5 @@ export default function usePyodide(packages = []) {
     setDetail('Stopped. Variables from the previous run are gone.');
   }, [teardown]);
 
-  return { status, detail, busyCellId, start, restart, runCell, stop };
+  return { status, detail, busyCellId, kernelPackages, start, restart, runCell, stop };
 }

@@ -52,7 +52,6 @@
     "lottie-react": "^2.4.0",
     "lucide-react": "^0.525.0",
     "moment-timezone": "^0.5.45",
-    "node": "^21.1.0",
     "papaparse": "^5.4.1",
     "pdf-lib": "^1.17.1",
     "pdfmake": "^0.2.18",

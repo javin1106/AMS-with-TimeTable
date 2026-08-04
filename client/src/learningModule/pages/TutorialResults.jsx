@@ -28,7 +28,7 @@ import {
   useToast,
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
-import { EmptyState, ErrorState, Loading, SectionCard, StatTile } from '../components/common';
+import { EmptyState, ErrorState, Loading, SectionCard, StatTile, buttonTextStyles } from '../components/common';
 import { richTextToPlain } from '../richTextUtils';
 import { formatDateTime } from '../format';
 
@@ -185,7 +185,7 @@ export default function TutorialResults() {
             <Accordion allowToggle>
               {attempts.map((attempt) => (
                 <AccordionItem key={attempt._id}>
-                  <AccordionButton>
+                  <AccordionButton {...buttonTextStyles}>
                     <Flex flex="1" align="center" gap={3} textAlign="left" wrap="wrap">
                       <Text fontSize="sm" fontWeight="500" flex="1" minW="140px">
                         {attempt.studentName || attempt.studentEmail}
