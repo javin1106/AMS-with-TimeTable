@@ -64,10 +64,9 @@ export default function AttendanceReport() {
   const [rtspUrl2, setRtspUrl2] = useState('');
   const [checkIntervalMin, setCheckIntervalMin] = useState(5);
 
-  // ── Room list from DB ─────────────────────────────────────────
+  // ── Room list from DB (only rooms that have cameras registered) ──
   const [rooms, setRooms] = useState([]);
-  const [roomSearch, setRoomSearch] = useState('');
-  const [showRoomDrop, setShowRoomDrop] = useState(false);
+  const [roomsLoading, setRoomsLoading] = useState(true);
 
   // ── Timetable auto-lookup state ───────────────────────────────
   const [ttStatus, setTtStatus] = useState(null); // null | 'loading' | 'found' | 'notfound'
@@ -183,14 +182,19 @@ export default function AttendanceReport() {
   };
 
   // ── Fetch room list from DB on mount ──────────────────────────
+  // Only rooms that already have a camera registered are shown
+  // (Camera registry → distinct roomId).
   useEffect(() => {
     (async () => {
+      setRoomsLoading(true);
       try {
-        const res = await fetch(`${apiUrl}/timetablemodule/lock/rooms`);
+        const res = await fetch(`${apiUrl}/attendancemodule/cameras/rooms`);
         const data = await res.json();
         setRooms(data.rooms || []);
       } catch {
         /* silently ignore */
+      } finally {
+        setRoomsLoading(false);
       }
     })();
   }, []);
@@ -829,83 +833,33 @@ export default function AttendanceReport() {
                 marginBottom: 14,
               }}
             >
-              <div style={{ position: 'relative' }}>
+              <div>
                 <label style={styles.label}>Room No</label>
-                <input
-                  placeholder="Search room..."
-                  value={showRoomDrop ? roomSearch : room}
-                  onChange={(e) => {
-                    setRoomSearch(e.target.value);
-                    setShowRoomDrop(true);
-                  }}
-                  onFocus={() => {
-                    setRoomSearch('');
-                    setShowRoomDrop(true);
-                  }}
-                  onBlur={() => setTimeout(() => setShowRoomDrop(false), 150)}
-                  style={styles.input}
-                />
-                {showRoomDrop && (
+                <select
+                  value={room}
+                  onChange={(e) => setRoom(e.target.value)}
+                  style={styles.select}
+                  disabled={roomsLoading}
+                >
+                  <option value="">
+                    {roomsLoading ? 'Loading rooms with cameras...' : 'Select room with camera...'}
+                  </option>
+                  {rooms.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+                {!roomsLoading && rooms.length === 0 && (
                   <div
                     style={{
-                      position: 'absolute',
-                      top: '100%',
-                      left: 0,
-                      right: 0,
-                      background: '#ffffff',
-                      border: `1px solid ${theme.border}`,
-                      borderRadius: '8px',
-                      zIndex: 100,
-                      maxHeight: 220,
-                      overflowY: 'auto',
-                      boxShadow: '0 8px 24px rgba(26,31,60,0.12)',
+                      marginTop: 6,
+                      fontSize: '11px',
+                      color: theme.danger,
                     }}
                   >
-                    {rooms
-                      .filter((r) =>
-                        r.toLowerCase().includes(roomSearch.toLowerCase()),
-                      )
-                      .map((r) => (
-                        <div
-                          key={r}
-                          onMouseDown={() => {
-                            setRoom(r);
-                            setRoomSearch('');
-                            setShowRoomDrop(false);
-                          }}
-                          style={{
-                            padding: '9px 14px',
-                            cursor: 'pointer',
-                            fontSize: '13px',
-                            color: theme.text,
-                            borderBottom: `1px solid ${theme.border}`,
-                            background:
-                              r === room ? theme.accentDim : 'transparent',
-                          }}
-                          onMouseEnter={(e) =>
-                            (e.currentTarget.style.background = theme.accentDim)
-                          }
-                          onMouseLeave={(e) =>
-                          (e.currentTarget.style.background =
-                            r === room ? theme.accentDim : 'transparent')
-                          }
-                        >
-                          {r}
-                        </div>
-                      ))}
-                    {rooms.filter((r) =>
-                      r.toLowerCase().includes(roomSearch.toLowerCase()),
-                    ).length === 0 && (
-                        <div
-                          style={{
-                            padding: '9px 14px',
-                            color: theme.textMuted,
-                            fontSize: '12px',
-                          }}
-                        >
-                          No rooms match &quot;{roomSearch}&quot;
-                        </div>
-                      )}
+                    No cameras registered for any room. Add a camera in the
+                    Camera Registry first.
                   </div>
                 )}
               </div>
