@@ -17,9 +17,10 @@ const ALL_MENUS = [
     { id: 'subjectEmbeddings', menuKey: 'subjectEmbeddings', route: '/dept-admin/embeddings',           label: 'Subject Embeddings',                 color: '#f59e0b' },
     { id: 'livePreview',       menuKey: 'livePreview',       route: '/cameras/preview',                 label: 'Live Preview',                       color: '#8b5cf6' },
     { id: 'confidenceMonitor', menuKey: 'confidenceMonitor', route: '/dept-admin/confidence',           label: 'Confidence Monitor',                 color: '#ef4444' },
+    { id: 'extraClasses',      menuKey: 'extraClasses',      route: '/dept-admin/extra-class',          label: 'Extra Classes',                      color: '#f59e0b' },
+    { id: 'alteringClasses',   menuKey: 'alteringClasses',   route: '/dept-admin/altering-class',       label: 'Altering Classes',                   color: '#d946ef' },
     { id: 'instituteIdentification', menuKey: 'instituteIdentification', route: '/attendance/institute-identification', label: 'Institute Identification', color: '#8b5cf6' },
     { id: 'erpOverrides',      menuKey: 'erpOverrides',      route: '/attendance/erp-overrides',        label: 'ERP Overrides',                      color: '#f59e0b' },
-    { id: 'erpSync',           menuKey: 'erpSync',           route: '/attendance/edit-session-dates?tab=erpControls', label: 'ERP Sync',              color: '#22c55e' },
     { id: 'helpManual',        menuKey: 'helpManual',        route: '/ams-manual',                      label: 'Help & Manual',        newTab: true, color: '#64748b' },
 ];
 
@@ -38,6 +39,8 @@ export default function DeptAdminLayout() {
     const [context, setContext] = useState({
         department: '',
         batchDepartment: '',
+        departments: [],
+        batchDepartments: [],
         fullAccess: false,
         loading: true,
         error: '',
@@ -66,6 +69,8 @@ export default function DeptAdminLayout() {
                 setContext({
                     department: data.department,
                     batchDepartment: data.batchDepartment,
+                    departments: data.departments || [],
+                    batchDepartments: data.batchDepartments || [],
                     fullAccess: Boolean(data.fullAccess),
                     loading: false,
                     error: '',
@@ -73,7 +78,15 @@ export default function DeptAdminLayout() {
             })
             .catch((error) => {
                 if (error.name !== 'AbortError') {
-                    setContext({ department: '', batchDepartment: '', fullAccess: false, loading: false, error: error.message });
+                    setContext({
+                        department: '',
+                        batchDepartment: '',
+                        departments: [],
+                        batchDepartments: [],
+                        fullAccess: false,
+                        loading: false,
+                        error: error.message,
+                    });
                 }
             });
         return () => controller.abort();
@@ -172,7 +185,11 @@ export default function DeptAdminLayout() {
 
                     {!collapsed && (context.department || context.fullAccess) && (
                         <div style={{ padding: '10px 12px', borderTop: `1px solid ${theme.border}`, color: theme.textMuted, fontSize: 10, lineHeight: 1.4 }}>
-                            {context.fullAccess ? 'Institute access' : context.department}
+                            {context.fullAccess
+                                ? 'Institute access'
+                                : context.departments.length > 1
+                                    ? `${context.department} + ${context.departments.length - 1} GT / Roll`
+                                    : context.department}
                         </div>
                     )}
                     <div style={{ padding: '10px 8px', borderTop: `1px solid ${theme.border}` }}>

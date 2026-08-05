@@ -5,10 +5,12 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { DEGREES, YEARS, theme, styles, cssReset } from './config';
 import { useDepartments } from './useDepartments';
+import { usePeriods } from './usePeriods';
 import UnknownFaces from './UnknownFaces';
 import RejectedSamples from './RejectedSamples';
 import getEnvironment from '../getenvironment';
 import ExportReportsTab from './ExportReportsTab';
+import CumulativeAttendanceTab from './CumulativeAttendanceTab';
 import ProxyModal from './ProxyModal';
 
 const apiUrl = getEnvironment();
@@ -16,23 +18,39 @@ const REPORT_API = `${apiUrl}/attendancemodule/reports`;
 const REPORT_DELETE_SETTINGS_API = `${apiUrl}/attendancemodule/settings/report-deletion`;
 const USER_API = `${apiUrl}/user/getuser`;
 const ML_API = `${apiUrl}/ml`;
+const OTHER_CONTROLS_API = `${apiUrl}/attendancemodule/settings/other-controls`;
 const pct = (a, b) => (b > 0 ? Math.round((a / b) * 100) : 0);
-const CAMERA_SWITCH_SEC = 30; // must match CAMERA_SWITCH_SEC in rtsp_routes.py
+
+// Current minutes-of-day (0–1439) in Asia/Kolkata, independent of the browser
+// timezone — mirrors the server-side timeWindowGuard.
+function nowMinIST() {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date());
+  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? 0);
+  const m = Number(parts.find((p) => p.type === 'minute')?.value ?? 0);
+  return ((h % 24) * 60 + m) % (24 * 60);
+}
+
+function timeStrToMin(hhmm, fallback) {
+  if (!hhmm || typeof hhmm !== 'string' || !hhmm.includes(':')) return fallback;
+  const [h, m] = hhmm.split(':').map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return fallback;
+  return h * 60 + m;
+}
+// Fallback only — the live value is the admin-set
+// attendanceThresholds.camera_switch_sec, fetched below and passed to the ML
+// service by Node on every run. Matches the schema default in
+// server/src/models/acquisitionControl.js.
+const DEFAULT_CAMERA_SWITCH_SEC = 30;
 // ── LT103 dual-camera preset (same as groundtruthgen_rtsp) ───────────────────
 //const LT103L_URL = 'rtsp://admin:Admin%401234%23@10.10.177.249:554/video/live?channel=1&subtype=0&rtsp_transport=tcp';
 //const LT103R_URL = 'rtsp://admin:Admin%401234%23@10.10.177.250:554/video/live?channel=1&subtype=0&rtsp_transport=tcp';
-const SLOT_LABELS = {
-  period1: 'Period 1 — 08:30',
-  period2: 'Period 2 — 09:30',
-  period3: 'Period 3 — 10:30',
-  period4: 'Period 4 — 11:30',
-  period5: 'Period 5 — 13:30',
-  period6: 'Period 6 — 14:30',
-  period7: 'Period 7 — 15:30',
-  period8: 'Period 8 — 16:30',
-};
-
 export default function AttendanceReport() {
+  const { slotLabel, slotKeys } = usePeriods();
   const navigate = useNavigate();
   const location = useLocation();
   const [tab, setTab] = useState('run');
@@ -74,6 +92,10 @@ export default function AttendanceReport() {
   const [activeCam, setActiveCam] = useState(null); // 1 | 2 | null
   const [camSwitchAt, setCamSwitchAt] = useState(null); // timestamp when last switched
   const [camCountdown, setCamCountdown] = useState(0); // seconds shown in banner
+  // Admin-configured dwell time (ML Fine Tuning → Live Attendance Thresholds).
+  // Display only: Node sends the same value to the ML service, so this just
+  // keeps the banner honest instead of assuming the old hardcoded 30s.
+  const [camSwitchSec, setCamSwitchSec] = useState(DEFAULT_CAMERA_SWITCH_SEC);
   const camCountdownRef = useRef(null);
   const activeCamRef = useRef(null);
   const rtspUrl2Ref = useRef('');
@@ -91,6 +113,44 @@ export default function AttendanceReport() {
   const [sessionActive, setSessionActive] = useState(false);
   const [sessionChecks, setSessionChecks] = useState(0);
 
+  // ── Optional 08:30–17:30 IST attendance-run window (admin toggle, off by default) ──
+  const [runWindow, setRunWindow] = useState({ enabled: false, start: '08:30', end: '17:30' });
+  const [nowMin, setNowMin] = useState(nowMinIST());
+
+  useEffect(() => {
+    fetch(`${OTHER_CONTROLS_API}/`, { credentials: 'include' })
+      .then((r) => r.json())
+      .then((d) => {
+        const s = d?.settings || {};
+        setRunWindow({
+          enabled: !!s.attendanceRunTimeWindowEnabled,
+          start: s.windowStart || '08:30',
+          end: s.windowEnd || '17:30',
+        });
+      })
+      .catch(() => { });
+    const id = setInterval(() => setNowMin(nowMinIST()), 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  // ── Camera-switch dwell time (for the countdown banner) ───────────────────
+  useEffect(() => {
+    fetch(`${apiUrl}/attendancemodule/acquisitioncontrol/attendance-thresholds`, {
+      credentials: 'include',
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        const sec = Number(d?.camera_switch_sec);
+        if (Number.isFinite(sec) && sec > 0) setCamSwitchSec(sec);
+      })
+      .catch(() => { });
+  }, []);
+
+  const windowOpen =
+    !runWindow.enabled ||
+    (nowMin >= timeStrToMin(runWindow.start, 510) &&
+      nowMin <= timeStrToMin(runWindow.end, 1050));
+
   // ── History ───────────────────────────────────────────────────
   const [reports, setReports] = useState([]);
   const [histLoading, setHistLoading] = useState(false);
@@ -106,9 +166,9 @@ export default function AttendanceReport() {
   const [detailReport, setDetailReport] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
   // Proxy Info of the detail report
-    const [proxyInfo, setProxyInfo] = useState(null);
-    const [proxyInfoLoading, setProxyInfoLoading] = useState(true);
-    const [showProxyModal, setshowProxyModal] = useState(false);
+  const [proxyInfo, setProxyInfo] = useState(null);
+  const [proxyInfoLoading, setProxyInfoLoading] = useState(true);
+  const [showProxyModal, setshowProxyModal] = useState(false);
 
   // ── Camera status from DB ─────────────────────────────────────────────────
   const [cameraStatus, setCameraStatus] = useState(null); // null | 'ok' | 'inactive' | 'none'
@@ -137,7 +197,7 @@ export default function AttendanceReport() {
 
   // ── Timetable auto-lookup when room + slot change ─────────────
   useEffect(() => {
-    if (!room || !slot) {
+    if (!room || !slot || !date) {
       setDerivedCtx(null);
       setTtStatus(null);
       return;
@@ -146,7 +206,9 @@ export default function AttendanceReport() {
     setTtStatus('loading');
     (async () => {
       try {
-        const params = new URLSearchParams({ room, slot });
+        // date matters: the same room+slot holds a different subject each
+        // weekday, and extra classes / alterations are per-date.
+        const params = new URLSearchParams({ room, slot, date });
         const res = await fetch(
           `${apiUrl}/timetablemodule/lock/attendance-lookup?${params}`,
           { signal: ctrl.signal },
@@ -162,7 +224,7 @@ export default function AttendanceReport() {
       }
     })();
     return () => ctrl.abort();
-  }, [room, slot]);
+  }, [room, slot, date]);
 
   // ── Auto-fetch camera RTSPs for the selected room from Camera model ────────
   useEffect(() => {
@@ -318,8 +380,8 @@ export default function AttendanceReport() {
   }, [detailReport?._id, detailReport?.status]);
 
   // ── Camera-switch countdown ticker ────────────────────────────────────────
-  // Python switches cameras every CAMERA_SWITCH_SEC (30s), not every `duration`.
-  // We count down from CAMERA_SWITCH_SEC using camSwitchAt as the reference point.
+  // Python switches cameras every camSwitchSec, not every `duration`. We count
+  // down from camSwitchSec using camSwitchAt as the reference point.
   useEffect(() => {
     // Only run countdown when processing AND a camera is active AND cam2 is configured
     const hasCam2 = rtspUrl2.trim().length > 0;
@@ -341,7 +403,7 @@ export default function AttendanceReport() {
     const switchedAt = camSwitchAt || Date.now();
     camCountdownRef.current = setInterval(() => {
       const elapsed = Math.floor((Date.now() - switchedAt) / 1000);
-      const remaining = Math.max(0, CAMERA_SWITCH_SEC - elapsed);
+      const remaining = Math.max(0, camSwitchSec - elapsed);
       setCamCountdown(remaining);
     }, 500); // 500ms tick is more responsive than 1000ms
     return () => {
@@ -350,7 +412,7 @@ export default function AttendanceReport() {
         camCountdownRef.current = null;
       }
     };
-  }, [processing, activeCam, camSwitchAt, rtspUrl2]);
+  }, [processing, activeCam, camSwitchAt, rtspUrl2, camSwitchSec]);
 
   // ── Run attendance — SSE stream ───────────────────────────────
   const runAttendance = async () => {
@@ -398,7 +460,7 @@ export default function AttendanceReport() {
     setActiveCam(rtspUrl2.trim() ? 1 : null); // show cam 1 immediately if dual-cam
     activeCamRef.current = rtspUrl2.trim() ? 1 : null;
     setCamSwitchAt(Date.now()); // start countdown immediately
-    setCamCountdown(CAMERA_SWITCH_SEC);
+    setCamCountdown(camSwitchSec);
     rtspUrl2Ref.current = rtspUrl2.trim();
 
     try {
@@ -578,7 +640,7 @@ export default function AttendanceReport() {
       setActiveCam(rtspUrl2.trim() ? 1 : null);
       activeCamRef.current = rtspUrl2.trim() ? 1 : null;
       setCamSwitchAt(Date.now());
-      setCamCountdown(CAMERA_SWITCH_SEC);
+      setCamCountdown(camSwitchSec);
       rtspUrl2Ref.current = rtspUrl2.trim();
       setSessionChecks(0);
       const stopNote = data.autoStopAt
@@ -734,6 +796,7 @@ export default function AttendanceReport() {
           ['unknown', 'Unknown Faces'],
           ['rejected', 'Rejected Samples'],
           ['export', 'Export Reports'],
+          ['cumulative', 'Cumulative (XCEED vs ERP)'],
           ['detail', 'Report Detail'],
         ].map(
           ([id, label]) =>
@@ -854,9 +917,9 @@ export default function AttendanceReport() {
                   style={styles.select}
                 >
                   <option value="">Select slot...</option>
-                  {Object.entries(SLOT_LABELS).map(([val, label]) => (
+                  {slotKeys.map((val) => (
                     <option key={val} value={val}>
-                      {label}
+                      {slotLabel(val)}
                     </option>
                   ))}
                 </select>
@@ -885,7 +948,7 @@ export default function AttendanceReport() {
                   color: theme.accent,
                 }}
               >
-                🔍 Looking up timetable for {room} / {SLOT_LABELS[slot]}…
+                🔍 Looking up timetable for {room} / {slotLabel(slot)}…
               </div>
             )}
             {ttStatus === 'notfound' && (
@@ -921,7 +984,7 @@ export default function AttendanceReport() {
                 }}
               >
                 <span style={{ color: theme.success, fontWeight: 700 }}>
-                  ✓ Timetable matched
+                  ✓ Timetable matched{derivedCtx.day ? ` (${derivedCtx.day})` : ''}
                 </span>
                 {[
                   ['Batch', derivedCtx.batch],
@@ -943,6 +1006,24 @@ export default function AttendanceReport() {
                       </span>
                     </span>
                   ))}
+                {derivedCtx.altered && (
+                  <span style={{ color: theme.warning, fontWeight: 600 }}>
+                    ⇄ Altered for this date — originally{' '}
+                    {derivedCtx.originalSubject || '—'} /{' '}
+                    {derivedCtx.originalFaculty || '—'}
+                  </span>
+                )}
+                {derivedCtx.source === 'extraClass' && (
+                  <span style={{ color: theme.warning, fontWeight: 600 }}>
+                    ➕ Extra class (not on the regular timetable)
+                  </span>
+                )}
+                {derivedCtx.ambiguous && (
+                  <span style={{ color: theme.danger, fontWeight: 600 }}>
+                    ⚠ More than one current-session timetable books this room in
+                    this slot — verify the batch before running.
+                  </span>
+                )}
               </div>
             )}
 
@@ -1077,6 +1158,19 @@ export default function AttendanceReport() {
                 />
               </div>
             </div>
+            {!windowOpen && (
+              <div style={{
+                margin: '4px 0 12px',
+                padding: '10px 16px',
+                borderRadius: 8,
+                fontSize: 13,
+                background: 'rgba(239,68,68,0.10)',
+                color: theme.danger,
+                border: '1px solid rgba(239,68,68,0.30)',
+              }}>
+                ⛔ Attendance runs are restricted to {runWindow.start}–{runWindow.end} IST. Run Once and Start Session are disabled outside this window.
+              </div>
+            )}
             <div
               style={{
                 display: 'grid',
@@ -1116,16 +1210,19 @@ export default function AttendanceReport() {
                   onClick={runAttendance}
                   disabled={
                     processing ||
+                    !windowOpen ||
                     !rtspUrl.trim() ||
                     !room ||
                     !slot ||
                     (!derivedCtx?.batch && !manualBatch)
                   }
+                  title={!windowOpen ? `Attendance runs are restricted to ${runWindow.start}–${runWindow.end} IST` : undefined}
                   style={{
                     ...styles.btnPrimary,
                     minWidth: 140,
                     opacity:
                       processing ||
+                        !windowOpen ||
                         !rtspUrl.trim() ||
                         !room ||
                         !slot ||
@@ -1165,11 +1262,13 @@ export default function AttendanceReport() {
                   disabled={
                     processing ||
                     sessionActive ||
+                    !windowOpen ||
                     !rtspUrl.trim() ||
                     !room ||
                     !slot ||
                     (!derivedCtx?.batch && !manualBatch)
                   }
+                  title={!windowOpen ? `Attendance runs are restricted to ${runWindow.start}–${runWindow.end} IST` : undefined}
                   style={{
                     ...styles.btnPrimary,
                     minWidth: 140,
@@ -1177,6 +1276,7 @@ export default function AttendanceReport() {
                     opacity:
                       processing ||
                         sessionActive ||
+                        !windowOpen ||
                         !rtspUrl.trim() ||
                         !room ||
                         !slot ||
@@ -1821,7 +1921,7 @@ export default function AttendanceReport() {
                           <td
                             style={{ padding: '11px 14px', color: theme.textMuted }}
                           >
-                            {SLOT_LABELS[r.timeSlot] || r.timeSlot || '—'}
+                            {r.timeSlot ? slotLabel(r.timeSlot) : '—'}
                           </td>
                           <td style={{ padding: '11px 14px', color: theme.text }}>
                             {r.subject || '—'}
@@ -2026,7 +2126,7 @@ export default function AttendanceReport() {
                         ['Date', detailReport.date],
                         [
                           'Slot',
-                          SLOT_LABELS[detailReport.timeSlot] ||
+                          slotLabel(detailReport.timeSlot) ||
                           detailReport.timeSlot ||
                           '—',
                         ],
@@ -2093,10 +2193,10 @@ export default function AttendanceReport() {
               {
                 // If there are proxies shows the number of possible proxies
                 !proxyInfoLoading && proxyInfo.length > 0 && (
-                  <div style={{marginBottom: 16, cursor: "pointer"}}>
-                    <span onClick={() => setshowProxyModal(true)} style={{...styles.badge('warning'), fontSize: 14, width: "fit-content", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, fontWeight: 600}}>
-                      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-triangle-alert-icon lucide-triangle-alert"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
-                      {proxyInfo.length} Possible { proxyInfo.length > 1 ? "Proxies" : "Proxy"}
+                  <div style={{ marginBottom: 16, cursor: "pointer" }}>
+                    <span onClick={() => setshowProxyModal(true)} style={{ ...styles.badge('warning'), fontSize: 14, width: "fit-content", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, fontWeight: 600 }}>
+                      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-triangle-alert-icon lucide-triangle-alert"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" /><path d="M12 9v4" /><path d="M12 17h.01" /></svg>
+                      {proxyInfo.length} Possible {proxyInfo.length > 1 ? "Proxies" : "Proxy"}
                     </span>
                   </div>
                 )
@@ -2158,6 +2258,9 @@ export default function AttendanceReport() {
         </div>
       )}
       {tab === 'export' && <ExportReportsTab />}
+
+      {/* ════ CUMULATIVE TAB (read-only: XCEED vs ERP) ════ */}
+      {tab === 'cumulative' && <CumulativeAttendanceTab />}
       {/* ════ UNKNOWN FACES TAB ════ */}
       {tab === 'unknown' && (
         <div style={{ marginTop: 16 }}>

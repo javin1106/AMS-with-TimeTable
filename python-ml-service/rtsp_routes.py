@@ -26,6 +26,7 @@ import state
 import clustering_service
 import liveness_config_store
 import faiss_config_store
+import gt_config_store
 import max_k_config_store
 import adaface_config_store
 import pipeline_config_store
@@ -42,9 +43,9 @@ from faiss_utils import _recognize_face
 logger = logging.getLogger("ml_service.rtsp_routes")
 router = APIRouter()
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
-CLIENT_GROUND_TRUTH = os.path.join(ROOT_DIR, "server", "ml-data", "ground_truth")
+from paths import BASE_DIR, ROOT_DIR, data_path
+
+CLIENT_GROUND_TRUTH = data_path("ground_truth")
 
 SNAP_EVERY_SEC = 15   # save raw + annotated frame snapshot every N seconds during attendance
 
@@ -57,7 +58,7 @@ _jobs_lock  = threading.Lock()
 
 def _new_job() -> tuple:
     job_id = str(uuid.uuid4())
-    job    = {"stop": threading.Event(), "frame": None, "lock": threading.Lock()}
+    job    = {"stop": threading.Event(), "frame": None, "frame_seq": 0, "lock": threading.Lock()}
     with _jobs_lock:
         _jobs[job_id] = job
     return job_id, job
@@ -164,7 +165,12 @@ def _open_capture(rtsp_url: str) -> cv2.VideoCapture:
 
 
 def _make_preview_cb(job: dict):
-    """Return a frame-annotation callback that writes into the given job's frame buffer."""
+    """Return a frame-annotation callback that writes into the given job's frame buffer.
+
+    Called once per processed frame with the full zoom-box list (see
+    _detect_faces_tiled) — every box is drawn with a constant style so the
+    preview stays steady instead of strobing a per-pass highlight.
+    """
     colors = [
         (0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0),
         (0, 255, 255), (255, 0, 255), (0, 128, 255),
@@ -173,20 +179,14 @@ def _make_preview_cb(job: dict):
         vis = frame.copy()
         for idx, box in enumerate(zoom_boxes):
             x1, y1, x2, y2 = box
-            color     = colors[idx % len(colors)]
-            thickness = 4 if idx == current_pass else 2
-            cv2.rectangle(vis, (x1, y1), (x2, y2), color, thickness)
-            if idx == current_pass:
-                label = f"SCANNING Z{idx + 1}"
-                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
-                cv2.rectangle(vis, (x1, y1), (x1 + tw + 10, y1 + th + 10), color, -1)
-                cv2.putText(vis, label, (x1 + 5, y1 + th + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
-            else:
-                cv2.putText(vis, f"Z{idx + 1}", (x1 + 5, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-        prev = cv2.resize(vis, (960, 540))
-        _, buf = cv2.imencode('.jpg', prev, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            color = colors[idx % len(colors)]
+            cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(vis, f"Z{idx + 1}", (x1 + 5, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        prev = cv2.resize(vis, (1280, 720))
+        _, buf = cv2.imencode('.jpg', prev, [cv2.IMWRITE_JPEG_QUALITY, 90])
         with job["lock"]:
             job["frame"] = buf.tobytes()
+            job["frame_seq"] = job.get("frame_seq", 0) + 1
     return cb
 
 
@@ -195,12 +195,23 @@ def _make_preview_cb(job: dict):
 class RTSPRequest(BaseModel):
     rtspUrl:             str
     batch:               str
-    detSize:             int   = 320
-    frameSkip:           int   = 10
-    targetImgsPerPerson: int   = 10
-    minSamples:          int   = 3
-    clusterThreshold:    float = 0.45
+    # None → seeded from state.gt_config (ML Fine Tuning page) at request
+    # time, so callers that omit a knob follow the centrally tuned value.
+    detSize:             Optional[int]   = None
+    frameSkip:           Optional[int]   = None
+    targetImgsPerPerson: Optional[int]   = None
+    maxImgsPerRun:       Optional[int]   = None
+    minSamples:          Optional[int]   = None
+    clusterThreshold:    Optional[float] = None
     jobId:               str   = ""
+    # Server-persistent acquisition (GT acquisition job manager, Node side):
+    # when True, the run never auto-stops on "all detected persons reached
+    # target" — it keeps collecting newly-arriving people until maxDurationSec
+    # elapses or Node sends an explicit stop. maxDurationSec is a hard ceiling
+    # (default 60 min) so a job can never outlive its window even if the stop
+    # signal is lost.
+    continuous:          bool  = False
+    maxDurationSec:      int   = 3600
     # [{folderName, infoJson, photos: [{filename, data}]}] — sent by Node so this
     # process never needs direct filesystem access to ground_truth/ (may run on a
     # separate machine).
@@ -217,6 +228,12 @@ class RTSPAttendanceRequest(BaseModel):
     durationSec:      int   = 60
     checkIntervalMin: int   = 5
     frameSkip:        int   = 10
+    # Seconds on each camera before switching, for THIS attendance run only.
+    # Sent by Node from AcquisitionControl.attendanceThresholds.camera_switch_sec
+    # (ML Fine Tuning → Live Attendance Thresholds). Deliberately separate from
+    # gt_config["gt_camera_switch_sec"], which paces GT acquisition sub-runs —
+    # see the note in state.py. Ignored unless rtspUrl2 is set.
+    cameraSwitchSec:  int   = 30
     clusterThreshold: float = 0.45
     minSamples:       int   = 2
     autoThreshold:    float = 0.40
@@ -272,23 +289,36 @@ class RTSPAttendanceRequest(BaseModel):
 
 
 # ── Preview endpoint ──────────────────────────────────────────────────────────
+# Named distinctly from ground_truth_routes.py's own "/rtsp-preview" (a totally
+# separate preview system, keyed off its own _previews dict for the Camera
+# Live Preview feature) — gt_router is registered before rtsp_router in
+# ml_service.py, so a shared path here would silently always resolve to that
+# other handler and 503/404 against this module's _jobs registry instead.
 
-@router.get("/rtsp-preview")
-def rtsp_preview(jobId: str = ""):
+@router.get("/gt-acquisition-preview")
+def gt_acquisition_preview(jobId: str = ""):
     with _jobs_lock:
         job = _jobs.get(jobId) if jobId else None
     if not job:
         raise HTTPException(status_code=404, detail="Job not found or already finished")
     def generate():
+        # Send a frame only when the buffer actually changed (frame_seq) —
+        # re-sending the identical JPEG at 30fps just burned bandwidth and
+        # made the browser preview jitter. A 2s keepalive resend covers
+        # proxies that drop idle multipart streams.
+        last_seq  = -1
+        last_sent = 0.0
         try:
             while not job["stop"].is_set():
                 with job["lock"]:
                     frame = job["frame"]
-                if frame:
+                    seq   = job.get("frame_seq", 0)
+                now = time.time()
+                if frame and (seq != last_seq or now - last_sent >= 2.0):
+                    last_seq  = seq
+                    last_sent = now
                     yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-                    time.sleep(0.033)
-                else:
-                    time.sleep(0.05)
+                time.sleep(0.05)
         except GeneratorExit:
             pass
     return StreamingResponse(
@@ -322,6 +352,26 @@ def extract_rtsp_stream(req: RTSPRequest):
     if state.face_app is None:
         raise HTTPException(status_code=503, detail="Face model not loaded")
 
+    # Seed omitted per-session knobs from the GT Acquisition config
+    # (ML Fine Tuning page) so its saved values actually drive acquisitions.
+    # `seeded` records what was filled in — reported to the frontend via a
+    # gt_config_seeded SSE event so the fallback is visible to the user.
+    with state.gt_config_lock:
+        _gt = dict(state.gt_config)
+    seeded = {}
+    if req.detSize is None:
+        req.detSize = seeded["detSize"] = _gt.get("det_size", 320)
+    if req.frameSkip is None:
+        req.frameSkip = seeded["frameSkip"] = _gt.get("frame_skip", 10)
+    if req.targetImgsPerPerson is None:
+        req.targetImgsPerPerson = seeded["targetImgsPerPerson"] = _gt.get("target_imgs_per_person", 10)
+    if req.maxImgsPerRun is None:
+        req.maxImgsPerRun = seeded["maxImgsPerRun"] = _gt.get("max_imgs_per_run", 0)
+    if req.minSamples is None:
+        req.minSamples = seeded["minSamples"] = _gt.get("min_samples", 3)
+    if req.clusterThreshold is None:
+        req.clusterThreshold = seeded["clusterThreshold"] = _gt.get("cluster_threshold", 0.45)
+
     if req.detSize != state.current_det_size and state.load_model_fn:
         state.load_model_fn(det_size=req.detSize)
 
@@ -340,6 +390,10 @@ def extract_rtsp_stream(req: RTSPRequest):
         def sse(obj):
             return f"data: {json.dumps(obj)}\n\n"
         yield sse({"type": "job_id", "jobId": job_id})
+        if seeded:
+            pretty = ", ".join(f"{k}={v}" for k, v in seeded.items())
+            yield sse({"type": "gt_config_seeded", "seeded": seeded,
+                       "message": f"Using ML Fine Tuning GT config for omitted settings: {pretty}"})
         print("🟢 GENERATOR STARTED", flush=True)
 
         batch_dir = os.path.join(CLIENT_GROUND_TRUTH, req.batch)
@@ -407,6 +461,9 @@ def extract_rtsp_stream(req: RTSPRequest):
         reconnect_attempts = 0
         MAX_RECONNECTS     = 5
 
+        run_counts       = {}  # tracks images saved per person during this API call
+
+
         _cluster_passes      = 0
         _last_person_count   = 0
         _last_new_person_t   = time.time()
@@ -423,6 +480,16 @@ def extract_rtsp_stream(req: RTSPRequest):
                 if job["stop"].is_set():
                     logger.info("Stop signal received")
                     yield sse({"type": "stage", "message": "Stop signal received — finishing up…"})
+                    break
+
+                # Hard duration ceiling — a server-persistent job (continuous
+                # mode) has no target-reached auto-stop, so this is what bounds
+                # it if no explicit stop arrives. Also protects the plain path
+                # from an unbounded run.
+                if time.time() - start >= req.maxDurationSec:
+                    logger.info("Max duration %ss reached — stopping", req.maxDurationSec)
+                    yield sse({"type": "stage",
+                               "message": f"Max duration {req.maxDurationSec}s reached — finishing up…"})
                     break
 
                 ok, frame, seq, grab_n = reader.latest()
@@ -454,13 +521,10 @@ def extract_rtsp_stream(req: RTSPRequest):
                 frame_count       += 1
                 ts = round(time.time() - start, 2)
 
-                try:
-                    prev_raw = cv2.resize(frame, (960, 540))
-                    _, raw_buf = cv2.imencode('.jpg', prev_raw, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                    with job["lock"]:
-                        job["frame"] = raw_buf.tobytes()
-                except Exception:
-                    pass
+                # NOTE: no raw-frame preview write here — preview_cb (called
+                # once per frame inside _detect_faces_tiled) owns the buffer.
+                # Writing the unannotated frame first made the MJPEG preview
+                # flicker between raw and annotated versions of each frame.
 
                 t_detect = time.time()
                 try:
@@ -488,10 +552,11 @@ def extract_rtsp_stream(req: RTSPRequest):
 
                 if cluster_future is not None and cluster_future.done():
                     try:
-                        new_serial, updated, new_mean_embs, new_pcounts, crops_to_emit, returned_fstate = cluster_future.result()
+                        new_serial, updated, new_mean_embs, new_pcounts, crops_to_emit, returned_fstate, returned_rc = cluster_future.result()
                         next_serial = new_serial
                         existing_mean_embs.update(new_mean_embs)
                         person_counts.update(new_pcounts)
+                        run_counts.update(returned_rc)
                         for k, v in returned_fstate.items():
                             folder_state[k] = v
                         _cluster_passes += 1
@@ -501,9 +566,10 @@ def extract_rtsp_stream(req: RTSPRequest):
                         for crop_event in crops_to_emit:
                             yield sse(crop_event)
                         for person_id, new_count in updated.items():
-                            done = new_count >= req.targetImgsPerPerson
+                            p_target = 5 if not person_id.startswith("person_") else req.targetImgsPerPerson
+                            done = new_count >= p_target
                             yield sse({"type": "person_update", "person_id": person_id,
-                                       "count": new_count, "target": req.targetImgsPerPerson, "done": done})
+                                       "count": new_count, "target": p_target, "done": done})
                     except Exception as exc:
                         logger.exception("Background clustering failed: %s", exc)
                     cluster_future = None
@@ -521,8 +587,9 @@ def extract_rtsp_stream(req: RTSPRequest):
                     pc_snap     = dict(person_counts)
                     serial_now  = next_serial
                     fstate_snap = {k: {"scores": dict(v.get("scores", {}))} for k, v in folder_state.items()}
+                    rc_snap     = dict(run_counts)
 
-                    def _cluster_job(embs, imgs, tss, qs, mean_embs, pcounts, serial, p, fstate):
+                    def _cluster_job(embs, imgs, tss, qs, mean_embs, pcounts, serial, p, fstate, rc):
                         t0 = time.time()
                         lbl, ulbl = _cluster(embs, req.clusterThreshold, req.minSamples)
                         logger.info("  pass #%d: DBSCAN %.0fms — %d clusters", p, (time.time()-t0)*1000, len(ulbl))
@@ -530,25 +597,28 @@ def extract_rtsp_stream(req: RTSPRequest):
                                                             batch_dir, mean_embs, serial,
                                                             req.targetImgsPerPerson, pcounts,
                                                             req.clusterThreshold, fstate,
-                                                            top_n=state.gt_config.get("top_n", 10),
-                                                            embed_n=state.gt_config.get("embed_n", 5))
-                        return new_s, upd, mean_embs, pcounts, crops, fstate
+                                                            top_n=req.targetImgsPerPerson,
+                                                            embed_n=state.gt_config.get("embed_n", 5),
+                                                            max_imgs_per_run=req.maxImgsPerRun,
+                                                            run_counts=rc)
+                        return new_s, upd, mean_embs, pcounts, crops, fstate, rc
 
                     cluster_future = cluster_pool.submit(
                         _cluster_job, embs_snap, imgs_snap, ts_snap, q_snap,
-                        mean_snap, pc_snap, serial_now, pass_num, fstate_snap)
+                        mean_snap, pc_snap, serial_now, pass_num, fstate_snap, rc_snap)
 
                 now = time.time()
                 if now - last_progress_t >= PROGRESS_EVERY:
                     last_progress_t = now
                     n_persons = len(person_counts)
-                    n_done = sum(1 for c in person_counts.values() if c >= req.targetImgsPerPerson)
+                    n_done = sum(1 for p, c in person_counts.items() if c >= (5 if not p.startswith("person_") else req.targetImgsPerPerson))
                     yield sse({"type": "progress",
                                "message": f"Frame {frame_count} | {len(all_embeddings)} detections | {n_persons} people | {n_done}/{n_persons} done"})
 
                 secs_since_new = time.time() - _last_new_person_t
-                if (person_counts
-                        and all(c >= req.targetImgsPerPerson for c in person_counts.values())
+                if (not req.continuous
+                        and person_counts
+                        and all((c >= (5 if not p.startswith("person_") else req.targetImgsPerPerson) or (req.maxImgsPerRun > 0 and run_counts.get(p, 0) >= req.maxImgsPerRun)) for p, c in person_counts.items())
                         and secs_since_new >= NEW_PERSON_TIMEOUT):
                     yield sse({"type": "stage",
                                "message": f"All persons reached target — no new person for {int(secs_since_new)}s, stopping"})
@@ -570,14 +640,17 @@ def extract_rtsp_stream(req: RTSPRequest):
                     all_timestamps, all_quality, batch_dir, existing_mean_embs,
                     next_serial, req.targetImgsPerPerson, person_counts, req.clusterThreshold,
                     fstate_final,
-                    top_n=state.gt_config.get("top_n", 10),
-                    embed_n=state.gt_config.get("embed_n", 5))
+                    top_n=req.targetImgsPerPerson,
+                    embed_n=state.gt_config.get("embed_n", 5),
+                    max_imgs_per_run=req.maxImgsPerRun,
+                    run_counts=run_counts)
                 for crop_event in crops_to_emit:
                     yield sse(crop_event)
                 for person_id, new_count in updated.items():
+                    p_target = 5 if not person_id.startswith("person_") else req.targetImgsPerPerson
                     yield sse({"type": "person_update", "person_id": person_id,
-                               "count": new_count, "target": req.targetImgsPerPerson,
-                               "done": new_count >= req.targetImgsPerPerson})
+                               "count": new_count, "target": p_target,
+                               "done": new_count >= p_target})
             except Exception as exc:
                 logger.exception("Final clustering pass failed: %s", exc)
 
@@ -1089,7 +1162,10 @@ def _attendance_pipeline(req: RTSPAttendanceRequest, job: dict):
     )
     # Back-compat alias — the capture loop below reads this name.
     run_adaface_shadow = need_adaface
-    CAMERA_SWITCH_SEC = 30
+    # Per-run, from Node — not the GT acquisition interval (see the field note
+    # on RTSPAttendanceRequest). Clamped so a bad payload can't spin the switch
+    # loop or park us on one camera for the whole run.
+    CAMERA_SWITCH_SEC = min(600, max(5, int(req.cameraSwitchSec or 30)))
     cameras = [req.rtspUrl]
     if req.rtspUrl2:
         cameras.append(req.rtspUrl2)
@@ -1145,6 +1221,7 @@ def _attendance_pipeline(req: RTSPAttendanceRequest, job: dict):
                 _, prev_buf = cv2.imencode('.jpg', prev, [cv2.IMWRITE_JPEG_QUALITY, 70])
                 with job["lock"]:
                     job["frame"] = prev_buf.tobytes()
+                    job["frame_seq"] = job.get("frame_seq", 0) + 1
             except Exception:
                 pass
  
@@ -1814,6 +1891,7 @@ def start_preview(req: PreviewRequest):
     _, buf = cv2.imencode('.jpg', placeholder, [cv2.IMWRITE_JPEG_QUALITY, 70])
     with job["lock"]:
         job["frame"] = buf.tobytes()
+        job["frame_seq"] = job.get("frame_seq", 0) + 1
     return {"status": "ok", "jobId": job_id}
 
 
@@ -1834,13 +1912,20 @@ def _load_existing_folders_from_payload(existing_folders, existing_mean_embs):
     photo bytes Node already sent (req.existingFolders) instead of reading
     ground_truth/ off local disk — this process may run on a separate
     machine from the Node server.
+
+    existing_mean_embs maps folder_name -> list of individually-normalised
+    reference embeddings (one per stored photo, up to 5) — NOT a single mean.
+    A new cluster is scored against each reference photo separately and the
+    best (max) similarity wins ("max-of-K", see _save_clusters). Averaging
+    the references first would wash out legitimate day-to-day pose/lighting
+    variation and under-match a returning student against their own photos.
     """
     for folder in existing_folders:
         folder_name = folder.get("folderName")
         photos      = folder.get("photos") or []
         if not photos:
             continue
-        folder_embs, folder_weights = [], []
+        folder_embs = []
         for photo in photos[:5]:
             try:
                 img_bytes = base64.b64decode(photo.get("data", ""))
@@ -1862,23 +1947,9 @@ def _load_existing_folders_from_payload(existing_folders, existing_mean_embs):
             norm = np.linalg.norm(emb)
             if norm == 0:
                 continue
-            x1, y1, x2, y2 = map(int, face.bbox)
-            crop = img[max(0,y1):y2, max(0,x1):x2]
-            if crop.size > 0:
-                gray    = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                lap     = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-                quality = det_score * min(lap, 500) / 500
-            else:
-                quality = det_score
             folder_embs.append(emb / norm)
-            folder_weights.append(max(quality, 0.01))
         if folder_embs:
-            weights  = np.array(folder_weights, dtype=np.float32)
-            weights /= weights.sum()
-            mean_emb = np.average(np.array(folder_embs, dtype=np.float32), axis=0, weights=weights)
-            norm     = np.linalg.norm(mean_emb)
-            if norm > 0:
-                existing_mean_embs[folder_name] = mean_emb / norm
+            existing_mean_embs[folder_name] = folder_embs
 
 
 def _select_diverse(pool, stored_embs, new_embs, n):
@@ -1928,15 +1999,19 @@ def _select_diverse(pool, stored_embs, new_embs, n):
 def _save_clusters(labels, unique_labels, all_embeddings, all_face_images,
                     all_timestamps, all_quality, batch_dir, existing_mean_embs,
                     next_serial, target_per_person, person_counts,
-                    cluster_threshold, folder_state, top_n=10, embed_n=5):
+                    cluster_threshold, folder_state, top_n=10, embed_n=5,
+                    max_imgs_per_run=0, run_counts=None):
     """
     Returns (next_serial, updated, crops_to_emit).
     crops_to_emit is a list of SSE event dicts (mkdir, crop_save, info_save, file_delete).
     Node.js intercepts these and saves the files — Python writes nothing to disk here.
     """
+    if run_counts is None:
+        run_counts = {}
     updated       = {}
     crops_to_emit = []
     MATCH_THRESHOLD = max(cluster_threshold, 0.50)
+    MAX_REF_EMBS    = 5   # keep the most recent K reference embeddings per folder
 
     for cluster_id in unique_labels:
         indices      = np.where(labels == cluster_id)[0]
@@ -1948,8 +2023,13 @@ def _save_clusters(labels, unique_labels, all_embeddings, all_face_images,
         cluster_mean /= norm
 
         best_folder, best_score = None, 0.0
-        for fname, ex_emb in existing_mean_embs.items():
-            score = float(np.dot(cluster_mean, ex_emb))
+        for fname, ex_embs in existing_mean_embs.items():
+            # Max-of-K: score against each reference photo individually and
+            # keep the best match, rather than averaging references first —
+            # a returning student photographed at a different angle/lighting
+            # still matches strongly against whichever reference photo is
+            # closest to it, instead of being dragged down by the others.
+            score = max((float(np.dot(cluster_mean, e)) for e in ex_embs), default=0.0)
             if score > best_score:
                 best_score, best_folder = score, fname
 
@@ -1960,12 +2040,16 @@ def _save_clusters(labels, unique_labels, all_embeddings, all_face_images,
             next_serial += 1
             crops_to_emit.append({"type": "mkdir", "folder": folder_name})
 
-        existing_mean_embs[folder_name] = cluster_mean
-        current_count = len(folder_state.get(folder_name, {}).get("scores", {}))
-        if current_count >= target_per_person:
-            continue
+        is_existing = not folder_name.startswith("person_")
+        current_target = 5 if is_existing else target_per_person
+        current_top_n  = 5 if is_existing else top_n
 
-        still_need      = target_per_person - current_count
+        ref_embs = existing_mean_embs.setdefault(folder_name, [])
+        ref_embs.append(cluster_mean)
+        if len(ref_embs) > MAX_REF_EMBS:
+            del ref_embs[:-MAX_REF_EMBS]
+        # Always consider up to current_target images from the current pass to replace lower quality existing ones.
+        still_need      = current_target
         cluster_sorted  = sorted(
             [(all_face_images[i], all_quality[i], all_timestamps[i], i) for i in indices],
             key=lambda x: x[1], reverse=True)[:still_need]
@@ -1978,6 +2062,9 @@ def _save_clusters(labels, unique_labels, all_embeddings, all_face_images,
                 continue
             fname = f"gt_{ts:.1f}s_f{idx}.jpg"
             if fname not in existing_scores:
+                if max_imgs_per_run > 0 and run_counts.get(folder_name, 0) >= max_imgs_per_run:
+                    continue
+                
                 _, buf = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, 100])
                 crops_to_emit.append({
                     "type":     "crop_save",
@@ -1987,12 +2074,14 @@ def _save_clusters(labels, unique_labels, all_embeddings, all_face_images,
                 })
                 new_scores[fname] = round(quality, 4)
                 new_embs[fname]   = all_embeddings[idx]  # already L2-normalised
+                
+                run_counts[folder_name] = run_counts.get(folder_name, 0) + 1
 
         if not new_scores:
             continue
 
         _update_info_inmem(folder_name, new_scores, folder_state, crops_to_emit,
-                           top_n, embed_n, new_embs=new_embs)
+                           current_top_n, embed_n, new_embs=new_embs)
         new_count = len(folder_state.get(folder_name, {}).get("scores", {}))
         person_counts[folder_name] = new_count
         updated[folder_name]       = new_count
@@ -2034,11 +2123,16 @@ def _update_info_inmem(folder_name, new_scores, folder_state, crops_to_emit,
     all_scored = sorted(fs["scores"].items(), key=lambda x: x[1], reverse=True)
 
     if len(all_scored) > top_n:
-        for fname, _ in all_scored[top_n:]:
-            crops_to_emit.append({"type": "file_delete", "folder": folder_name, "filename": fname})
-            fs["scores"].pop(fname, None)
-            fs.get("embs", {}).pop(fname, None)
-        all_scored = all_scored[:top_n]
+        # Diversity-based retention, not pure quality rank — consecutive video
+        # frames of the same pose otherwise all score similarly high and crowd
+        # out different angles, leaving near-duplicate photos in the folder.
+        keep = set(_select_diverse(all_scored, fs.get("embs", {}), {}, top_n))
+        for fname, _ in all_scored:
+            if fname not in keep:
+                crops_to_emit.append({"type": "file_delete", "folder": folder_name, "filename": fname})
+                fs["scores"].pop(fname, None)
+                fs.get("embs", {}).pop(fname, None)
+        all_scored = [(f, s) for f, s in all_scored if f in keep]
 
     # Select embed_n images by diversity (greedy farthest-point in embedding
     # space) rather than pure quality rank, so different angles are preferred.
@@ -2063,10 +2157,10 @@ import subprocess
 import shutil
 
 # Override via RECORDINGS_DIR env var to control save path without code changes.
-# Falls back to server/recordings/ relative to this file.
+# Falls back to ml-data/recordings/ via paths.py.
 RECORDINGS_DIR = os.environ.get(
     "RECORDINGS_DIR",
-    os.path.join(BASE_DIR, "..", "server", "recordings"),
+    data_path("recordings"),
 )
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
@@ -2221,6 +2315,16 @@ def download_recording_audio(filename: str):
         headers={"Content-Disposition": f'attachment; filename="{audio_name}"'},
     )
 
+@router.delete("/recordings/{filename}")
+def delete_recording(filename: str):
+    path = _recording_path(filename)
+
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    os.remove(path)
+
+    return {"message": "Recording deleted"}
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Liveness / anti-spoofing — runtime config (ML Fine Tuning page)
@@ -2291,6 +2395,8 @@ class GTConfigUpdate(BaseModel):
     new_person_timeout:     Optional[int]   = None
     top_n:                  Optional[int]   = None
     embed_n:                Optional[int]   = None
+    gt_camera_switch_sec:   Optional[int]   = None
+    max_imgs_per_run:       Optional[int]   = None
 
 
 @router.get("/gt-config")
@@ -2317,6 +2423,12 @@ def update_gt_config_ep(req: GTConfigUpdate):
         "new_person_timeout":     (15, 300),
         "top_n":                  (5, 30),
         "embed_n":                (3, 15),
+        # A GT sub-run reconnects the stream and runs a final clustering pass on
+        # every switch, so anything under ~30s spends most of its time on that
+        # overhead. Upper bound stays below the 60-min job ceiling in
+        # gtAcquisitionManager.js so a cycling job always reaches camera 2.
+        "gt_camera_switch_sec":   (30, 1800),
+        "max_imgs_per_run":       (0, 50),
     }
     for key, (lo, hi) in float_ranges.items():
         if key in updates and not (lo <= updates[key] <= hi):
@@ -2329,17 +2441,21 @@ def update_gt_config_ep(req: GTConfigUpdate):
     if "det_size" in updates and updates["det_size"] not in (320, 640):
         return JSONResponse(status_code=400,
             content={"error": "det_size must be 320 or 640"})
-    # embed_n must not exceed top_n
-    new_top_n   = updates.get("top_n",   state.gt_config["top_n"])
+    # embed_n must not exceed target_imgs_per_person. That — not the legacy
+    # top_n key — is the real per-folder retention cap: _save_clusters() is
+    # called with top_n=req.targetImgsPerPerson (see extract_rtsp_stream), so
+    # target_imgs_per_person bounds how many images can actually be selected
+    # for the mean embedding. Validating against top_n let embed_n exceed the
+    # true cap (e.g. target=5, top_n=30, embed_n=10) and silently under-fill.
+    new_target  = updates.get("target_imgs_per_person",
+                              state.gt_config["target_imgs_per_person"])
     new_embed_n = updates.get("embed_n", state.gt_config["embed_n"])
-    if new_embed_n > new_top_n:
+    if new_embed_n > new_target:
         return JSONResponse(status_code=400,
-            content={"error": f"embed_n ({new_embed_n}) cannot exceed top_n ({new_top_n})"})
+            content={"error": f"embed_n ({new_embed_n}) cannot exceed "
+                              f"target_imgs_per_person ({new_target})"})
 
-    with state.gt_config_lock:
-        state.gt_config.update(updates)
-        cfg = dict(state.gt_config)
-
+    cfg = gt_config_store.update_gt_config(updates)
     logger.info(f"[GTConfig] Updated: {updates} → {cfg}")
     return cfg
 
@@ -2567,60 +2683,8 @@ def update_detector_config_ep(req: DetectorConfigUpdate):
     }
 
 
-def _parse_dept_from_filename(fname: str) -> str:
-    """
-    Extract the dept tag from a rejected-crop filename.
-    New format:  {ts_ms}_{DEPT}_{method}{score}_det{score}.jpg
-    Old format:  {ts_ms}_{method}{score}_det{score}.jpg  (no dept)
-    """
-    stem = fname.rsplit(".", 1)[0]          # strip .jpg
-    parts = stem.split("_")
-    if len(parts) < 2:
-        return ""
-    # If parts[1] starts with a known method prefix it's the old format
-    if parts[1].startswith(("heur", "onnx")):
-        return ""
-    return parts[1]
-
-
-@router.get("/liveness-rejected-samples")
-def list_liveness_rejected_samples(limit: int = 50, dept: str = ""):
-    """
-    Recent rejected-crop filenames (and a base64 thumbnail of each) for the
-    ML Fine Tuning page's accuracy-review panel.  Optionally filtered by
-    the dept tag encoded in the filename (pass dept= query param).
-    Also returns the full list of depts seen across all saved files.
-    """
-    rejected_dir = clustering_service.LIVENESS_REJECTED_DIR
-    if not os.path.isdir(rejected_dir):
-        return {"samples": [], "total": 0, "depts": []}
-
-    all_files = sorted(
-        (f for f in os.listdir(rejected_dir) if f.lower().endswith(".jpg")),
-        reverse=True,  # ms-timestamp prefix → newest first
-    )
-
-    # Collect unique dept tags for the filter dropdown
-    depts = sorted({d for d in (_parse_dept_from_filename(f) for f in all_files) if d})
-
-    # Apply dept filter when requested
-    if dept:
-        files = [f for f in all_files if _parse_dept_from_filename(f) == dept]
-    else:
-        files = all_files
-
-    total = len(files)
-    samples = []
-    for fname in files[:limit]:
-        try:
-            with open(os.path.join(rejected_dir, fname), "rb") as fh:
-                b64 = base64.b64encode(fh.read()).decode("ascii")
-            samples.append({
-                "filename": fname,
-                "image": f"data:image/jpeg;base64,{b64}",
-                "dept": _parse_dept_from_filename(fname),
-            })
-        except Exception:
-            continue
-
-    return {"samples": samples, "total": total, "depts": depts}
+# NOTE: /liveness-rejected-samples used to live here, reading a local
+# liveness_rejected/ folder. Rejected crops are now POSTed to the Node
+# server (clustering_service._reject_uploader) and stored/served entirely
+# on the Node side (mlRoutes.js GET /liveness-rejected-samples) — this
+# machine keeps no copy.

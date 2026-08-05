@@ -87,6 +87,16 @@ router.delete('/photo/:batch/:rollNo', async (req, res) => {
     }
 });
 
+// Delete ALL photos in a batch
+router.delete('/photos/:batch', async (req, res) => {
+    try {
+        await controller.deleteAllPhotos(req, res);
+    } catch (e) {
+        console.error('[GT Upload Route] deleteAllPhotos error:', e);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 // List photos (roll numbers) in a batch
 router.get('/list/:batch', async (req, res) => {
     try { await controller.listPhotos(req, res); }
@@ -103,6 +113,12 @@ router.get('/summary', async (req, res) => {
 router.get('/embedding-ready/:batch', async (req, res) => {
     try { await controller.checkEmbedding(req, res); }
     catch (e) { res.status(500).json({ error: 'Check failed' }); }
+});
+
+// State of the background embedding run for this batch (what the UI waits on)
+router.get('/embedding-status/:batch', async (req, res) => {
+    try { await controller.embeddingStatus(req, res); }
+    catch (e) { res.status(500).json({ error: 'Status check failed' }); }
 });
 
 // Get ERP embedding sync status

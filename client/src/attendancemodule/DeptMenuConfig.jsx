@@ -19,9 +19,10 @@ const ALL_MENUS = [
     { key: 'livePreview',       label: 'Live Preview',          desc: 'Live camera feed preview',               color: '#8b5cf6' },
     { key: 'confidenceMonitor', label: 'Confidence Monitor',    desc: 'Model confidence tracking',              color: '#ef4444' },
     { key: 'recordStream',      label: 'Record Stream',         desc: 'Save and schedule RTSP recordings',      color: '#7c3aed' },
+    { key: 'extraClasses',      label: 'Extra Classes',         desc: 'Schedule extra classes outside the timetable', color: '#f59e0b' },
+    { key: 'alteringClasses',   label: 'Altering Classes',      desc: 'One-time faculty/subject swaps',          color: '#d946ef' },
     { key: 'instituteIdentification', label: 'Institute Identification', desc: 'Identify students institute-wide from video/stream', color: '#8b5cf6' },
     { key: 'erpOverrides',      label: 'ERP Overrides',         desc: 'Audit manually/ERP-overridden attendance records',      color: '#f59e0b' },
-    { key: 'erpSync',           label: 'ERP Sync',              desc: 'Pause/resume nightly ERP auto-sync and outbound attendance push', color: '#22c55e' },
     { key: 'helpManual',        label: 'Help & Manual',         desc: 'Documentation and user guide',           color: '#64748b' },
 ];
 

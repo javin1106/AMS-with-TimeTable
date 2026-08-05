@@ -8,6 +8,11 @@ const axios = require('axios');
 
 
 const mlClient = require('../controllers/mlServiceClient');
+const {
+    getGpuMetricHistory,
+    getGpuMetricsCollectorInfo,
+    getLatestGpuMetric,
+} = require('../controllers/gpuMetricsCollector');
 const { processVideoFile } = require('../controllers/videoWatcher');
 const mlProcess = require('../controllers/mlProcessController');
 const AttendanceReportController = require('../controllers/attendanceReportController');
@@ -19,6 +24,7 @@ const { checkRole } = require('../../checkRole.middleware');
 const adminOnly = checkRole(['iams-admin']);
 const LockSem = require('../../../models/locksem');
 const TimeTable = require('../../../models/timetable');
+const AcquisitionControl = require('../../../models/acquisitionControl');
 const { saveAttendanceDailyData, listDailyDataFiles, readDailyDataFile } = require('../controllers/attendanceDailyDataSaver');
 const { saveFrameSnapshot } = require('../controllers/frameSnapshotWriter');
 const {
@@ -27,6 +33,7 @@ const {
     buildEnrolledEmbeddingsAdaface,
     buildEnrolledEmbeddingsAdafaceTopK,
 } = require('../controllers/embeddingSyncHelper');
+const { checkAttendanceRunAllowed } = require('../controllers/timeWindowGuard');
 
 const ML_URL = process.env.ML_SERVICE_URL || 'http://localhost:8500';
 const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'ground_truth');
@@ -290,12 +297,47 @@ router.get('/target', (req, res) => {
 
 router.get('/gpu-metrics', adminOnly, async (req, res) => {
     try {
-        const result = await axios.get(`${ML_URL}/metrics/gpu`, { timeout: 5000 });
-        res.json(result.data);
+        const sample = await getLatestGpuMetric();
+        if (!sample) {
+            return res.status(503).json({
+                available: false,
+                error: 'GPU metrics collector has not recorded a sample yet',
+            });
+        }
+        res.json(sample);
     } catch (e) {
         res.status(503).json({
             available: false,
-            error: e.response?.data?.detail || e.message || 'GPU metrics unavailable',
+            error: e.message || 'GPU metrics unavailable',
+        });
+    }
+});
+
+router.get('/gpu-metrics/history', adminOnly, async (req, res) => {
+    try {
+        const from = req.query.from ? new Date(req.query.from) : null;
+        const to = req.query.to ? new Date(req.query.to) : null;
+        if ((from && Number.isNaN(from.getTime())) || (to && Number.isNaN(to.getTime()))) {
+            return res.status(400).json({ error: 'from and to must be valid date-time values' });
+        }
+        if (from && to && from > to) {
+            return res.status(400).json({ error: 'from must be earlier than to' });
+        }
+
+        const requestedMax = Number.parseInt(req.query.maxPoints, 10);
+        const maxPoints = Number.isInteger(requestedMax)
+            ? Math.max(2, Math.min(requestedMax, 5000))
+            : 2000;
+        const samples = await getGpuMetricHistory({ from, to, maxPoints });
+
+        res.json({
+            samples,
+            ...getGpuMetricsCollectorInfo(),
+        });
+    } catch (e) {
+        res.status(503).json({
+            samples: [],
+            error: e.message || 'GPU metrics history unavailable',
         });
     }
 });
@@ -522,18 +564,52 @@ router.post('/detector-config', async (req, res) => {
     }
 });
 
+// Served from THIS server's ml-data/liveness_rejected/ — the ML service
+// uploads crops here (POST /attendancemodule/liveness-rejected) and keeps
+// no local copy, so no proxy to the (possibly remote) ML machine is needed.
+// (Not derived from ML_DATA_DIR below — that const is declared later in
+// this file and would be in its temporal dead zone here.)
+const LIVENESS_REJECTED_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'liveness_rejected');
+
+// Filename: {ts_ms}_{DEPT?}_{method}{score}_det{score}.jpg — dept absent in
+// old-format files, whose second token starts with the method name instead.
+function parseDeptFromRejectedFilename(fname) {
+    const parts = fname.replace(/\.jpg$/i, '').split('_');
+    if (parts.length < 2) return '';
+    if (parts[1].startsWith('heur') || parts[1].startsWith('onnx')) return '';
+    return parts[1];
+}
+
 router.get('/liveness-rejected-samples', async (req, res) => {
     try {
         const limit = Number.parseInt(req.query.limit, 10) || 50;
-        const result = await axios.get(`${ML_URL}/liveness-rejected-samples`, {
-            timeout: 10000,
-            params: { limit },
-        });
-        res.json(result.data);
+        const dept  = String(req.query.dept || '');
+        if (!fs.existsSync(LIVENESS_REJECTED_DIR)) {
+            return res.json({ samples: [], total: 0, depts: [] });
+        }
+        const allFiles = (await fs.promises.readdir(LIVENESS_REJECTED_DIR))
+            .filter((f) => f.toLowerCase().endsWith('.jpg'))
+            .sort().reverse();   // ms-timestamp prefix → newest first
+
+        const depts = [...new Set(allFiles.map(parseDeptFromRejectedFilename).filter(Boolean))].sort();
+        const files = dept ? allFiles.filter((f) => parseDeptFromRejectedFilename(f) === dept) : allFiles;
+
+        const samples = [];
+        for (const fname of files.slice(0, limit)) {
+            try {
+                const bytes = await fs.promises.readFile(path.join(LIVENESS_REJECTED_DIR, fname));
+                samples.push({
+                    filename: fname,
+                    image: `data:image/jpeg;base64,${bytes.toString('base64')}`,
+                    dept: parseDeptFromRejectedFilename(fname),
+                });
+            } catch (_) { /* file pruned mid-read — skip */ }
+        }
+        res.json({ samples, total: files.length, depts });
     } catch (e) {
         res.status(503).json({
             samples: [], total: 0,
-            error: e.response?.data?.error || e.message || 'Rejected samples unavailable',
+            error: e.message || 'Rejected samples unavailable',
         });
     }
 });
@@ -817,7 +893,10 @@ router.get('/rolllists', (req, res) => {
 });
 
 // ─── Build Embeddings DB (streamed) ───────────────────────────
-const ML_DATA_DIR = path.join(__dirname, '..', '..', '..', 'ml-data');
+// Four levels up from routes/ → server/ml-data (NOT server/src/ml-data —
+// a previous 3-level version of this path silently created a stray empty
+// server/src/ml-data folder).
+const ML_DATA_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data');
 if (!fs.existsSync(ML_DATA_DIR)) fs.mkdirSync(ML_DATA_DIR, { recursive: true });
 const EMBEDDINGS_DB_PATH = path.join(ML_DATA_DIR, 'embeddings_db.pkl');
 
@@ -857,6 +936,12 @@ router.post('/test-pipeline', async (req, res) => {
 // 2. Derive ground truth folder name from timetable session
 // 3. Stream SSE from Python ML service
 router.post('/run-attendance-rtsp', async (req, res) => {
+    // Optional 08:30–17:30 IST restriction (admin toggle, default off).
+    const runGate = await checkAttendanceRunAllowed();
+    if (!runGate.allowed) {
+        return res.status(403).json({ error: runGate.reason });
+    }
+
     const { room, slot, date, rtspUrl, durationSec, frameSkip, batch: manualBatch,
             subject: manualSubject, faculty: manualFaculty, semester: manualSem,
             locksemId: manualLocksemId } = req.body;
@@ -889,8 +974,14 @@ router.post('/run-attendance-rtsp', async (req, res) => {
 
     console.log(`[AttendanceRTSP] Running with batch=${resolvedBatch} rtsp=${rtspUrl} duration=${durationSec}s`);
 
+    // Dual-camera dwell time is an admin setting, not a per-request one — take
+    // it from AcquisitionControl rather than trusting whatever the browser sent
+    // (it only reads the value to draw its countdown).
+    const acqCfg = await AcquisitionControl.findOne({ profileName: 'default' }).lean();
+
     const payload = {
         ...req.body,
+        cameraSwitchSec: acqCfg?.attendanceThresholds?.camera_switch_sec ?? 30,
         batch:     resolvedBatch,
         subject:   resolvedSubject,
         faculty:   resolvedFaculty,

@@ -1,271 +1,398 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
-  ChakraProvider,
-  Container,
   Box,
-  Text,
-  VStack,
-  Spinner,
-  SimpleGrid,
-  Card,
-  CardHeader,
-  CardBody,
-  CardFooter,
-  Heading,
-  Button,
-  Badge,
+  Container,
   Flex,
-  Link as ChakraLink,
+  Heading,
+  Icon,
+  SimpleGrid,
+  Spinner,
+  Text,
+  useColorModeValue,
 } from '@chakra-ui/react';
+import {
+  FiAward,
+  FiBookOpen,
+  FiCalendar,
+  FiMic,
+  FiShield,
+  FiUser,
+  FiUserCheck,
+} from 'react-icons/fi';
 import getEnvironment from '../getenvironment';
-import { Navigate, useNavigate } from 'react-router-dom';
+
 const apiUrl = getEnvironment();
+
+const ROLE_META = {
+  ITTC: {
+    name: 'Institute Time Table Coordinator',
+    link: '/tt/admin',
+    description: 'Manage institute-wide timetables',
+    icon: FiCalendar,
+    accent: 'blue',
+  },
+  DTTI: {
+    name: 'Department Time Table Coordinator',
+    link: '/tt/dashboard',
+    description: 'Manage department timetables',
+    icon: FiCalendar,
+    accent: 'blue',
+  },
+  CM: {
+    name: 'Event Certificate Manager',
+    link: '/cm/dashboard',
+    description: 'Create and manage certificates',
+    icon: FiAward,
+    accent: 'green',
+  },
+  admin: {
+    name: 'XCEED Super User',
+    link: '/superadmin',
+    description: 'Full system administration',
+    icon: FiShield,
+    accent: 'red',
+  },
+  EO: {
+    name: 'Event Organiser',
+    link: '/cf/dashboard',
+    description: 'Organize and manage events',
+    icon: FiMic,
+    accent: 'purple',
+  },
+  FACULTY: {
+    name: 'Faculty',
+    link: '/learning',
+    description: 'Your classes and coursework',
+    icon: FiUser,
+    accent: 'orange',
+  },
+  'iams-admin': {
+    name: 'iLEED Admin',
+    link: '/iams-admin',
+    description: 'Manage face recognition attendance system',
+    icon: FiUserCheck,
+    accent: 'cyan',
+  },
+  'iams-dept-admin': {
+    name: 'iLEED Department Admin',
+    link: '/dept-admin/dashboard',
+    description: 'Department-level attendance management',
+    icon: FiUserCheck,
+    accent: 'cyan',
+  },
+  STUDENT: {
+    name: 'Student',
+    link: '/learning',
+    description: 'Your classes, coursework and tutorials',
+    icon: FiBookOpen,
+    accent: 'teal',
+  },
+  'lm-admin': {
+    name: 'Learning Module Admin',
+    link: '/learning/lm-admin',
+    description: 'Bug reports, feedback and usage stats for the Learning module',
+    icon: FiShield,
+    accent: 'purple',
+  },
+  // Synthetic entries: not platform roles, but the standing a user holds
+  // inside the Learning module. Appended only when they actually have classes,
+  // so they never displace a real role or the single-role auto-redirect.
+  'learning-teacher': {
+    name: 'Learning — Teacher',
+    link: '/learning',
+    description: 'Classes you teach',
+    icon: FiBookOpen,
+    accent: 'teal',
+  },
+  'learning-student': {
+    name: 'Learning — Student',
+    link: '/learning',
+    description: 'Classes you are enrolled in',
+    icon: FiBookOpen,
+    accent: 'teal',
+  },
+};
+
+const roleMeta = (role) =>
+  ROLE_META[role] || {
+    name: role,
+    link: '#',
+    description: 'Access your dashboard',
+    icon: FiUser,
+    accent: 'gray',
+  };
+
+const singleRoleTarget = (role, user) => {
+  if (user?.name?.toLowerCase() === 'coe@nitj.ac.in') return '/tt/coe/facultyload';
+  return roleMeta(role).link;
+};
+
+const RoleItem = ({ role, index, onOpen, descriptionOverride }) => {
+  const meta = roleMeta(role);
+  const { name, accent } = meta;
+  const description = descriptionOverride || meta.description;
+  const cardBg = useColorModeValue(`${accent}.50`, `${accent}.900`);
+  const cardBorder = useColorModeValue(`${accent}.100`, `${accent}.700`);
+  const hoverBg = useColorModeValue(`${accent}.100`, `${accent}.800`);
+  const hoverBorder = useColorModeValue(`${accent}.400`, `${accent}.500`);
+  const descColor = useColorModeValue('gray.600', 'gray.300');
+  const nameColor = useColorModeValue('gray.800', 'white');
+  const numColor = useColorModeValue(`${accent}.500`, `${accent}.300`);
+
+  return (
+    <Flex
+      as="button"
+      onClick={onOpen}
+      role="group"
+      direction="column"
+      textAlign="left"
+      h="full"
+      bg={cardBg}
+      borderWidth="1px"
+      borderColor={cardBorder}
+      borderRadius="2xl"
+      p={{ base: 5, md: 6 }}
+      transition="all 0.2s ease"
+      _hover={{
+        bg: hoverBg,
+        borderColor: hoverBorder,
+        transform: 'translateY(-4px)',
+        boxShadow: 'lg',
+      }}
+      _focusVisible={{ boxShadow: 'outline' }}
+    >
+      <Flex align="center" justify="space-between" w="full" mb={{ base: 4, md: 5 }}>
+        <Text
+          fontSize={{ base: '3xl', md: '4xl' }}
+          fontWeight="extrabold"
+          fontFamily="mono"
+          lineHeight="1"
+          color={numColor}
+        >
+          {String(index + 1).padStart(2, '0')}
+        </Text>
+        <Box
+          as="span"
+          aria-hidden="true"
+          fontSize={{ base: '2xl', md: '3xl' }}
+          lineHeight="1"
+          color={numColor}
+          opacity={0}
+          transform="translateX(-10px)"
+          transition="all 0.2s ease"
+          _groupHover={{ opacity: 1, transform: 'translateX(0)' }}
+        >
+          &rarr;
+        </Box>
+      </Flex>
+      <Heading
+        as="h3"
+        fontSize={{ base: 'lg', md: 'xl' }}
+        lineHeight="1.3"
+        mb={2}
+        color={nameColor}
+      >
+        {name}
+      </Heading>
+      <Text fontSize={{ base: 'sm', md: 'md' }} color={descColor} lineHeight="1.5">
+        {description}
+      </Text>
+    </Flex>
+  );
+};
 
 const AllocatedRolesPage = () => {
   const navigate = useNavigate();
   const [allocatedRoles, setAllocatedRoles] = useState([]);
+  const [learningCards, setLearningCards] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [user, setUser] = useState('');
+  const [user, setUser] = useState(null);
+
+  const pageBg = useColorModeValue('gray.50', 'gray.900');
+  const subColor = useColorModeValue('gray.500', 'gray.400');
+  const emptyCardBg = useColorModeValue('white', 'gray.800');
+  const emptyCardBorder = useColorModeValue('gray.100', 'gray.700');
+  const labelColor = useColorModeValue('gray.400', 'gray.500');
+  const emptyIconBg = useColorModeValue('gray.100', 'gray.700');
 
   useEffect(() => {
-    const fetchAllocatedRoles = async () => {
+    (async () => {
       try {
         const response = await fetch(`${apiUrl}/user/getuser`, {
           method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+          headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
         });
-
-        if (!response.ok) {
-          throw new Error('Failed to fetch allocated roles');
-        }
-
+        if (!response.ok) throw new Error('Failed to fetch allocated roles');
         const userdetails = await response.json();
-        console.log('Fetched user details:', userdetails); // Log the fetched data
-        const excludedRoles = ['Reviewer', 'Author'];
-        setAllocatedRoles(
-          userdetails.user.role.filter((role) => !excludedRoles.includes(role))
-        ); // Filter out empty roles
+        // The paper-review and diabetics modules are gone, but the roles they
+        // issued still sit on existing user records — hide them rather than
+        // offering a card that leads to a route that no longer exists.
+        // Matched case-insensitively: 'editor' was stored with either casing.
+        const excludedRoles = [
+          'reviewer',
+          'author',
+          'editor',
+          'prm',
+          'doctor',
+          'patient',
+          'dm-admin',
+        ];
+        const platformRoles = (userdetails.user.role || []).filter(
+          (role) => !excludedRoles.includes(String(role).toLowerCase()),
+        );
+        setAllocatedRoles(platformRoles);
         setUser(userdetails.user);
+
+        // Learning-module standing is per-class, not a platform role, so it has
+        // to be asked for separately. Kept out of `allocatedRoles` so the
+        // single-role auto-redirect below behaves exactly as before.
+        try {
+          const lmResponse = await fetch(`${apiUrl}/api/v1/learningmodule/overview`, {
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+          });
+          if (lmResponse.ok) {
+            const overview = await lmResponse.json();
+            const cards = [];
+            if (overview.teachingCount > 0) {
+              cards.push({
+                role: 'learning-teacher',
+                description: `${overview.teachingCount} class${overview.teachingCount === 1 ? '' : 'es'} you teach${
+                  overview.awaitingReview ? ` · ${overview.awaitingReview} to review` : ''
+                }`,
+              });
+            }
+            // A student who already has the STUDENT platform role has a card
+            // for it, so only add this when their enrolment would otherwise be
+            // invisible (e.g. a faculty member sitting in a colleague's class).
+            if (overview.enrolledCount > 0 && !platformRoles.includes('STUDENT')) {
+              cards.push({
+                role: 'learning-student',
+                description: `${overview.enrolledCount} class${overview.enrolledCount === 1 ? '' : 'es'} you are enrolled in${
+                  overview.pendingWork ? ` · ${overview.pendingWork} pending` : ''
+                }`,
+              });
+            }
+            setLearningCards(cards);
+          }
+        } catch {
+          // The learning module being unreachable must not blank the roles page.
+        }
       } catch (error) {
         console.error('Error fetching allocated roles:', error.message);
       } finally {
         setIsLoading(false);
       }
-    };
-    fetchAllocatedRoles();
+    })();
   }, []);
 
-  if (isLoading) {
-    return <Spinner />;
-  }
-  if (allocatedRoles.length === 1 && user) {
-     const email = user.name?.toLowerCase();
-    if (email === 'coe@nitj.ac.in') {
-      console.log('Navigating to COE faculty load page for user:', email);
-    navigate('/tt/coe/facultyload');
-    return null;
-  }
-    switch (allocatedRoles[0]) {
-      case 'ITTC':
-        navigate('/tt/admin');
-        break;
-      case 'DTTI':
-        navigate('/tt/dashboard');
-        break;
-      case 'CM':
-        navigate('/cm/dashboard');
-        break;
-      case 'admin':
-        navigate('/superadmin');
-        break;
-      case 'EO':
-        navigate('/cf/dashboard');
-        break;
-      case 'Editor':
-      case 'editor':
-        navigate('/prm/dashboard');
-        break;
-      case 'PRM':
-      case 'FACULTY':
-        navigate('/prm/home');
-        break;
-      case 'doctor':
-        navigate('/dm/doctor/dashboard');
-        break;
-      case 'patient':
-        navigate('/dm/patient/dashboard');
-        break;
-      case 'dm-admin':
-        navigate('/dm/admin/dashboard');
-        break;
-      case 'iams-admin':
-        navigate('/iams-admin');
-        break;
-      case 'iams-dept-admin':
-        navigate('/dept-admin/dashboard');
-        break;
-      default:
-        return 'some unknown role! If it is a new role, add it in the cases';
+  // Single-role users skip the picker and land on their dashboard directly.
+  useEffect(() => {
+    if (!isLoading && allocatedRoles.length === 1 && user) {
+      const target = singleRoleTarget(allocatedRoles[0], user);
+      if (target !== '#') navigate(target);
     }
+  }, [isLoading, allocatedRoles, user, navigate]);
+
+  if (isLoading) {
+    return (
+      <Flex bg={pageBg} minH="100vh" align="center" justify="center">
+        <Spinner size="lg" />
+      </Flex>
+    );
   }
+
+  const email = Array.isArray(user?.email) ? user.email[0] : user?.email;
+  const displayName = user?.name || email || 'there';
+  const roleCount = allocatedRoles.length + learningCards.length;
+
   return (
-    <ChakraProvider>
-      <Container maxW="container.xl" py={8}>
-        <Box p={4}>
-          {isLoading ? (
-            <Spinner />
-          ) : (
-            <VStack spacing={6} align="stretch">
-              {user && (
-                <Box textAlign="center" mb={4}>
-                  <Heading size="lg" mb={2}>Welcome, {user.email}!</Heading>
-                  <Text color="gray.600" fontSize="md">Select a role to access your dashboard</Text>
-                </Box>
-              )}
-              <SimpleGrid columns={{ base: 1, md: 2, lg: 3 }} spacing={6}>
-                {allocatedRoles.map((role, index) => {
-                  // Define role details
-                  let roleName = '';
-                  let roleLink = '';
-                  let roleDescription = '';
-                  let roleColor = 'teal';
-
-                  switch(role) {
-                    case 'ITTC':
-                      roleName = 'Institute Time Table Coordinator';
-                      roleLink = '/tt/admin';
-                      roleDescription = 'Manage institute-wide timetables';
-                      roleColor = 'blue';
-                      break;
-                    case 'DTTI':
-                      roleName = 'Department Time Table Coordinator';
-                      roleLink = '/tt/dashboard';
-                      roleDescription = 'Manage department timetables';
-                      roleColor = 'blue';
-                      break;
-                    case 'CM':
-                      roleName = 'Event Certificate Manager';
-                      roleLink = '/cm/dashboard';
-                      roleDescription = 'Create and manage certificates';
-                      roleColor = 'blue';
-                      break;
-                    case 'admin':
-                      roleName = 'XCEED Super User';
-                      roleLink = '/superadmin';
-                      roleDescription = 'Full system administration';
-                      roleColor = 'blue';
-                      break;
-                    case 'EO':
-                      roleName = 'Event Organiser';
-                      roleLink = '/cf/dashboard';
-                      roleDescription = 'Organize and manage events';
-                      roleColor = 'blue';
-                      break;
-                    case 'editor':
-                      roleName = 'Paper Review Management';
-                      roleLink = '/prm/dashboard';
-                      roleDescription = 'Manage paper reviews';
-                      roleColor = 'blue';
-                      break;
-                    case 'PRM':
-                      roleName = 'PRM';
-                      roleLink = '/prm/home';
-                      roleDescription = 'Paper Review Management';
-                      roleColor = 'blue';
-                      break;
-                    case 'FACULTY':
-                      roleName = 'Faculty';
-                      roleLink = '/prm/home';
-                      roleDescription = 'Faculty dashboard';
-                      roleColor = 'blue';
-                      break;
-                    case 'doctor':
-                      roleName = 'Diabetics Module Doctor';
-                      roleLink = '/dm/doctor/dashboard';
-                      roleDescription = 'Patient management';
-                      roleColor = 'blue';
-                      break;
-                    case 'patient':
-                      roleName = 'Diabetics Module Patient';
-                      roleLink = '/dm/patient/dashboard';
-                      roleDescription = 'Track your health';
-                      roleColor = 'blue';
-                      break;
-                    case 'dm-admin':
-                      roleName = 'Diabetics Module Admin';
-                      roleLink = '/dm/admin/dashboard';
-                      roleDescription = 'Manage diabetics module';
-                      roleColor = 'blue';
-                      break;
-                    case 'iams-admin':
-                      roleName = 'IAMS Admin';
-                      roleLink = '/iams-admin';
-                      roleDescription = 'Manage face recognition attendance system';
-                      roleColor = 'cyan';
-                      break;
-                    case 'iams-dept-admin':
-                      roleName = 'IAMS Department Admin';
-                      roleLink = '/dept-admin/dashboard';
-                      roleDescription = 'Department-level attendance management';
-                      roleColor = 'cyan';
-                      break;
-                    default:
-                      roleName = role;
-                      roleLink = '#';
-                      roleDescription = 'Access your dashboard';
-                      roleColor = 'blue';
-                  }
-
-                  return (
-                    <Card 
-                      key={index}
-                      variant="elevated"
-                      size="md"
-                      _hover={{
-                        transform: 'translateY(-4px)',
-                        shadow: 'xl',
-                        transition: 'all 0.3s ease',
-                      }}
-                      transition="all 0.2s ease"
-                    >
-                      <CardHeader pb={2}>
-                        <Flex justifyContent="space-between" alignItems="center">
-                          <Badge colorScheme={roleColor} fontSize="sm" px={3} py={1} borderRadius="full">
-                            Role #{index + 1}
-                          </Badge>
-                        </Flex>
-                      </CardHeader>
-                      <CardBody py={3}>
-                        <Heading size="md" mb={2} color={`${roleColor}.600`}>
-                          {roleName}
-                        </Heading>
-                        <Text color="gray.600" fontSize="sm">
-                          {roleDescription}
-                        </Text>
-                      </CardBody>
-                      <CardFooter pt={0}>
-                        <Button
-                          as={ChakraLink}
-                          href={roleLink}
-                          colorScheme={roleColor}
-                          width="full"
-                          _hover={{ textDecoration: 'none' }}
-                        >
-                          Access Dashboard
-                        </Button>
-                      </CardFooter>
-                    </Card>
-                  );
-                })}
-              </SimpleGrid>
-            </VStack>
-          )}
+    <Box bg={pageBg} minH="100vh" py={{ base: 8, md: 16 }}>
+      <Container maxW="5xl">
+        {/* Header */}
+        <Box mb={{ base: 8, md: 12 }}>
+          <Text
+            fontSize={{ base: 'xs', md: 'sm' }}
+            fontWeight="bold"
+            letterSpacing="0.12em"
+            textTransform="uppercase"
+            color={labelColor}
+            mb={2}
+          >
+            Welcome back
+          </Text>
+          <Heading
+            as="h1"
+            fontSize={{ base: 'xl', md: '3xl' }}
+            lineHeight="1.2"
+            letterSpacing="-0.01em"
+            wordBreak="break-word"
+          >
+            {email || displayName}
+          </Heading>
+          <Text color={subColor} fontSize={{ base: 'md', md: 'lg' }} mt={3}>
+            {roleCount
+              ? `Choose a workspace to continue — you have ${roleCount} ${roleCount === 1 ? 'role' : 'roles'}.`
+              : 'No roles have been assigned to your account yet.'}
+          </Text>
         </Box>
+
+        {roleCount ? (
+          <SimpleGrid columns={{ base: 1, sm: 2, lg: 3 }} spacing={{ base: 4, md: 6 }}>
+            {allocatedRoles.map((role, index) => (
+              <RoleItem
+                key={role}
+                role={role}
+                index={index}
+                onOpen={() => navigate(singleRoleTarget(role, user))}
+              />
+            ))}
+            {learningCards.map((card, index) => (
+              <RoleItem
+                key={card.role}
+                role={card.role}
+                index={allocatedRoles.length + index}
+                descriptionOverride={card.description}
+                onOpen={() => navigate(roleMeta(card.role).link)}
+              />
+            ))}
+          </SimpleGrid>
+        ) : (
+          <Flex
+            direction="column"
+            align="center"
+            textAlign="center"
+            bg={emptyCardBg}
+            borderWidth="1px"
+            borderColor={emptyCardBorder}
+            borderRadius="2xl"
+            py={{ base: 12, md: 16 }}
+            px={6}
+          >
+            <Flex
+              align="center"
+              justify="center"
+              boxSize={16}
+              borderRadius="full"
+              bg={emptyIconBg}
+              color={subColor}
+              mb={4}
+            >
+              <Icon as={FiUser} boxSize={8} />
+            </Flex>
+            <Heading as="h2" fontSize={{ base: 'lg', md: 'xl' }} mb={2}>
+              No roles assigned yet
+            </Heading>
+            <Text color={subColor} fontSize={{ base: 'sm', md: 'md' }} maxW="sm">
+              Your account doesn&apos;t have any roles yet. Please contact your administrator to get access.
+            </Text>
+          </Flex>
+        )}
       </Container>
-    </ChakraProvider>
+    </Box>
   );
 };
 

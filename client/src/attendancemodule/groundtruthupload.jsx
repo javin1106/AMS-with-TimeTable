@@ -89,12 +89,42 @@ const CSS = `
   .search-wrap-inner { position: relative; max-width: 340px; }
   .search-icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: ${T.textMuted}; pointer-events: none; font-size: 14px; }
 
+  .summary-table-scroll { overflow-x: auto; }
+  .summary-grid {
+    display: grid;
+    grid-template-columns: minmax(180px, 2fr) 90px 150px 190px 165px 120px;
+    min-width: 1010px;
+  }
+
   @media (max-width: 768px) {
     .batch-filter-grid { grid-template-columns: 1fr; }
     .erp-toast { max-width: calc(100vw - 32px); white-space: normal; }
     .ams-tabs { overflow-x: auto; }
   }
 `;
+
+// ── Embedding-run banner ─────────────────────────────────────────────────────
+// 'syncing' means the background build is genuinely still going — it clears
+// only once the server reports the run finished, so it is never a stand-in for
+// "we fired the request and hoped".
+function EmbedStatusBanner({ status, batchName }) {
+    if (!status) return null;
+
+    const base = { marginTop: 12, padding: '9px 14px', borderRadius: 7, fontSize: 13, fontWeight: 600 };
+    if (status === 'syncing') {
+        return (
+            <div style={{ ...base, background: T.accentDim, color: T.accent,
+                          display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ display: 'inline-block', animation: 'spin 1s linear infinite' }}>⟳</span>
+                Generating embeddings for {batchName}… this can take a few minutes
+            </div>
+        );
+    }
+    if (status === 'done') {
+        return <div style={{ ...base, background: T.successDim, color: T.success }}>✓ Embeddings generated for {batchName}</div>;
+    }
+    return <div style={{ ...base, background: T.dangerDim, color: T.danger }}>✗ Embedding generation failed — see the message above</div>;
+}
 
 // ── Shared batch selector component ──────────────────────────────────────────
 function BatchSelector({ degree, setDegree, degrees, setDegrees, department, setDepartment, batchYear, setBatchYear, departments, deptLoading, deptError, batches, batchesLoading, batchName, photoCount, fixedDepartment }) {
@@ -264,7 +294,7 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
     const batchName = (degree && department && batchYear) ? `${degree}_${department}_${batchYear}` : '';
 
     // ── Active tab ────────────────────────────────────────────────────
-    const [activeTab, setActiveTab] = useState('upload');
+    const [activeTab, setActiveTab] = useState('summary');
 
     // ── Upload tab state ──────────────────────────────────────────────
     const [zipFile,       setZipFile]       = useState(null);
@@ -283,6 +313,8 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
     const [saving,         setSaving]        = useState(false);
     const [pendingDelete,  setPendingDelete] = useState(null); // {rollNo, ext}
     const [deleting,       setDeleting]      = useState(false);
+    const [pendingDeleteAll, setPendingDeleteAll] = useState(false);
+    const [deletingAll,      setDeletingAll]      = useState(false);
     const [searchQuery,    setSearchQuery]   = useState('');
 
     // ── Summary tab state ─────────────────────────────────────────────
@@ -607,6 +639,28 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
         }
     };
 
+    const handleConfirmedDeleteAll = async () => {
+        if (!batchName) return;
+        setDeletingAll(true);
+        try {
+            const res = await fetch(`${UPLOAD_BASE}/photos/${encodeURIComponent(batchName)}`, {
+                method: 'DELETE',
+                credentials: 'include',
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Delete failed');
+            showToast(data.message || 'All photos deleted');
+            setPhotos([]);
+            setSummaryVersion(v => v + 1);
+            setPendingDeleteAll(false);
+        } catch (err) {
+            showToast(err.message, 'error');
+            setPendingDeleteAll(false);
+        } finally {
+            setDeletingAll(false);
+        }
+    };
+
     // ── Summary helpers ───────────────────────────────────────────────
     const parseBatch = (batchStr) => {
         const parts = batchStr.split('_');
@@ -646,8 +700,19 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
             );
         } catch (e) {
             showToast(e.message, 'error');
-            setRegenning(r => { const n = { ...r }; delete n[batch]; return n; });
+        } finally {
+            setRegenning(prev => { const n = { ...prev }; delete n[batch]; return n; });
         }
+    };
+
+    const handleReplaceFailedPhoto = (batch, failedRollNo) => {
+        const selected = parseBatch(batch);
+        setDegree(selected.degree);
+        setDepartment(selected.dept);
+        setBatchYear(selected.year);
+        setRollNo(failedRollNo);
+        setStudentPhoto(null);
+        setActiveTab('upload');
     };
 
     // ── Render ────────────────────────────────────────────────────────
@@ -666,15 +731,15 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
             {/* Header */}
             <div style={{ marginBottom: 24 }}>
                 <div style={styles.heading}>ERP Image Upload</div>
-                <div style={styles.subheading}>Upload, manage, and review student ERP photos</div>
+                <div style={styles.subheading}>Review embedding results, replace failed photos, and regenerate embeddings</div>
             </div>
 
             {/* Tabs */}
             <div className="ams-tabs">
                 {[
+                    { id: 'summary', label: 'Summary' },
                     { id: 'upload',  label: 'Upload' },
                     { id: 'manage',  label: 'Manage Photos' },
-                    { id: 'summary', label: 'Summary' },
                 ].map(t => (
                     <button key={t.id} className={`ams-tab${activeTab === t.id ? ' active' : ''}`} onClick={() => setActiveTab(t.id)}>
                         {t.label}
@@ -783,11 +848,25 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
                         <div className="erp-card">
                             <div className="erp-card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                 <span>Photos in <span style={{ color: T.accent }}>{batchName}</span></span>
-                                <span style={{ color: T.accent, fontWeight: 700 }}>
-                                    {searchQuery
-                                        ? `${photos.filter(p => p.rollNo.includes(searchQuery)).length} / ${photos.length} students`
-                                        : `${photos.length} students`}
-                                </span>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                                    <span style={{ color: T.accent, fontWeight: 700 }}>
+                                        {searchQuery
+                                            ? `${photos.filter(p => p.rollNo.includes(searchQuery)).length} / ${photos.length} students`
+                                            : `${photos.length} students`}
+                                    </span>
+                                    {photos.length > 0 && (
+                                        <button
+                                            onClick={() => setPendingDeleteAll(true)}
+                                            style={{
+                                                background: 'transparent', border: '1px solid #ef4444',
+                                                color: '#ef4444', padding: '5px 12px', borderRadius: 6,
+                                                fontWeight: 600, fontSize: 12, cursor: 'pointer', fontFamily: T.fontBody,
+                                            }}
+                                        >
+                                            🗑 Delete All
+                                        </button>
+                                    )}
+                                </div>
                             </div>
 
                             {/* Search bar */}
@@ -936,38 +1015,43 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
                                         </span>
                                     </div>
 
-                                    {/* Column header row */}
-                                    <div style={{
-                                        display: 'grid', gridTemplateColumns: '2fr 90px 150px 165px 120px',
-                                        padding: '8px 18px', background: T.bg,
-                                        borderBottom: `1px solid ${T.border}`,
-                                        fontSize: 10, fontWeight: 700, color: T.textMuted,
-                                        textTransform: 'uppercase', letterSpacing: '0.07em',
-                                    }}>
-                                        <span>Batch</span>
-                                        <span style={{ textAlign: 'center' }}>Students</span>
-                                        <span style={{ textAlign: 'center' }}>Embeddings</span>
-                                        <span>Last Updated</span>
-                                        <span style={{ textAlign: 'right' }}>Action</span>
-                                    </div>
+                                    <div className="summary-table-scroll">
+                                        {/* Column header row */}
+                                        <div className="summary-grid" style={{
+                                            padding: '8px 18px', background: T.bg,
+                                            borderBottom: `1px solid ${T.border}`,
+                                            fontSize: 10, fontWeight: 700, color: T.textMuted,
+                                            textTransform: 'uppercase', letterSpacing: '0.07em',
+                                        }}>
+                                            <span>Batch</span>
+                                            <span style={{ textAlign: 'center' }}>Students</span>
+                                            <span style={{ textAlign: 'center' }}>Embeddings</span>
+                                            <span style={{ textAlign: 'center' }}>Face Not Detected</span>
+                                            <span>Last Updated</span>
+                                            <span style={{ textAlign: 'right' }}>Action</span>
+                                        </div>
 
-                                    {/* Data rows */}
-                                    {items.slice().sort((a, b) => a.batch.localeCompare(b.batch)).map((row, idx, arr) => {
-                                        const { degree: deg, year } = parseBatch(row.batch);
-                                        const embOk  = !!row.hasEmbedding;
-                                        const lastDt = row.embeddingUpdatedAt ? new Date(row.embeddingUpdatedAt) : null;
-                                        const busy   = !!regenning[row.batch];
-                                        const isLast = idx === arr.length - 1;
-                                        return (
-                                            <div key={row.batch} style={{
-                                                display: 'grid', gridTemplateColumns: '2fr 90px 150px 165px 120px',
-                                                alignItems: 'center', padding: '13px 18px',
-                                                borderBottom: isLast ? 'none' : `1px solid ${T.border}`,
-                                                transition: 'background .1s',
-                                            }}
-                                            onMouseEnter={e => e.currentTarget.style.background = '#f8f9ff'}
-                                            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                                            >
+                                        {/* Data rows */}
+                                        {items.slice().sort((a, b) => a.batch.localeCompare(b.batch)).map((row, idx, arr) => {
+                                            const { degree: deg, year } = parseBatch(row.batch);
+                                            const embOk  = !!row.hasEmbedding;
+                                            const summaryReady = row.faceNotDetectedCount != null;
+                                            const failedRollNos = Array.isArray(row.failedRollNos) ? row.failedRollNos : [];
+                                            const updatedAt = row.embeddingSummaryUpdatedAt || row.embeddingUpdatedAt;
+                                            const lastDt = updatedAt ? new Date(updatedAt) : null;
+                                            const busy   = !!regenning[row.batch];
+                                            const isLast = idx === arr.length - 1;
+                                            return (
+                                                <div key={row.batch} style={{
+                                                    borderBottom: isLast ? 'none' : `1px solid ${T.border}`,
+                                                }}>
+                                                    <div className="summary-grid" style={{
+                                                        alignItems: 'center', padding: '13px 18px',
+                                                        transition: 'background .1s',
+                                                    }}
+                                                    onMouseEnter={e => e.currentTarget.style.background = '#f8f9ff'}
+                                                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                                                    >
                                                 {/* Batch identity */}
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                                                     <span style={{ fontFamily: T.fontMono, fontWeight: 700, fontSize: 12, color: T.text }}>{deg}</span>
@@ -986,10 +1070,67 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
                                                         <span className="status-pill na">No Photos</span>
                                                     ) : busy ? (
                                                         <span className="status-pill na">⏳ Generating…</span>
+                                                    ) : summaryReady ? (
+                                                        <>
+                                                            <span style={{ fontSize: 16, fontWeight: 800, color: T.success }}>
+                                                                {row.completedEmbeddingCount}
+                                                            </span>
+                                                            <span style={{ fontSize: 10, color: T.textMuted, display: 'block', marginTop: 1 }}>
+                                                                of {row.count} completed
+                                                            </span>
+                                                        </>
                                                     ) : embOk ? (
                                                         <span className="status-pill ok">✓ Available</span>
                                                     ) : (
                                                         <span className="status-pill no">✗ Not Built</span>
+                                                    )}
+                                                </div>
+
+                                                {/* Face-not-detected count */}
+                                                <div style={{ textAlign: 'center' }}>
+                                                    {row.count === 0 ? (
+                                                        <span style={{ color: T.textMuted }}>—</span>
+                                                    ) : busy ? (
+                                                        <span className="status-pill na">Pending</span>
+                                                    ) : !summaryReady ? (
+                                                        <span className="status-pill na">Run regenerate</span>
+                                                    ) : row.faceNotDetectedCount > 0 ? (
+                                                        <div>
+                                                            <span className="status-pill no" style={{ marginBottom: 5 }}>
+                                                                {row.faceNotDetectedCount} student{row.faceNotDetectedCount !== 1 ? 's' : ''}
+                                                            </span>
+                                                            <select
+                                                                value=""
+                                                                aria-label={`Face not detected roll numbers for ${row.batch}`}
+                                                                onChange={(event) => {
+                                                                    if (event.target.value) {
+                                                                        handleReplaceFailedPhoto(row.batch, event.target.value);
+                                                                    }
+                                                                }}
+                                                                style={{
+                                                                    display: 'block',
+                                                                    width: '100%',
+                                                                    padding: '5px 7px',
+                                                                    borderRadius: 6,
+                                                                    border: `1px solid ${T.danger}55`,
+                                                                    background: T.surface,
+                                                                    color: T.danger,
+                                                                    fontFamily: T.fontMono,
+                                                                    fontSize: 10,
+                                                                    fontWeight: 700,
+                                                                    cursor: 'pointer',
+                                                                }}
+                                                            >
+                                                                <option value="">Select roll no.</option>
+                                                                {failedRollNos.map((failedRollNo) => (
+                                                                    <option key={failedRollNo} value={failedRollNo}>
+                                                                        {failedRollNo}
+                                                                    </option>
+                                                                ))}
+                                                            </select>
+                                                        </div>
+                                                    ) : (
+                                                        <span className="status-pill ok">0</span>
                                                     )}
                                                 </div>
 
@@ -1016,9 +1157,11 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
                                                         {busy ? '⏳ Building…' : '↺ Regenerate'}
                                                     </button>
                                                 </div>
+                                                    </div>
                                             </div>
                                         );
                                     })}
+                                    </div>
                                 </div>
                                 );
                             });
@@ -1079,6 +1222,35 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
                                 style={{ background: '#ef4444', border: 'none', color: '#fff', padding: '10px 16px', borderRadius: 8, fontWeight: 600, fontSize: 13, cursor: deleting ? 'not-allowed' : 'pointer', opacity: deleting ? 0.6 : 1, fontFamily: T.fontBody }}
                             >
                                 {deleting ? 'Deleting…' : 'Yes, Delete'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {pendingDeleteAll && (
+                <div className="erp-modal-overlay">
+                    <div className="erp-modal-box">
+                        <div style={{ fontSize: 16, fontWeight: 700, color: T.text, marginBottom: 8, fontFamily: T.fontBody }}>
+                            Delete ALL Photos
+                        </div>
+                        <div style={{ fontSize: 13.5, color: T.textMuted, lineHeight: 1.55, marginBottom: 22, fontFamily: T.fontBody }}>
+                            Are you sure you want to delete <strong style={{ color: '#ef4444' }}>all {photos.length} photo{photos.length === 1 ? '' : 's'}</strong> for <strong style={{ color: T.text, fontFamily: T.fontMono }}>{batchName}</strong>?
+                            This will also remove all associated embeddings for this batch. This action cannot be undone.
+                        </div>
+                        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                            <button
+                                onClick={() => setPendingDeleteAll(false)}
+                                style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', color: '#475569', padding: '10px 16px', borderRadius: 8, fontWeight: 600, fontSize: 13, cursor: 'pointer', fontFamily: T.fontBody }}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={handleConfirmedDeleteAll}
+                                disabled={deletingAll}
+                                style={{ background: '#ef4444', border: 'none', color: '#fff', padding: '10px 16px', borderRadius: 8, fontWeight: 600, fontSize: 13, cursor: deletingAll ? 'not-allowed' : 'pointer', opacity: deletingAll ? 0.6 : 1, fontFamily: T.fontBody }}
+                            >
+                                {deletingAll ? 'Deleting…' : `Yes, Delete All ${photos.length}`}
                             </button>
                         </div>
                     </div>

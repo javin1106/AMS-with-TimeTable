@@ -78,7 +78,7 @@ async function sendAlert(subject, html, cooldownKey, alertKey, dept = null) {
 
 async function notifyServerDown(serviceName, details = "") {
   await sendAlert(
-    `⚠️ iAMS Alert: ${serviceName} is down`,
+    `⚠️ iLEED Alert: ${serviceName} is down`,
     templates.serverDownTemplate(serviceName, details),
     null, "serverDown", null
   );
@@ -86,7 +86,7 @@ async function notifyServerDown(serviceName, details = "") {
 
 async function notifyServerRecovered(serviceName) {
   await sendAlert(
-    `✅ iAMS Alert: ${serviceName} is back up`,
+    `✅ iLEED Alert: ${serviceName} is back up`,
     templates.serverRecoveredTemplate(serviceName),
     null, "serverDown", null
   );
@@ -97,7 +97,7 @@ async function notifyServerRecovered(serviceName) {
 // coordinator may want ML-down alerts but not ERP-down, or vice versa.
 async function notifyErpDown(details = "") {
   await sendAlert(
-    `⚠️ iAMS Alert: ERP Server is down`,
+    `⚠️ iLEED Alert: ERP Server is down`,
     templates.serverDownTemplate("ERP Server", details),
     null, "erpDown", null
   );
@@ -105,15 +105,35 @@ async function notifyErpDown(details = "") {
 
 async function notifyErpRecovered() {
   await sendAlert(
-    `✅ iAMS Alert: ERP Server is back up`,
+    `✅ iLEED Alert: ERP Server is back up`,
     templates.serverRecoveredTemplate("ERP Server"),
     null, "erpDown", null
   );
 }
 
+// Scheduled twice-daily uptime digest (see uptimeDigestScheduler.js) — a
+// schedule-triggered mechanism, distinct from the edge-triggered
+// notifyServerDown/notifyErpDown path driven by healthRoutes.js transitions.
+// Uses the scheduleCheck recipient opt-in so admins can toggle schedules check emails;
+// no cooldownKey because the two fixed daily fires can never spam.
+async function notifyUptimeDigest({ results }) {
+  const downNames = results
+    .filter((r) => r.status === "down")
+    .map((r) => r.name)
+    .join(", ");
+  await sendAlert(
+    `⚠️ iLEED Scheduled Status Check: ${downNames} DOWN`,
+    templates.uptimeDigestTemplate({
+      checkedAt: new Date().toLocaleString(),
+      results,
+    }),
+    null, "scheduleCheck", null
+  );
+}
+
 async function notifyNoReportSaved({ batch, subject, faculty, room, date, timeSlot, dept }) {
   await sendAlert(
-    `⚠️ iAMS Alert: No report saved — ${subject || "Unknown subject"}`,
+    `⚠️ iLEED Alert: No report saved — ${subject || "Unknown subject"}`,
     templates.noReportSavedTemplate({ batch, subject, faculty, room, date, timeSlot }),
     `no-report-${batch}-${date}-${timeSlot}`,
     "noReportSaved", dept || null
@@ -122,7 +142,7 @@ async function notifyNoReportSaved({ batch, subject, faculty, room, date, timeSl
 
 async function notifyClassBunk({ batch, subject, faculty, room, date, timeSlot, dept, totalStudents }) {
   await sendAlert(
-    `🚨 iAMS Alert: Class bunked — ${subject || "Unknown subject"}`,
+    `🚨 iLEED Alert: Class bunked — ${subject || "Unknown subject"}`,
     templates.classBunkTemplate({ batch, subject, faculty, room, date, timeSlot, totalStudents }),
     `class-bunk-${batch}-${date}-${timeSlot}`,
     "classBunk", dept || null
@@ -131,7 +151,7 @@ async function notifyClassBunk({ batch, subject, faculty, room, date, timeSlot, 
 
 async function notifyLowConfidence({ batch, rollNo, avgConfidence, dept }) {
   await sendAlert(
-    `⚠️ iAMS Alert: Low confidence detection — ${rollNo}`,
+    `⚠️ iLEED Alert: Low confidence detection — ${rollNo}`,
     templates.lowConfidenceTemplate({ batch, rollNo, avgConfidence }),
     `low-conf-${batch}-${rollNo}`,
     "lowConfidence", dept || null
@@ -140,7 +160,7 @@ async function notifyLowConfidence({ batch, rollNo, avgConfidence, dept }) {
 
 async function notifyDuplicateAttendance({ rollNo, date, sessions }) {
   await sendAlert(
-    `⚠️ iAMS Alert: Duplicate attendance detected — ${rollNo}`,
+    `⚠️ iLEED Alert: Duplicate attendance detected — ${rollNo}`,
     templates.duplicateAttendanceTemplate({ rollNo, date, sessions }),
     `dup-${rollNo}-${date}`,
     "duplicateAttendance", null
@@ -149,7 +169,7 @@ async function notifyDuplicateAttendance({ rollNo, date, sessions }) {
 
 async function notifyDailySummary({ dept, date, frequencyLabel, mode, threshold, rows }) {
   await sendAlert(
-    `📊 iAMS ${frequencyLabel === "weekly" ? "Weekly" : "Daily"} Attendance Summary — ${dept}`,
+    `📊 iLEED ${frequencyLabel === "weekly" ? "Weekly" : "Daily"} Attendance Summary — ${dept}`,
     templates.dailySummaryTemplate({ dept, date, frequencyLabel, mode, threshold, rows }),
     null, "dailySummary", dept || null
   );
@@ -157,7 +177,7 @@ async function notifyDailySummary({ dept, date, frequencyLabel, mode, threshold,
 
 async function notifyEmbeddingProgress({ dept, semesterGroups }) {
   await sendAlert(
-    `📸 iAMS Weekly Embedding Progress — ${dept}`,
+    `📸 iLEED Weekly Embedding Progress — ${dept}`,
     templates.embeddingProgressTemplate({ dept, semesterGroups }),
     null, "embeddingProgress", dept || null
   );
@@ -165,12 +185,12 @@ async function notifyEmbeddingProgress({ dept, semesterGroups }) {
 
 function setupServerLifecycleAlerts() {
   // Notify that the server is up
-  notifyServerRecovered("iAMS Node Server").catch(err => console.error("Startup alert failed:", err));
+  notifyServerRecovered("iLEED Node Server").catch(err => console.error("Startup alert failed:", err));
 
   const gracefulShutdown = async (signal) => {
     console.log(`\n[Server] Received ${signal}. Shutting down gracefully...`);
     try {
-      await notifyServerDown("iAMS Node Server", `Shutting down due to ${signal}`);
+      await notifyServerDown("iLEED Node Server", `Shutting down due to ${signal}`);
     } catch (err) {
       console.error("Failed to send shutdown alert:", err);
     }
@@ -186,6 +206,7 @@ module.exports = {
   notifyServerRecovered,
   notifyErpDown,
   notifyErpRecovered,
+  notifyUptimeDigest,
   notifyNoReportSaved,
   notifyClassBunk,
   notifyLowConfidence,

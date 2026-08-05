@@ -1,6 +1,6 @@
 // client/src/attendancemodule/EmbeddingGeneration.jsx
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { API_BASE, DEGREES, YEARS, theme, styles, cssReset } from './config';
+import { API_BASE, DEGREES, ERP_DEGREES, YEARS, theme, styles, cssReset } from './config';
 import { useDepartments } from './useDepartments';
 import getEnvironment from '../getenvironment';
 import * as XLSX from 'xlsx';
@@ -112,20 +112,40 @@ function FilterBlock({
         if (setSubjectId)   setSubjectId('');
         if (!dept || !sem) return;
         setSubjectsLoading(true);
-        fetch(`${apiUrl}/timetablemodule/subject`)
-            .then(r => r.json())
-            .then(data => {
-                const list = Array.isArray(data) ? data : [];
-                const filtered = list.filter(s => {
-                    const semMatch  = String(s.sem).trim() === String(sem).trim();
-                    const deptNorm  = dept.replace(/_/g, ' ').trim().toLowerCase();
-                    const sDeptNorm = (s.dept || '').trim().toLowerCase();
-                    const deptMatch = sDeptNorm.includes(deptNorm) || deptNorm.includes(sDeptNorm);
-                    return semMatch && deptMatch;
+        // The Subject.dept field is frequently blank/inconsistent, so filtering
+        // /timetablemodule/subject by dept client-side (the old approach) could
+        // return nothing even when subjects exist for this dept+sem.
+        // Fix (no timetableModule changes): call the existing
+        // /subjects-by-dept-sem endpoint to get the authoritative list of
+        // subject NAMES for this dept+sem (it resolves them via the locked
+        // timetable, same reliable source the semester dropdown already uses),
+        // then join that name list against the full /subject collection here
+        // in the browser to recover each subject's _id/subCode.
+        Promise.all([
+            fetch(`${apiUrl}/timetablemodule/lock/subjects-by-dept-sem?dept=${encodeURIComponent(dept)}&sem=${encodeURIComponent(sem)}`).then(r => r.json()).catch(() => ({})),
+            fetch(`${apiUrl}/timetablemodule/subject`).then(r => r.json()).catch(() => ([])),
+        ])
+            .then(([nameData, allSubjects]) => {
+                const names = Array.isArray(nameData.subjects) ? nameData.subjects : [];
+                const nameSet = new Set(names.map(n => String(n).trim().toLowerCase()));
+                const list = Array.isArray(allSubjects) ? allSubjects : [];
+
+                const bySemAndName = list.filter(s => {
+                    const semMatch = String(s.sem).trim() === String(sem).trim();
+                    const nm = (s.subName || s.subjectFullName || '').trim().toLowerCase();
+                    return semMatch && nameSet.has(nm);
                 });
-                setSubjects(filtered);
+
+                if (bySemAndName.length) {
+                    setSubjects(bySemAndName);
+                    return;
+                }
+                // Fallback: no matching Subject doc found (e.g. it was never
+                // created in the Subject collection) — still show the plain
+                // names so the dropdown isn't empty.
+                setSubjects(names.map(n => ({ _id: n, subName: n, subCode: '' })));
             })
-            .catch(() => {}).finally(() => setSubjectsLoading(false));
+            .catch(() => setSubjects([])).finally(() => setSubjectsLoading(false));
     }, [dept, sem]);
 
     // Auto-select prefillSubject once subjects are loaded
@@ -219,7 +239,18 @@ function GenerateTab({ departments, deptLoading, deptError, prefill, onPrefillCo
 
     const [rollInput,  setRollInput]  = useState('');
     const [rollNos,    setRollNos]    = useState([]);
-    const [instituteWise, setInstituteWise] = useState(false);
+
+    // ERP roll-number fill — an alternative to typing or uploading the roster.
+    // The four fields the ERP identifies a class by are editable: they default
+    // off the selection below, but the ERP's own spelling of a department or
+    // abbreviation can differ from ours, and this beats a DB edit to fix it.
+    // '' degree means "use whatever the subject record carries".
+    const [degree,       setDegree]       = useState('');
+    const [erpDept,      setErpDept]      = useState('');
+    const [erpSemester,  setErpSemester]  = useState('');
+    const [erpAbbrev,    setErpAbbrev]    = useState('');
+    const [showErpFields, setShowErpFields] = useState(false);
+    const [erpFetching,  setErpFetching]  = useState(false);
 
 
     const [rows,    setRows]    = useState([]);
@@ -245,6 +276,13 @@ function GenerateTab({ departments, deptLoading, deptError, prefill, onPrefillCo
         raw.split(/[\n,;\s]+/).map(r => r.trim().toUpperCase()).filter(Boolean);
 
     useEffect(() => { setRollNos(parseRolls(rollInput)); }, [rollInput]);
+
+    // Keep the ERP fields tracking the Dept/Semester/Subject selection. The
+    // ERP wants the department spaced out ("Electronics and Communication
+    // Engineering"), not underscored the way this page passes it around.
+    useEffect(() => { setErpDept(dept.replace(/_/g, ' ')); }, [dept]);
+    useEffect(() => { setErpSemester(sem); }, [sem]);
+    useEffect(() => { setErpAbbrev(subject); }, [subject]);
 
     // Apply prefill when it arrives from ViewTab
     useEffect(() => {
@@ -295,6 +333,50 @@ function GenerateTab({ departments, deptLoading, deptError, prefill, onPrefillCo
         e.target.value = '';
     };
 
+    // Pulls this subject's roster straight from the ERP into the textarea — a
+    // third way to fill it, alongside typing and Upload .xlsx. The server also
+    // persists what it fetched onto the Subject record, exactly as the ERP
+    // Sync page's Fetch does, so both pages show the same roster.
+    const fetchRollsFromErp = async () => {
+        if (!subjectId) { showToast('Select a subject first', 'error'); return; }
+        setErpFetching(true);
+        try {
+            const res = await fetch(`${EMB_BASE}/erp-rolls`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    subjectId,
+                    degree,
+                    department:   erpDept,
+                    semester:     erpSemester,
+                    abbreviation: erpAbbrev,
+                }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
+
+            const fetched = data.rollNos || [];
+            if (fetched.length === 0) {
+                showToast('ERP returned no roll numbers for this subject', 'error');
+                return;
+            }
+            // Same "you are about to replace something" courtesy the Generate
+            // button extends when an embedding already exists.
+            if (rollInput.trim() && !window.confirm(
+                `The roll number box already has ${rollNos.length} entr${rollNos.length === 1 ? 'y' : 'ies'}.\n\n`
+                + `Replace them with the ${fetched.length} roll numbers fetched from the ERP?`
+            )) return;
+
+            setRollInput(fetched.join('\n'));
+            showToast(`Loaded ${fetched.length} roll numbers from ERP`
+                + (data.missedCount ? ` — ${data.missedCount} missing ground truth` : ''));
+        } catch (err) {
+            showToast('ERP fetch failed: ' + err.message, 'error');
+        } finally {
+            setErpFetching(false);
+        }
+    };
+
     const downloadTemplate = () => {
         const sample = [
             ['Roll No'],
@@ -342,7 +424,7 @@ function GenerateTab({ departments, deptLoading, deptError, prefill, onPrefillCo
             const res = await fetch(`${EMB_BASE}/generate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sem: sem.trim(), subject: subject.trim(), dept: dept.trim(), subjectCode: subjectCode.trim(), rollNos, instituteWise }),
+                body: JSON.stringify({ sem: sem.trim(), subject: subject.trim(), dept: dept.trim(), subjectCode: subjectCode.trim(), rollNos }),
             });
 
             if (!res.ok) {
@@ -380,7 +462,6 @@ function GenerateTab({ departments, deptLoading, deptError, prefill, onPrefillCo
                                 dept:          dept.trim(),
                                 sem:           sem.trim(),
                                 subject:       subject.trim(),
-                                instituteWise,
                             });
                             showToast(`Done - ${msg.success} succeeded, ${msg.failed} failed`);
                         }
@@ -436,6 +517,28 @@ function GenerateTab({ departments, deptLoading, deptError, prefill, onPrefillCo
                             <div style={{ flex: 1 }} />
                             <button
                                 type="button"
+                                onClick={fetchRollsFromErp}
+                                disabled={running || erpFetching || !subjectId}
+                                title={subjectId
+                                    ? 'Fetch this subject’s enrolled roll numbers from the ERP'
+                                    : 'Select a subject first'}
+                                style={{
+                                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                                    padding: '5px 12px', borderRadius: 6,
+                                    cursor: (running || erpFetching || !subjectId) ? 'not-allowed' : 'pointer',
+                                    background: theme.warningDim, color: theme.warning,
+                                    border: `1px solid ${theme.warning}44`, fontSize: '12px', fontWeight: 600,
+                                    opacity: (running || erpFetching || !subjectId) ? 0.55 : 1,
+                                }}
+                            >
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                                    <polyline points="21 3 21 9 15 9" />
+                                </svg>
+                                {erpFetching ? 'Fetching…' : 'Fetch from ERP'}
+                            </button>
+                            <button
+                                type="button"
                                 onClick={downloadTemplate}
                                 title="Download a sample .xlsx with dummy roll numbers"
                                 style={{
@@ -468,32 +571,83 @@ function GenerateTab({ departments, deptLoading, deptError, prefill, onPrefillCo
                                     style={{ display: 'none' }} onChange={handleXlsxUpload} disabled={running} />
                             </label>
                         </div>
-                        <div style={{ marginBottom: 8 }}>
-                            <label style={{
-                                display: 'inline-flex', alignItems: 'center', gap: 7,
-                                cursor: running ? 'not-allowed' : 'pointer',
-                                fontSize: '12px', fontWeight: 600,
-                                color: theme.accent,
-                                padding: '5px 12px', borderRadius: 6,
-                                border: `1px solid ${theme.accent}44`,
-                                background: theme.accentDim,
-                                transition: 'all 0.15s',
-                            }}>
-                                <input
-                                    type="checkbox"
-                                    checked={instituteWise}
-                                    onChange={e => setInstituteWise(e.target.checked)}
-                                    disabled={running}
-                                    style={{ width: 14, height: 14, accentColor: theme.accent, cursor: running ? 'not-allowed' : 'pointer' }}
-                                />
-                                Search Institute Wise
-                            </label>
+                        <div style={{ marginBottom: 8, display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>
+                            {/* Discloses the exact fields "Fetch from ERP"
+                                sends. They only affect the ERP lookup, never
+                                generation. */}
+                            <button
+                                type="button"
+                                onClick={() => setShowErpFields(v => !v)}
+                                style={{
+                                    background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                                    fontSize: '12px', fontWeight: 600, color: theme.textMuted,
+                                    textDecoration: 'underline', fontFamily: 'inherit',
+                                }}
+                            >
+                                {showErpFields ? 'Hide ERP fields' : 'Edit ERP fields'}
+                            </button>
                         </div>
+
+                        {showErpFields && (
+                            <div style={{
+                                marginBottom: 12, padding: '12px 14px', borderRadius: 8,
+                                background: theme.warningDim, border: `1px solid ${theme.warning}33`,
+                            }}>
+                                <div style={{ fontSize: '11px', color: theme.textMuted, marginBottom: 10 }}>
+                                    Sent to the ERP to identify this class. Defaults follow the selection
+                                    above — override them if the ERP spells something differently.
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
+                                    <div>
+                                        <label style={styles.label}>Degree</label>
+                                        <select
+                                            value={degree}
+                                            onChange={e => setDegree(e.target.value)}
+                                            disabled={running || erpFetching}
+                                            style={{ ...styles.select, fontSize: '12px' }}
+                                        >
+                                            <option value="">Auto (from subject)</option>
+                                            {ERP_DEGREES.map(d => <option key={d} value={d}>{d}</option>)}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label style={styles.label}>Department</label>
+                                        <input
+                                            value={erpDept}
+                                            onChange={e => setErpDept(e.target.value)}
+                                            disabled={running || erpFetching}
+                                            placeholder="Electronics and Communication Engineering"
+                                            style={{ ...styles.input, fontSize: '12px' }}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label style={styles.label}>Semester</label>
+                                        <input
+                                            value={erpSemester}
+                                            onChange={e => setErpSemester(e.target.value)}
+                                            disabled={running || erpFetching}
+                                            placeholder="B.Tech-ECE-5"
+                                            style={{ ...styles.input, fontSize: '12px', fontFamily: theme.fontMono }}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label style={styles.label}>Abbreviation</label>
+                                        <input
+                                            value={erpAbbrev}
+                                            onChange={e => setErpAbbrev(e.target.value)}
+                                            disabled={running || erpFetching}
+                                            placeholder="AWP(ECE)"
+                                            style={{ ...styles.input, fontSize: '12px', fontFamily: theme.fontMono }}
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                         <textarea
                             value={rollInput}
                             onChange={e => setRollInput(e.target.value)}
                             disabled={running}
-                            placeholder="Enter roll numbers - separated by newlines, commas, or spaces"
+                            placeholder="Enter roll numbers - separated by newlines, commas, or spaces - or fill them from an .xlsx or the ERP"
                             style={{ ...styles.input, height: 160, resize: 'vertical', fontFamily: theme.fontMono, fontSize: '13px' }}
                         />
                         <div style={{ marginTop: 8 }}>
@@ -570,17 +724,10 @@ function GenerateTab({ departments, deptLoading, deptError, prefill, onPrefillCo
                                         <line x1="8" y1="5" x2="8" y2="8.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
                                         <circle cx="8" cy="10.5" r="0.75" fill="currentColor"/>
                                     </svg>
-                                    {summary.instituteWise ? (
-                                        <span>
-                                            <strong>{summary.failed} student{summary.failed !== 1 ? 's' : ''} not found in any department.</strong>{' '}
-                                            Check that the roll numbers are correct and that ground truth photos exist for these students.
-                                        </span>
-                                    ) : (
-                                        <span>
-                                            <strong>{summary.failed} student{summary.failed !== 1 ? 's' : ''} not found in the selected department.</strong>{' '}
-                                            Try enabling <strong>Search Institute Wise</strong> to search across all departments.
-                                        </span>
-                                    )}
+                                    <span>
+                                        <strong>{summary.failed} student{summary.failed !== 1 ? 's' : ''} not found.</strong>{' '}
+                                        Check that the roll numbers are correct and that ground truth photos exist for these students.
+                                    </span>
                                 </div>
                             )}
                             {summary.missedRollNos.length > 0 && (

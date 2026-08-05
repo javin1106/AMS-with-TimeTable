@@ -8,6 +8,8 @@ const mongoose = require('mongoose');
 const attendanceSessionController = require('./attendanceSessionController');
 const { deleteUnknownFacesForReport } = require('./unknownFaceWriter');
 const { normalizeDepartment } = require('../middleware/attendanceAccess');
+const ErpCommunicationLog = require("../../../models/attendanceModule/erpCommunicationLog");
+const { recordErpPeriodAttendance } = require("./erpAttendanceStore");
 
 function mergeStudentStatus(slotResults) {
   const rollMap = {};
@@ -133,6 +135,28 @@ async function applyErpOverride(report, req, res) {
   // forwarded here as part of the same call — just store it if present.
   if (remark !== undefined) student.facultyRemark = String(remark).trim();
   await report.save();
+
+  // Mirror the correction into ERP's own collection (merge — this call speaks
+  // about one roll, not the whole roster) and put the before/after on the
+  // append-only audit trail with a timestamp. Neither touches finalStatus.
+  const { changes } = await recordErpPeriodAttendance({
+    report,
+    entries: [{ rollNo, status: finalStatus, remarks: student.facultyRemark }],
+    source: "single-student-override",
+    mode: "merge",
+  });
+  await ErpCommunicationLog.record({
+    direction: "inbound",
+    event: "single-student-override",
+    endpoint: `PATCH /attendancemodule/reports/${report._id}/student/${rollNo}`,
+    periodId: report.periodId,
+    reportId: report._id,
+    ok: true,
+    httpStatus: 200,
+    requestBody: req.body ?? null,
+    changes,
+    sourceIp: req.ip || "",
+  });
 
   res.json({
     message: `Recorded ERP override ${rollNo} → ${finalStatus} (attendance data unchanged)`,

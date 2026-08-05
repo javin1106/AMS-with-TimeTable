@@ -2,6 +2,14 @@ import React from 'react'
 import logoImage from '../../assets/logo.png'
 
 import { Image, Text } from '@chakra-ui/react'
+import { keyframes } from '@emotion/react'
+
+// The gradient is twice the width of the text, so sliding it one full text-width
+// reads as a sweep of light travelling across the word.
+const shimmer = keyframes`
+  from { background-position: 0% center; }
+  to   { background-position: 200% center; }
+`
 
 const FormHeader = () => {
   return (
@@ -24,7 +32,7 @@ const FormHeader = () => {
         marginInline={'auto'}
         src={logoImage}
         alt='NITJ Logo'
-        mb={4}
+        mb={2}
         userSelect={'none'}
         draggable={false}
       />
@@ -37,18 +45,31 @@ const FormHeader = () => {
         }}
         textAlign={'center'}
         fontWeight='bold'
-        mb={2}>
-        Welcome to XCEED
+        mb={0}>
+        Welcome to Xceed{' '}
+        <Text
+          as='span'
+          bgGradient='linear(to-r, teal.400, blue.500, purple.500, blue.500, teal.400)'
+          bgClip='text'
+          backgroundSize='200% auto'
+          animation={`${shimmer} 4s linear infinite`}
+          sx={{
+            '@media (prefers-reduced-motion: reduce)': {
+              animation: 'none',
+            },
+          }}>
+          Learning
+        </Text>
       </Text>
       <Text
         fontSize='md'
         mb={{
-          base: '2rem',
-          md: '4rem',
+          base: '1rem',
+          md: '1.5rem',
         }}
         textAlign={'center'}
         color={'gray.500'}>
-        Empowering campus connectivity through digital innovation
+        Empowering learning through digital innovation
       </Text>
     </>
   )

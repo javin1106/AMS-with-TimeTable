@@ -12,11 +12,10 @@ const PeriodConfigSchema = new mongoose.Schema(
     numRuns: { type: Number, default: 1, min: 1, max: 10 },
     runDurationSec: { type: Number, default: 120 }, // seconds per run
     checkIntervalMin: { type: Number, default: 5 }, // minutes between runs
-    presentLogic: {
-      type: String,
-      enum: ["majority", "any_run", "all_runs", "first_run"],
-      default: "majority",
-    },
+    // Minimum number of runs (out of numRuns) a student must be detected in
+    // to be marked Present. e.g. numRuns=5, minRunsPresent=3 → present in
+    // at least 3 of the 5 runs.
+    minRunsPresent: { type: Number, default: 1, min: 1 },
     stopForDay: { type: Boolean, default: false }, // manual kill-switch for today
   },
   { _id: false },
@@ -71,12 +70,9 @@ const AcquisitionControlSchema = new mongoose.Schema(
     profileName: { type: String, default: "default", unique: true },
     active: { type: Boolean, default: true },
 
-    // Global present logic (can be overridden per period)
-    globalPresentLogic: {
-      type: String,
-      enum: ["majority", "any_run", "all_runs", "first_run"],
-      default: "majority",
-    },
+    // Minimum number of runs (out of globalNumRuns) a student must be
+    // detected in to be marked Present (can be overridden per period).
+    globalMinRunsPresent: { type: Number, default: 1, min: 1 },
     globalNumRuns: { type: Number, default: 1, min: 1, max: 10 },
     globalRunDurationSec: { type: Number, default: 120 },
     globalCheckIntervalMin: { type: Number, default: 5 },
@@ -101,6 +97,12 @@ const AcquisitionControlSchema = new mongoose.Schema(
       min_detections: { type: Number, default: 3 }, // min face detections to count
       auto_enroll_threshold: { type: Number, default: 0.75 }, // auto-add to ground truth
       alert_confidence: { type: Number, default: 0.6 }, // low-confidence alert cutoff
+      // Seconds on each camera before switching, for dual-camera attendance
+      // runs. Shipped to the ML service per run as RTSPAttendanceRequest
+      // .cameraSwitchSec. Independent of GT acquisition's own interval
+      // (gt_config.gt_camera_switch_sec on the ML service), which is measured
+      // in minutes because each GT switch costs a reconnect + clustering pass.
+      camera_switch_sec: { type: Number, default: 30 },
     },
 
     updatedAt: { type: Date, default: Date.now },

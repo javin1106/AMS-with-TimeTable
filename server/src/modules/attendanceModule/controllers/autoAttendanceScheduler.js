@@ -9,7 +9,6 @@ const cron = require("node-cron");
 const fs = require("fs");
 const path = require("path");
 
-const LockSem = require("../../../models/locksem");
 const AcquisitionControl = require("../../../models/acquisitionControl");
 const Allotment = require("../../../models/allotment");
 const Camera = require("../../../models/attendanceModule/camera");
@@ -26,6 +25,12 @@ const {
 } = require("./embeddingSyncHelper");
 const alertNotifier = require("./alertNotifier");
 const { pushAttendanceToErp } = require("./erpAttendancePushController");
+const {
+  checkAttendanceRunAllowed,
+  nowMinIST,
+  todayIST,
+} = require("./timeWindowGuard");
+const { resolveClassContext } = require("./classContextResolver");
 
 const ML_URL = process.env.ML_SERVICE_URL || "http://localhost:8500";
 const EMBEDDINGS_DIR = path.join(
@@ -48,12 +53,15 @@ const GROUND_TRUTH_DIR = path.join(
 );
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+// Period times in AcquisitionControl are campus wall-clock (IST), so the
+// scheduler's own clock and date must be IST too — not the server's timezone
+// (local) and not UTC (what toISOString gives). On a UTC-hosted server the old
+// pair fired every period 5h30m late and rolled the date over at 05:30 IST.
 function todayStr() {
-  return new Date().toISOString().split("T")[0];
+  return todayIST();
 }
 function nowMin() {
-  const n = new Date();
-  return n.getHours() * 60 + n.getMinutes();
+  return nowMinIST();
 }
 function timeStrToMin(hhmm) {
   if (!hhmm || typeof hhmm !== "string" || !hhmm.includes(":")) return null;
@@ -96,115 +104,23 @@ async function getEnabledRooms(config) {
     .filter((r) => r.enabled !== false);
 }
 
-// ── Extra-class override — faculty exchange for a given date+periodKey+room ──
-async function resolveExtraClassOverride(room, periodKey, date) {
-  try {
-    const config = await AcquisitionControl.findOne({ profileName: "default" });
-    if (!config) return null;
-    return (
-      (config.extraClasses || []).find(
-        (ec) =>
-          ec.active &&
-          ec.date === date &&
-          ec.periodKey === periodKey &&
-          ec.room?.toLowerCase().trim() === room.toLowerCase().trim(),
-      ) || null
-    );
-  } catch (err) {
-    console.error(
-      "[AutoScheduler] resolveExtraClassOverride error:",
-      err.message,
-    );
-    return null;
-  }
-}
-
 // ── Step 3: slot/timetable context for a room ────────────────────────────────
-async function resolveContext(room, slot, date) {
-  try {
-    const records = await LockSem.aggregate([
-      {
-        $match: {
-          slot: { $regex: new RegExp(`^${slot}$`, "i") },
-          "slotData.room": { $regex: new RegExp(`^${room}$`, "i") },
-        },
-      },
-      {
-        $lookup: {
-          from: "timetables",
-          localField: "timetable",
-          foreignField: "_id",
-          as: "tt",
-        },
-      },
-      { $unwind: { path: "$tt", preserveNullAndEmptyArrays: false } },
-      { $match: { "tt.currentSession": true } },
-      { $limit: 1 },
-    ]);
+// Delegates to the shared resolver so the cron run, the manual "run all rooms"
+// trigger, and the developer lookup page always agree on which class is in a
+// room. `config` carries extraClasses (alterations / extra classes).
+async function resolveContext(room, slot, date, config = {}) {
+  const { ctx, reason } = await resolveClassContext(room, slot, date, config);
 
-    if (!records.length) return null;
-
-    const rec = records[0];
-    const tt = rec.tt;
-    const slotEntry = rec.slotData.find(
-      (s) => s.room && s.room.toLowerCase() === room.toLowerCase(),
-    );
-    if (!slotEntry) return null;
-
-    const session = tt.session || currentSession();
-    const sessionStartYear =
-      parseInt(session.split("-")[0]) || new Date().getFullYear();
-    const semNum = parseInt((rec.sem || "").match(/\d+/)?.[0] || "0");
-    const yearOfStudy = semNum > 0 ? Math.ceil(semNum / 2) : 1;
-    const batchYear = String(sessionStartYear - (yearOfStudy - 1));
-    const ttName = (tt.name || "").toUpperCase();
-    let degree = "BTECH";
-    for (const d of ["MTECH", "PHD", "BSC", "MSC", "MBA", "MCA", "BTECH"]) {
-      if (ttName.includes(d)) {
-        degree = d;
-        break;
-      }
-    }
-    const dept = (tt.dept || "").trim().toUpperCase().replace(/\s+/g, "_");
-    const batch = `${degree}_${dept}_${batchYear}`;
-
-    let subject = slotEntry.subject || "";
-    let faculty = slotEntry.faculty || "";
-
-    // ── Extra-class override (faculty exchange) takes priority for this exact date+slot+room ──
-    if (date) {
-      const override = await resolveExtraClassOverride(room, slot, date);
-      if (override) {
-        if (override.subject) subject = override.subject;
-        if (override.faculty) faculty = override.faculty;
-        console.log(
-          `[AutoScheduler] Extra-class override applied for room=${room} slot=${slot} date=${date} — subject=${subject} faculty=${faculty}`,
-        );
-      }
-    }
-
-    // ── Free slot — no subject assigned (and no extra-class override filled
-    // one in) — nothing to take attendance for.
-    if (!subject.trim()) {
-      console.log(
-        `[AutoScheduler] Free slot for room=${room} slot=${slot} date=${date || ''} — skipping`,
-      );
-      return null;
-    }
-
-    return {
-      batch,
-      subject,
-      faculty,
-      sem: rec.sem || "",
-      dept,
-      session,
-      locksemId: rec._id.toString(),
-    };
-  } catch (err) {
-    console.error("[AutoScheduler] resolveContext error:", err.message);
+  if (!ctx) {
+    if (reason) console.log(`[AutoScheduler] ${reason} — skipping`);
     return null;
   }
+  if (ctx.altered) {
+    console.log(
+      `[AutoScheduler] Extra-class override applied for room=${room} slot=${slot} date=${date} — subject=${ctx.subject} faculty=${ctx.faculty}`,
+    );
+  }
+  return ctx;
 }
 
 // ── Step 4: embeddings — read Subject.embeddingFile directly, no roll numbers ──
@@ -283,9 +199,10 @@ async function resolveCameras(room, roomOverride) {
 }
 
 // ── Merge per-student status across runs ─────────────────────────────────────
-// No "Review" outcome — a student present in at least one run is Present;
-// otherwise (all-review, all-absent, or a review/absent mix) Absent.
-function mergeStudentStatus(slotResults) {
+// No "Review" outcome — a student present in at least minRunsPresent of the
+// runs made so far is Present; otherwise Absent. minRunsPresent defaults to 1
+// (i.e. "any run"), matching the pre-existing behavior when unset.
+function mergeStudentStatus(slotResults, minRunsPresent = 1) {
   const rollMap = {};
   for (const sr of slotResults) {
     for (const s of sr.students) {
@@ -299,7 +216,7 @@ function mergeStudentStatus(slotResults) {
     );
     const presentCount = entries.filter((e) => e.status === "present").length;
 
-    const finalStatus = presentCount > 0 ? "P" : "A";
+    const finalStatus = presentCount >= minRunsPresent ? "P" : "A";
     // Model's original call, captured at merge time — updateStudentStatus()
     // (manual/ERP override) only ever touches finalStatus, so this stays the
     // pre-override value for later before/after comparisons.
@@ -332,6 +249,7 @@ async function saveCheckResult({
   mlResult,
   room,
   alertConfidence = 0.6,
+  minRunsPresent = 1,
 }) {
   try {
     saveFrameSnapshots(mlResult.frame_files || []);
@@ -400,7 +318,7 @@ async function saveCheckResult({
   }
   if (subjectMeta) report.subjectMeta = subjectMeta;
 
-  report.finalReport = mergeStudentStatus(report.slotResults);
+  report.finalReport = mergeStudentStatus(report.slotResults, minRunsPresent);
 
   for (const s of report.finalReport) {
     if (
@@ -539,6 +457,7 @@ async function runOneCheck({
       // when enrolledEmbeddings is empty (see rtsp_routes.py)
       autoThreshold: runConfig.auto_present_threshold,
       reviewThreshold: runConfig.review_threshold,
+      cameraSwitchSec: runConfig.camera_switch_sec,
       // All enrolled dicts ship on EVERY run — which model uses them is
       // decided Python-side by state.pipeline_config (Model Pipeline card),
       // and Node can't know which primary is selected there. ~100-200KB per
@@ -579,6 +498,7 @@ async function runOneCheck({
       mlResult: res.data,
       room,
       alertConfidence: runConfig.alertConfidence,
+      minRunsPresent: runConfig.minRunsPresent,
     });
   } catch (err) {
     console.error(
@@ -601,7 +521,7 @@ async function runSlotAttendance({
   );
 
   // Step 3: slot data
-  const ctx = await resolveContext(room, slot, date);
+  const ctx = await resolveContext(room, slot, date, config);
   if (!ctx) {
     console.warn(
       `[AutoScheduler] No timetable context for room=${room} slot=${slot} — skipping`,
@@ -633,16 +553,27 @@ async function runSlotAttendance({
 
   const numRuns = config.globalNumRuns ?? 1;
   const runDurationSec = config.globalRunDurationSec ?? 120;
-  const periodDurationMin = periodInfo.endMin - periodInfo.startMin;
+  // Space the runs over the time *left* in the period, not its nominal length —
+  // on a mid-period catch-up the two differ, and using the nominal length would
+  // push the last runs past the end of the class.
+  const minutesLeft = Math.max(
+    1,
+    periodInfo.endMin - Math.max(nowMin(), periodInfo.startMin),
+  );
   const checkIntervalMin =
-    numRuns > 1 ? Math.max(1, Math.floor(periodDurationMin / numRuns)) : 0;
+    numRuns > 1 ? Math.max(1, Math.floor(minutesLeft / numRuns)) : 0;
 
   const t = config.attendanceThresholds || {};
+  // Clamp to numRuns — a stale/higher setting can't require more runs than
+  // will actually happen this period.
+  const minRunsPresent = Math.min(config.globalMinRunsPresent ?? 1, numRuns);
   const runConfig = {
     runDurationSec,
     auto_present_threshold: t.auto_present_threshold ?? 0.6,
     review_threshold: t.review_threshold ?? 0.4,
     alertConfidence: t.alert_confidence ?? 0.6,
+    camera_switch_sec: t.camera_switch_sec ?? 30,
+    minRunsPresent,
     // Max-of-K shadow comparison (diagnostic only) fires once per period —
     // on the check nearest the middle of the numRuns checks — not every run.
     middleRunIndex: Math.ceil(numRuns / 2),
@@ -680,7 +611,7 @@ async function checkMissedClasses(slotKey, date, config) {
     if (!enabledRooms.length) return;
 
     for (const { room } of enabledRooms) {
-      const ctx = await resolveContext(room, slotKey, date);
+      const ctx = await resolveContext(room, slotKey, date, config);
       if (!ctx) continue;
 
       const report = await AttendanceReport.findOne({
@@ -740,11 +671,20 @@ function startAutoScheduler() {
     "[AutoScheduler] Starting — running cron every minute (DB-driven: rooms, periods, embeddings)",
   );
 
-  const triggeredToday = new Set();
+  let triggeredToday = new Set();
+  let triggeredForDate = null;
 
   cron.schedule("* * * * *", async () => {
     const date = todayStr();
     const curMin = nowMin();
+
+    // Reset on date change rather than on the tick that lands exactly at
+    // 00:00 — a single missed or delayed tick used to keep yesterday's keys
+    // forever, which silently suppressed every period the next day.
+    if (triggeredForDate !== date) {
+      triggeredToday = new Set();
+      triggeredForDate = date;
+    }
 
     let config;
     try {
@@ -763,6 +703,14 @@ function startAutoScheduler() {
     // Step 2: working day check (global on/off + stopped days + allotment non-working days)
     if (!config.active) return;
     if ((config.stoppedDays || []).includes(date)) return;
+
+    // Optional 08:30–17:30 IST restriction (admin toggle, default off). Only
+    // bites when the toggle is ON; when OFF, runs fire at any time as before.
+    const runGate = await checkAttendanceRunAllowed();
+    if (!runGate.allowed) {
+      console.log(`[AutoScheduler] Skipping ${date} — ${runGate.reason}`);
+      return;
+    }
     const allotmentEntry = await Allotment.findOne({
       "nonWorkingDays.date": date,
     })
@@ -782,11 +730,26 @@ function startAutoScheduler() {
       const endMin = timeStrToMin(period.endTime);
       if (startMin == null || endMin == null) continue;
 
-      // Fire once, at the period's start minute
-      if (curMin >= startMin && curMin <= startMin + 1) {
+      // Fire once per period. Normally that's at the period's start minute,
+      // but we also catch up if we are already inside the period and have not
+      // run it yet — that's the case when acquisition is switched on (or the
+      // server restarts) part-way through a class. Requires enough of the
+      // period left to complete one run, so we never start a run that would
+      // outlast the class.
+      const runDurationMin = Math.ceil((config.globalRunDurationSec ?? 120) / 60);
+      const insideWithTimeLeft =
+        curMin > startMin && curMin + runDurationMin <= endMin;
+
+      if ((curMin >= startMin && curMin <= startMin + 1) || insideWithTimeLeft) {
         const key = `${date}_${period.periodKey}`;
         if (triggeredToday.has(key)) continue;
         triggeredToday.add(key);
+
+        if (curMin > startMin + 1) {
+          console.log(
+            `[AutoScheduler] Catching up ${period.periodKey} — ${endMin - curMin} min left in the period`,
+          );
+        }
 
         // Step 1: rooms from DB
         const enabledRooms = await getEnabledRooms(config);
@@ -823,8 +786,6 @@ function startAutoScheduler() {
         );
       }
     }
-
-    if (curMin === 0) triggeredToday.clear();
   });
 }
 

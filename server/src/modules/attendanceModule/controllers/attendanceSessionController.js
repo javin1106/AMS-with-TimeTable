@@ -225,6 +225,7 @@ async function runOneCheck(reportId, checkIndex, config) {
                 minSamples:       config.minSamples       || 2,
                 autoThreshold:    config.autoThreshold    || 0.40,
                 reviewThreshold:  config.reviewThreshold  || 0.20,
+                cameraSwitchSec:  config.cameraSwitchSec  || 30,
                 subject:          config.subject          || '',
                 faculty:          config.faculty          || '',
                 semester:         config.semester         || '',
@@ -423,6 +424,12 @@ const reportId = report._id.toString();
     console.log(`[Session] Started — reportId=${reportId} batch=${batch} room=${room} slot=${slot} interval=${intervalMin}min duration=${durationSec}s`);
 
     // 2. Store session config
+    // Resolved once at session start, not per check, so every check in a
+    // session paces its cameras identically even if the setting is edited
+    // mid-session.
+    const acqCfg = await AcquisitionControl.findOne({ profileName: 'default' }).lean();
+    const cameraSwitchSec = acqCfg?.attendanceThresholds?.camera_switch_sec ?? 30;
+
     const sessionConfig = {
         rtspUrl, rtspUrl2: rtspUrl2 || '',
         batch, room, slot, date,
@@ -434,6 +441,7 @@ const reportId = report._id.toString();
         clusterThreshold: config.clusterThreshold || 0.45,
         minSamples:       config.minSamples       || 2,
         frameSkip:        config.frameSkip        || 10,
+        cameraSwitchSec,
     };
 
     // 3. Run first check immediately (don't await — let it run in background

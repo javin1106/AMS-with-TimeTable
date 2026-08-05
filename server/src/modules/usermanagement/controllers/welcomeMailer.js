@@ -1,0 +1,98 @@
+// Welcome email sent to a person whose account was just created (or who was
+// granted a notable role). Never throws — a mail failure must not fail the
+// request that triggered it — but it now resolves to whether the mail left, so
+// a caller that has somewhere to report that (the class invite screen) can.
+// Callers that ignore the promise keep the old fire-and-forget behaviour.
+//
+// Visual frame mirrors the forgot-password OTP email (otpbody.ejs) exactly:
+// same 480px card, teal "XCEED — NIT Jalandhar" banner, "Dear User,"
+// greeting, and footer. Only the design is shared — the message text is the
+// caller's own (heading/intro) plus the original password-section wording.
+
+const mailSender = require("../../mailsender");
+
+function resolveFrontendBase(req) {
+  return (
+    (req && req.get && req.get("origin")) ||
+    process.env.FRONTEND_URL ||
+    "https://xceed.nitj.ac.in"
+  );
+}
+
+const P = 'style="margin:0 0 16px;font-size:14px;color:#444;line-height:1.6;"';
+
+// `heading` carries caller-supplied text (a class name, a department), so it is
+// escaped before landing in the markup. The subject line keeps the raw string —
+// entities would show up literally there.
+const escapeHtml = (value) =>
+  String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[ch]));
+
+/**
+ * @returns {Promise<boolean>} whether the mail was accepted by the SMTP server
+ * @param {string} [banner]
+ *        Text in the teal bar at the top. Defaults to the platform wordmark the
+ *        admin-created-account mails use; the Learning module overrides it so a
+ *        provisioned student's welcome mail is topped the same way as the invite
+ *        mail they might otherwise have received.
+ */
+async function sendWelcomeEmail({
+  email,
+  frontendBase,
+  heading,
+  intro,
+  accountCreated,
+  banner = "XCEED — NIT Jalandhar",
+}) {
+  const resetLink = `${frontendBase}/forgot-password`;
+  const loginLink = `${frontendBase}/login`;
+  const passwordSection = accountCreated
+    ? `<p ${P}>Before your first login, set your password here:</p>
+       <div style="text-align:center;margin:0 0 20px;">
+         <a href="${resetLink}"
+            style="display:inline-block;padding:12px 32px;background:#0e7490;color:#ffffff;
+                   text-decoration:none;border-radius:8px;font-size:14px;font-weight:600;">
+           Set your password</a>
+       </div>
+       <p style="margin:0 0 16px;font-size:12px;color:#888;line-height:1.6;">(Enter your email on that page — you will receive an
+         OTP to verify it and choose your password.)</p>`
+    : `<p ${P}>You can log in with your existing password at
+         <a href="${loginLink}" style="color:#0e7490;">${loginLink}</a>. If you have forgotten it, reset it
+         at <a href="${resetLink}" style="color:#0e7490;">${resetLink}</a>.</p>`;
+
+  const html = `
+<div style="background:#f4f6fb;padding:32px 16px;font-family:Arial,Helvetica,sans-serif;">
+  <div style="max-width:480px;margin:0 auto;background:#ffffff;border-radius:12px;border:1px solid #e4e8f5;overflow:hidden;">
+    <div style="background:#0e7490;padding:20px 28px;">
+      <div style="color:#ffffff;font-size:18px;font-weight:700;letter-spacing:.02em;">${escapeHtml(banner)}</div>
+    </div>
+    <div style="padding:28px;">
+      <h1 style="margin:0 0 12px;font-size:20px;color:#1a1f3c;">${escapeHtml(heading)}</h1>
+      <p style="margin:0 0 8px;font-size:14px;color:#444;line-height:1.6;">Dear User,</p>
+      <div style="font-size:14px;color:#444;line-height:1.6;">
+        ${intro}
+      </div>
+      ${passwordSection}
+    </div>
+    <div style="padding:14px 28px;border-top:1px solid #e4e8f5;background:#fafbfe;">
+      <span style="font-size:11px;color:#999;">Automated email from the XCEED platform — please do not reply.</span>
+    </div>
+  </div>
+</div>`;
+
+  const subject = `${heading} — XCEED NITJ`;
+  try {
+    // mailSender resolves to undefined rather than throwing when the send fails.
+    return Boolean(await mailSender(email, subject, html));
+  } catch (err) {
+    console.error("[welcomeMailer] Failed to send email:", err.message);
+    return false;
+  }
+}
+
+module.exports = { sendWelcomeEmail, resolveFrontendBase };

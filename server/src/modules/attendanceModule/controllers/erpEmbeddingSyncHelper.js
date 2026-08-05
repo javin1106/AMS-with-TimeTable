@@ -29,12 +29,48 @@ function sanitizePathComponent(name) {
     return normalized;
 }
 
+// Different pages build the batch string with different casing: the ERP Upload
+// page keeps the DB's degree/department casing ("BTech_Electronics_..._2026")
+// while Roll Assignment uppercases the whole thing ("BTECH_ELECTRONICS_..._2026").
+// The writer therefore creates erp_photos/ and embeddings/erp/ folders under
+// one casing and the reader looks for the other, which silently works on
+// Windows/macOS but never resolves on a case-sensitive filesystem — the batch
+// then shows "ERP embeddings not built" on the Roll Assignment page.
+// Resolve every path segment against what is actually on disk before use.
+function resolveOnDisk(baseDir, name) {
+    if (!name) return name;
+    if (fs.existsSync(path.join(baseDir, name))) return name;
+    try {
+        const wanted = String(name).toLowerCase();
+        const hit = fs.readdirSync(baseDir, { withFileTypes: true })
+            .find(e => e.isDirectory() && e.name.toLowerCase() === wanted);
+        if (hit) return hit.name;
+    } catch (_) { /* baseDir missing — fall through to the name as given */ }
+    return name;
+}
+
+// Single source of truth for the department segment. Every caller derived this
+// from the batch string itself, but with slightly different fallbacks (''
+// vs 'UNKNOWN_DEPT'), which put reads and writes in different folders.
+function departmentFromBatch(batch) {
+    const parts = String(batch || '').split('_');
+    if (parts.length >= 3) return parts.slice(1, -1).join('_');
+    return 'UNKNOWN_DEPT';
+}
+
+/** erp_photos/<batch>, resolved to the folder that actually exists on disk. */
+function erpPhotoDir(batch) {
+    return path.join(ERP_PHOTOS_DIR, resolveOnDisk(ERP_PHOTOS_DIR, sanitizePathComponent(batch)));
+}
+
 // The single fixed write/status path: embeddings/erp/<department>/<batch>/embeddings_db.pkl
 // (same formula Python's _erp_sync_background / status used before).
 function pklPath(batch, department) {
     const batchSafe = sanitizePathComponent(batch);
-    const deptSafe   = sanitizePathComponent(department);
-    return path.join(ERP_EMB_DIR, deptSafe, batchSafe, 'embeddings_db.pkl');
+    const deptSafe   = sanitizePathComponent(department || departmentFromBatch(batch));
+    const deptDir    = resolveOnDisk(ERP_EMB_DIR, deptSafe);
+    const batchDir   = resolveOnDisk(path.join(ERP_EMB_DIR, deptDir), batchSafe);
+    return path.join(ERP_EMB_DIR, deptDir, batchDir, 'embeddings_db.pkl');
 }
 
 function readPklBase64(filePath) {
@@ -63,27 +99,42 @@ async function inspectPkl(filePath) {
 }
 
 /**
- * Mirrors the old GET /erp-embedding/check — searches most-specific to
- * least-specific path (no sanitization, matching the original, which never
- * validated these particular inputs).
+ * Locates a batch's .pkl — filesystem only, no ML round-trip. Searches
+ * most-specific to least-specific (no sanitization, matching the original
+ * /erp-embedding/check, which never validated these particular inputs).
+ * Returns the path, or null if the batch has no embeddings yet.
+ *
+ * Callers that only need "does it exist / which file?" must use this rather
+ * than checkErpEmbedding: the latter's roll count costs an /erp-embedding/inspect
+ * call that base64s the entire pkl to the ML service.
+ */
+function findErpPkl(batch, department) {
+    const dept = department || departmentFromBatch(batch);
+    const candidates = [];
+    if (dept) candidates.push(pklPath(batch, dept));
+    // Flat path used before the department subfolder convention.
+    candidates.push(path.join(ERP_EMB_DIR, resolveOnDisk(ERP_EMB_DIR, batch), 'embeddings_db.pkl'));
+
+    for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) return candidate;
+    }
+    return null;
+}
+
+/**
+ * Mirrors the old GET /erp-embedding/check — findErpPkl plus the roll count.
  * Returns { available, pkl_path, roll_count } — same shape as before.
  */
 async function checkErpEmbedding(batch, department) {
-    const candidates = [];
-    if (department) candidates.push(path.join(ERP_EMB_DIR, department, batch, 'embeddings_db.pkl'));
-    candidates.push(path.join(ERP_EMB_DIR, batch, 'embeddings_db.pkl'));
+    const pklFile = findErpPkl(batch, department);
+    if (!pklFile) return { available: false, pkl_path: null, roll_count: 0 };
 
-    for (const candidate of candidates) {
-        if (fs.existsSync(candidate)) {
-            let rollCount = 0;
-            try {
-                const rollNos = await inspectPkl(candidate);
-                rollCount = rollNos.length;
-            } catch (_) { /* best-effort, matches old try/except pass */ }
-            return { available: true, pkl_path: candidate, roll_count: rollCount };
-        }
-    }
-    return { available: false, pkl_path: null, roll_count: 0 };
+    let rollCount = 0;
+    try {
+        const rollNos = await inspectPkl(pklFile);
+        rollCount = rollNos.length;
+    } catch (_) { /* best-effort, matches old try/except pass */ }
+    return { available: true, pkl_path: pklFile, roll_count: rollCount };
 }
 
 /**
@@ -92,11 +143,8 @@ async function checkErpEmbedding(batch, department) {
  *   missing, orphaned_count, orphaned, last_sync_timestamp }
  */
 async function getErpStatus(batch, department) {
-    const batchSafe = sanitizePathComponent(batch);
-    const deptSafe   = sanitizePathComponent(department || 'UNKNOWN_DEPT');
-
-    const batchDir = path.join(ERP_PHOTOS_DIR, batchSafe);
-    const dbPath   = path.join(ERP_EMB_DIR, deptSafe, batchSafe, 'embeddings_db.pkl');
+    const batchDir = erpPhotoDir(batch);
+    const dbPath   = pklPath(batch, department || departmentFromBatch(batch));
 
     const photoRollNos = new Set();
     if (fs.existsSync(batchDir)) {
@@ -140,7 +188,7 @@ async function getErpStatus(batch, department) {
  * + the existing pkl to Python, writes the returned pkl back.
  */
 async function syncErpEmbeddings(batch, department, rollNos) {
-    const batchDir = path.join(ERP_PHOTOS_DIR, batch);
+    const batchDir = erpPhotoDir(batch);
     if (!fs.existsSync(batchDir)) return { status: 'skipped', reason: 'batch photo dir not found' };
 
     const allFiles = fs.readdirSync(batchDir);
@@ -202,6 +250,7 @@ async function deleteErpEmbedding(batch, department, rollNo) {
 }
 
 module.exports = {
+    findErpPkl,
     checkErpEmbedding,
     getErpStatus,
     syncErpEmbeddings,
@@ -209,6 +258,9 @@ module.exports = {
     deleteErpEmbedding,
     pklPath,
     readPklBase64,
+    departmentFromBatch,
+    erpPhotoDir,
+    resolveOnDisk,
     ERP_PHOTOS_DIR,
     ERP_EMB_DIR,
 };

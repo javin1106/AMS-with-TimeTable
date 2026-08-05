@@ -5,12 +5,35 @@ import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { theme } from './config';
 import getEnvironment from '../getenvironment';
 import { HealthProvider } from './HealthContext';
+import ILeed from './BrandName';
 
 const T = theme;
 const apiUrl = getEnvironment();
 
+// Small home glyph for the iLEED Home nav item (expanded + collapsed states).
+function HomeIcon({ size = 14 }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ flexShrink: 0 }}
+    >
+      <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      <polyline points="9 22 9 12 15 12 15 22" />
+    </svg>
+  );
+}
+
 const NAV = [
-  { id: 'dashboard', route: '/attendance', label: 'Dashboard', exact: true },
+  // label is the plain-text fallback (tooltip, collapsed initial); the
+  // expanded sidebar renders the styled iLEED wordmark instead.
+  { id: 'dashboard', route: '/attendance', label: 'iLEED', exact: true },
   { id: 'rtsp', route: '/attendance/groundtruth/rtsp', label: 'Ground Truth Capture' },
   {
     id: 'assign',
@@ -32,6 +55,8 @@ const NAV = [
   { id: 'embeddings', route: '/attendance/embeddings', label: 'Subject Embeddings' },
   { id: 'preview', route: '/cameras/preview', label: 'Live Preview' },
   { id: 'record', route: '/attendance/record-stream', label: 'Record Stream' },
+  { id: 'extraClass', route: '/attendance/extra-class', label: 'Extra Classes' },
+  { id: 'alterClass', route: '/attendance/altering-class', label: 'Altering Classes' },
   {
     id: 'confidence',
     route: '/attendance/confidence',
@@ -39,7 +64,6 @@ const NAV = [
   },
   { id: 'institute', route: '/attendance/institute-identification', label: 'Institute Identification' },
   { id: 'erpOverrides', route: '/attendance/erp-overrides', label: 'ERP Overrides' },
-  { id: 'erpSync', route: '/attendance/edit-session-dates?tab=erpControls', label: 'ERP Sync' },
   { id: 'manual', route: '/ams-manual', label: 'Help & Manual', newTab: true },
 ];
 
@@ -55,6 +79,8 @@ const COLORS = {
   preview: '#8b5cf6',
   confidence: '#ef4444',
   record: '#ef4444',
+  extraClass: '#f59e0b',
+  alterClass: '#d946ef',
   manual: '#64748b',
   institute: '#8b5cf6',
   erpOverrides: '#f59e0b',
@@ -69,6 +95,9 @@ const CSS = `
   @keyframes amsFadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; } }
   .ams-nav-item { transition: background .15s, color .15s; cursor: pointer; }
   .ams-nav-item:hover { background: rgba(99,102,241,0.06) !important; }
+  .ams-nav-newtab-btn { opacity: 0; transition: opacity .12s, background .12s, color .12s; }
+  .ams-nav-item:hover .ams-nav-newtab-btn { opacity: 1; }
+  .ams-nav-newtab-btn:hover { background: rgba(99,102,241,0.12) !important; color: #6366f1 !important; }
   .ams-page-content { /* no animation — CSS animation creates stacking context that traps fixed-position portals */ }
 `;
 
@@ -206,16 +235,20 @@ export default function AMSLayout() {
                     />
                   )}
                   {collapsed ? (
-                    <span
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 800,
-                        fontFamily: "'IBM Plex Mono', monospace",
-                        color: active ? color : T.textMuted,
-                      }}
-                    >
-                      {item.label[0]}
-                    </span>
+                    item.id === 'dashboard' ? (
+                      <HomeIcon />
+                    ) : (
+                      <span
+                        style={{
+                          fontSize: 11,
+                          fontWeight: 800,
+                          fontFamily: "'IBM Plex Mono', monospace",
+                          color: active ? color : T.textMuted,
+                        }}
+                      >
+                        {item.label[0]}
+                      </span>
+                    )
                   ) : (
                     <span
                       style={{
@@ -224,10 +257,48 @@ export default function AMSLayout() {
                         whiteSpace: 'nowrap',
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
+                        flex: 1,
                       }}
                     >
-                      {item.label}
+                      {item.id === 'dashboard'
+                        ? (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, verticalAlign: 'middle' }}>
+                            <HomeIcon />
+                            <ILeed style={{ lineHeight: 1, display: 'inline-block', fontSize: 16 }} />
+                          </span>
+                        )
+                        : item.label}
                     </span>
+                  )}
+                  {!collapsed && !item.newTab && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        window.open(item.route, '_blank', 'noopener,noreferrer');
+                      }}
+                      title={`Open ${item.label} in new tab`}
+                      className="ams-nav-newtab-btn"
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        bottom: 0,
+                        right: 4,
+                        width: 26,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        background: 'transparent',
+                        border: 'none',
+                        cursor: 'pointer',
+                        color: T.textMuted,
+                        fontSize: 18,
+                        fontWeight: 600,
+                        lineHeight: 1,
+                        borderRadius: 6,
+                      }}
+                    >
+                      +
+                    </button>
                   )}
                 </div>
               );

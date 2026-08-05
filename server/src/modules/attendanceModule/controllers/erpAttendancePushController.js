@@ -55,6 +55,7 @@ const axios  = require('axios');
 const cron   = require('node-cron');
 const AttendanceReport = require('../../../models/attendanceReport');
 const ErpPushSettings  = require('../../../models/attendanceModule/erpPushSettings');
+const ErpCommunicationLog = require('../../../models/attendanceModule/erpCommunicationLog');
 
 const ERP_ATTENDANCE_PUSH_URL = process.env.ERP_ATTENDANCE_PUSH_URL || '';
 const ERP_PUSH_SECRET         = process.env.ERP_PUSH_SECRET || '';
@@ -79,9 +80,10 @@ function erpPushConfigured() {
     return !!(ERP_ATTENDANCE_PUSH_URL.trim() && ERP_PUSH_SECRET.trim());
 }
 
-// classId mirrors erpSyncController.js's erpSubjectKey convention (semester +
-// subject abbreviation, uppercased, no spaces — e.g. "6DE") so the same class
-// identifier scheme is used across roster fetch and attendance posting.
+// classId is the outbound push's own class identifier: semester + subject
+// abbreviation, uppercased, no spaces (e.g. "6DE"). It is independent of the
+// roster fetch, which addresses subjects by the ERP's degree/department/
+// semester/abbreviation payload instead (see erpSyncController.buildErpPayload).
 function buildClassId(report) {
     const sem = String(report.semester || '').trim();
     const abbrev = String(report.subjectMeta?.subName || report.subject || '')
@@ -174,6 +176,20 @@ async function pushAttendanceToErp(report, { bypassCap = false } = {}) {
     const attempts = (report.erpPush?.attempts || 0) + 1;
     const now = new Date();
 
+    // Audit entry for this exchange. `changes` stays empty: an outbound push
+    // reports OUR attendance to ERP, it does not change anything on our side —
+    // the request body is the evidence of what we sent.
+    const logPush = (outcome) => ErpCommunicationLog.record({
+        direction: 'outbound',
+        event: 'attendance-push',
+        endpoint: ERP_ATTENDANCE_PUSH_URL,
+        periodId: report.periodId,
+        reportId: report._id,
+        requestBody: payload,
+        occurredAt: now,
+        ...outcome,
+    });
+
     try {
         const res = await axios.post(ERP_ATTENDANCE_PUSH_URL, payload, {
             headers: {
@@ -204,6 +220,7 @@ async function pushAttendanceToErp(report, { bypassCap = false } = {}) {
             report.erpPush = { ...baseErpPush, status: 'sent', sentAt: now, lastError: null };
             report.erpLockState = 'posted_acked';
             await report.save();
+            await logPush({ ok: true, httpStatus: res.status, responseCode, responseBody: res.data ?? null });
             console.log(`[ErpPush] ${report.periodId} — ${responseCode} (${recognitionResults.length} students).`);
             return { ok: true, responseCode };
         }
@@ -213,6 +230,7 @@ async function pushAttendanceToErp(report, { bypassCap = false } = {}) {
             report.erpPush = { ...baseErpPush, status: 'sent', sentAt: report.erpPush?.sentAt || now, lastError: null };
             report.erpLockState = 'posted_acked';
             await report.save();
+            await logPush({ ok: true, httpStatus: res.status, responseCode, responseBody: res.data ?? null });
             return { ok: true, responseCode, skipped: true, reason: 'already_posted' };
         }
 
@@ -221,6 +239,10 @@ async function pushAttendanceToErp(report, { bypassCap = false } = {}) {
             report.erpPush = { ...baseErpPush, status: 'failed', sentAt: report.erpPush?.sentAt || null, lastError: res.data?.message || 'Faculty already finalised this period in ERP' };
             report.erpLockState = 'faculty_finalized';
             await report.save();
+            await logPush({
+                ok: false, httpStatus: res.status, responseCode, responseBody: res.data ?? null,
+                error: res.data?.message || 'Faculty already finalised this period in ERP',
+            });
             return { ok: false, responseCode, permanent: true };
         }
         if (responseCode === 'FUTURE_PERIOD_REJECTED' || responseCode === 'INVALID_PAYLOAD') {
@@ -231,11 +253,19 @@ async function pushAttendanceToErp(report, { bypassCap = false } = {}) {
             // The nightly retry / manual Sync bypass this cap regardless.
             report.erpPush = { ...baseErpPush, status: 'failed', attempts: maxAttempts, sentAt: report.erpPush?.sentAt || null, lastError: res.data?.message || responseCode };
             await report.save();
+            await logPush({
+                ok: false, httpStatus: res.status, responseCode, responseBody: res.data ?? null,
+                error: res.data?.message || responseCode,
+            });
             return { ok: false, responseCode, permanent: true };
         }
 
         // ── Unrecognised response — transient failure, eligible for retry ──
-        throw new Error(`ERP responded ${res.status}${responseCode ? ` (${responseCode})` : ''}: ${JSON.stringify(res.data).slice(0, 500)}`);
+        // Tagged so the catch below can still log ERP's actual reply: a thrown
+        // Error carries no err.response, unlike a genuine axios rejection.
+        const unexpected = new Error(`ERP responded ${res.status}${responseCode ? ` (${responseCode})` : ''}: ${JSON.stringify(res.data).slice(0, 500)}`);
+        unexpected.erpResponse = { status: res.status, data: res.data ?? null, responseCode };
+        throw unexpected;
     } catch (err) {
         const errMessage = err.response
             ? `HTTP ${err.response.status}: ${JSON.stringify(err.response.data).slice(0, 500)}`
@@ -253,6 +283,13 @@ async function pushAttendanceToErp(report, { bypassCap = false } = {}) {
             idempotencyKey,
         };
         await report.save();
+        await logPush({
+            ok: false,
+            httpStatus: err.erpResponse?.status ?? err.response?.status ?? null,
+            responseCode: err.erpResponse?.responseCode ?? err.response?.data?.responseCode ?? null,
+            responseBody: err.erpResponse?.data ?? err.response?.data ?? null,
+            error: errMessage,
+        });
         console.warn(`[ErpPush] ${report.periodId} — failed (attempt ${attempts}): ${errMessage}`);
         return { ok: false, error: errMessage };
     }

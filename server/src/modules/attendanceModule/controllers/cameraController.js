@@ -2,6 +2,7 @@ const axios = require('axios');
 const net = require('net');
 const Camera = require('../../../models/attendanceModule/camera.js');
 const MasterRoom = require('../../../models/masterroom.js');
+const { spawn } = require("child_process");
 
 const ML_URL = process.env.ML_SERVICE_URL || 'http://localhost:8500';
 
@@ -44,6 +45,52 @@ function normalizeRoom(value = '') {
     return String(value).trim().replace(/[\s\-.]+/g, '').toUpperCase();
 }
 
+// Checks for online status of streams | same stuff as ffprobe command
+// Resolves true (stream ok), false (unreachable / no stream), or null when
+// ffprobe itself is not installed on this host (caller should fall back to a
+// TCP reachability check instead of reporting every camera offline).
+function probeRtsp(rtspUrl, timeoutMs = 12000) {
+    return new Promise((resolve) => {
+        const ffprobe = spawn("ffprobe", [
+            "-v", "error",
+            "-rtsp_transport", "tcp",
+            // RTSP socket I/O timeout in microseconds — without this, a dropped
+            // packet or unreachable host makes ffprobe hang far past any sane
+            // window and the outer kill timer marks an online camera offline.
+            "-timeout", "8000000",
+            "-show_entries", "stream=codec_type",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            rtspUrl,
+        ]);
+
+        let finished = false;
+
+        const timer = setTimeout(() => {
+            if (!finished) {
+                finished = true;
+                ffprobe.kill("SIGKILL");
+                resolve(false);
+            }
+        }, timeoutMs);
+
+        ffprobe.on("close", (code) => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            resolve(code === 0);
+        });
+
+        ffprobe.on("error", (err) => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            // ENOENT = ffprobe binary missing on this host, not a camera fault
+            resolve(err && err.code === 'ENOENT' ? null : false);
+        });
+    });
+}
+
+// Doesnt correctly tell if stream is running or not as only checks for a TCP connection which is open when mediamtx is running regardless of stream status
 function probeTcpReachability(host, port, timeoutMs = 1200) {
     return new Promise((resolve) => {
         if (!host || !Number.isFinite(Number(port))) {
@@ -133,11 +180,17 @@ class CameraController {
             const checkedAt = new Date().toISOString();
             const evaluated = await Promise.all(
                 cameras.map(async (camera) => {
-                    const online = await probeTcpReachability(camera.ipAddress, camera.port);
+                    let online = await probeRtsp(camera.streamUrl);
+                    if (online === null) {
+                        // ffprobe is not installed on this host — fall back to a
+                        // plain TCP reachability check rather than marking every
+                        // camera offline.
+                        online = await probeTcpReachability(camera.ipAddress, camera.port);
+                    }
                     return {
                         ...camera,
                         status: online ? 'online' : 'offline',
-                        isActive: online,
+                        isActive: Boolean(online),
                         availabilityCheckedAt: checkedAt,
                     };
                 })
@@ -151,6 +204,20 @@ class CameraController {
             }
 
             return res.json(filtered);
+        } catch (error) {
+            return sendKnownError(res, error);
+        }
+    }
+
+    async listCameraRooms(req, res) {
+        try {
+            const roomIds = await Camera.distinct('roomId');
+            const rooms = roomIds
+                .map((roomId) => String(roomId || '').trim().toUpperCase())
+                .filter(Boolean)
+                .sort((a, b) => a.localeCompare(b));
+
+            return res.json({ rooms });
         } catch (error) {
             return sendKnownError(res, error);
         }
@@ -298,6 +365,7 @@ class CameraController {
 
             return res.json({
                 status: 'ok',
+                jobId: result.data?.jobId,
                 previewCamera: {
                     id: camera._id,
                     cameraId: camera.cameraId,
@@ -332,6 +400,7 @@ class CameraController {
                 responseType: 'stream',
                 timeout: 0,
                 params: {
+                    jobId: req.query.jobId,
                     quality: req.query.quality,
                     scale: req.query.scale,
                 },
@@ -350,87 +419,206 @@ class CameraController {
 
     async stopPreview(req, res) {
         try {
-            const result = await axios.post(`${ML_URL}/stop-rtsp-stream`, {}, { timeout: 10000 });
+            const jobId = req.body?.jobId;
+            const result = await axios.post(
+                `${ML_URL}/stop-preview`,
+                jobId ? { jobId } : {},
+                { timeout: 10000 },
+            );
             return res.json(result.data);
         } catch (error) {
             return sendKnownError(res, error);
         }
     }
     async startRecording(req, res) {
-    const { rtspUrl, label, format } = req.body;
-    if (!rtspUrl || !label)
-        return res.status(400).json({ error: 'rtspUrl and label required' });
-    try {
-        const result = await axios.post(`${ML_URL}/start-recording`,
-            { rtspUrl, label, format }, { timeout: 10000 });
-        return res.json(result.data);
-    } catch (error) {
-        return sendKnownError(res, error);
-    }
-}
+        const { rtspUrl, label, format } = req.body;
+        if (!rtspUrl || !label)
+            return res.status(400).json({ error: 'rtspUrl and label required' });
 
-async stopRecording(req, res) {
-    const { recordingId } = req.body;
-    if (!recordingId)
-        return res.status(400).json({ error: 'recordingId required' });
-    try {
-        const result = await axios.post(`${ML_URL}/stop-recording`,
-            { recordingId }, { timeout: 15000 });
-        return res.json(result.data);
-    } catch (error) {
-        return sendKnownError(res, error);
-    }
-}
+        try {
+            const fs = require('fs');
+            const path = require('path');
+            const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+            const RECORDINGS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'recordings');
+            if (!fs.existsSync(RECORDINGS_DIR)) fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
 
-async listRecordings(req, res) {
-    try {
-        const result = await axios.get(`${ML_URL}/recordings`, { timeout: 8000 });
-        return res.json(result.data);
-    } catch (error) {
-        return sendKnownError(res, error);
-    }
-}
+            const safeLabel = String(label).replace(/[^a-zA-Z0-9_-]/g, '_');
+            const d = new Date();
+            const dateStr = d.toISOString().split('T')[0].replace(/-/g, '');
+            const timeStr = [d.getHours(), d.getMinutes(), d.getSeconds()]
+                .map(n => n.toString().padStart(2, '0')).join('');
+            const filename = `${safeLabel}_${dateStr}_${timeStr}.mp4`;
+            const filepath = path.join(RECORDINGS_DIR, filename);
 
-async downloadRecording(req, res) {
-    // The recording lives on the ML service's own disk (it's the process that
-    // ran ffmpeg), not Node's — stream the bytes from there rather than
-    // assuming a local copy exists.
-    const path = require('path');
-    const safe = path.basename(req.params.filename);
-    try {
-        const upstream = await axios.get(
-            `${ML_URL}/recordings/${encodeURIComponent(safe)}/download`,
-            { responseType: 'stream', timeout: 30000 },
-        );
-        res.setHeader('Content-Type', 'video/mp4');
-        res.setHeader('Content-Disposition', `attachment; filename="${safe}"`);
-        upstream.data.pipe(res);
-    } catch (error) {
-        if (error.response?.status === 404) return res.status(404).json({ error: 'File not found' });
-        return sendKnownError(res, error);
-    }
-}
+            let args = ['-rtsp_transport', 'tcp', '-i', rtspUrl];
+            
+            const fmt = format && ['video+audio', 'video', 'audio'].includes(format) ? format : 'video+audio';
+            if (fmt === 'video+audio') {
+                args.push('-c:v', 'copy', '-c:a', 'libmp3lame', '-ar', '44100', '-ac', '2', '-b:a', '128k', '-movflags', '+faststart');
+            } else if (fmt === 'video') {
+                args.push('-c:v', 'copy', '-an', '-movflags', '+faststart');
+            } else { // audio
+                args.push('-vn', '-c:a', 'libmp3lame', '-ar', '44100', '-ac', '2', '-b:a', '128k', '-movflags', '+faststart');
+            }
+            args.push(filepath);
 
-async downloadAudio(req, res) {
-    // Audio is extracted by ffmpeg on the ML service's machine (where the
-    // video actually is), then streamed here — Node no longer assumes ffmpeg
-    // or the video file exist locally.
-    const path = require('path');
-    const safe = path.basename(req.params.filename);
-    try {
-        const upstream = await axios.get(
-            `${ML_URL}/recordings/${encodeURIComponent(safe)}/audio`,
-            { responseType: 'stream', timeout: 30000 },
-        );
-        const audioName = safe.replace(/\.mp4$/, '.mp3');
+            const proc = spawn(ffmpegPath, args, { stdio: ['pipe', 'ignore', 'ignore'] });
+
+            global.activeNodeRecordings = global.activeNodeRecordings || new Map();
+            global.activeNodeRecordings.set(filename, {
+                proc,
+                filename,
+                label: safeLabel,
+                started: Math.floor(Date.now() / 1000),
+                filepath
+            });
+
+            proc.on('exit', () => {
+                if (global.activeNodeRecordings) {
+                    global.activeNodeRecordings.delete(filename);
+                }
+            });
+
+            return res.json({ recordingId: filename, filename });
+        } catch (error) {
+            return sendKnownError(res, error);
+        }
+    }
+
+    async stopRecording(req, res) {
+        const { recordingId } = req.body;
+        if (!recordingId) return res.status(400).json({ error: 'recordingId required' });
+
+        try {
+            if (global.activeNodeRecordings && global.activeNodeRecordings.has(recordingId)) {
+                const rec = global.activeNodeRecordings.get(recordingId);
+                try {
+                    if (rec.proc.stdin && rec.proc.stdin.writable) {
+                        rec.proc.stdin.write('q\n');
+                    } else {
+                        rec.proc.kill();
+                    }
+                } catch (e) {
+                    console.error("[cameraController] Error stopping recording proc:", e);
+                }
+                global.activeNodeRecordings.delete(recordingId);
+            }
+            return res.json({ message: "Recording stopped", filename: recordingId });
+        } catch (error) {
+            return sendKnownError(res, error);
+        }
+    }
+
+    async listRecordings(req, res) {
+        try {
+            const fs = require('fs');
+            const path = require('path');
+            const fsPromises = fs.promises;
+            const RECORDINGS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'recordings');
+            
+            const diskFiles = [];
+            if (fs.existsSync(RECORDINGS_DIR)) {
+                const files = await fsPromises.readdir(RECORDINGS_DIR);
+                for (const file of files) {
+                    if (!file.endsWith('.mp4')) continue;
+                    try {
+                        const stats = await fsPromises.stat(path.join(RECORDINGS_DIR, file));
+                        let label = "Unknown";
+                        const parts = file.replace('.mp4', '').split('_');
+                        if (parts.length >= 3) {
+                            label = parts.slice(0, parts.length - 2).join('_');
+                        } else if (parts.length > 0) {
+                            label = parts[0];
+                        }
+                        
+                        let status = 'done';
+                        if (global.activeNodeRecordings && global.activeNodeRecordings.has(file)) {
+                            status = 'recording';
+                        }
+                        
+                        diskFiles.push({
+                            recordingId: file,
+                            filename: file,
+                            label: label,
+                            started: stats.birthtimeMs ? (stats.birthtimeMs / 1000) : (stats.mtimeMs / 1000),
+                            status: status,
+                            sizeBytes: stats.size,
+                            format: "video+audio"
+                        });
+                    } catch(e) {}
+                }
+            }
+            
+            diskFiles.sort((a, b) => b.started - a.started);
+            return res.json(diskFiles);
+        } catch (error) {
+            return sendKnownError(res, error);
+        }
+    }
+
+    async downloadRecording(req, res) {
+        const path = require('path');
+        const fs = require('fs');
+        const safe = path.basename(req.params.filename);
+        const RECORDINGS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'recordings');
+        const filePath = path.join(RECORDINGS_DIR, safe);
+        
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({ error: 'File not found' });
+        }
+        res.download(filePath, safe);
+    }
+
+    async downloadAudio(req, res) {
+        const path = require('path');
+        const fs = require('fs');
+        const safe = path.basename(req.params.filename);
+        const RECORDINGS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'recordings');
+        const filePath = path.join(RECORDINGS_DIR, safe);
+        
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({ error: 'File not found' });
+        }
+        
+        const audioName = safe.replace('.mp4', '.mp3');
+        const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+        
         res.setHeader('Content-Type', 'audio/mpeg');
         res.setHeader('Content-Disposition', `attachment; filename="${audioName}"`);
-        upstream.data.pipe(res);
-    } catch (error) {
-        if (error.response?.status === 404) return res.status(404).json({ error: 'File not found' });
-        return sendKnownError(res, error);
+        
+        const proc = spawn(ffmpegPath, [
+            '-i', filePath,
+            '-vn', '-c:a', 'libmp3lame', '-b:a', '128k', '-ar', '44100', '-ac', '2', '-f', 'mp3', 'pipe:1'
+        ]);
+        proc.stdout.pipe(res);
+        proc.stderr.on('data', (d) => { console.log('FFmpeg Audio Error:', d.toString()); });
     }
-}
+
+    async deleteRecording(req, res) {
+        const path = require('path');
+        const fs = require('fs');
+        const safe = path.basename(req.params.filename);
+        const RECORDINGS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'recordings');
+        const filePath = path.join(RECORDINGS_DIR, safe);
+        
+        if (global.activeNodeRecordings && global.activeNodeRecordings.has(safe)) {
+            const rec = global.activeNodeRecordings.get(safe);
+            if (rec.proc.stdin && rec.proc.stdin.writable) rec.proc.stdin.write('q\n');
+            else rec.proc.kill();
+            global.activeNodeRecordings.delete(safe);
+        }
+        
+        if (fs.existsSync(filePath)) {
+            try {
+                await fs.promises.unlink(filePath);
+                return res.json({ message: "Recording deleted" });
+            } catch(e) {
+                return res.status(500).json({ error: "Failed to delete" });
+            }
+        }
+        return res.status(404).json({ error: 'File not found' });
+    }
+
 // ── Scheduled recording methods ────────────────────────────────────────────
 // In-memory store (survives server restart as long as the process runs;
 // for persistence across restarts you could move this to MongoDB later).
@@ -489,8 +677,9 @@ scheduleRecording(req, res) {
     const startTimer = setTimeout(async () => {
         try {
             const axios = require('axios');
-            const ML_URL = process.env.ML_SERVICE_URL || 'http://localhost:8500';
-            const result = await axios.post(`${ML_URL}/start-recording`,
+            // Call the local Node.js server instead of ML_URL
+            const LOCAL_PORT = process.env.PORT || 8010;
+            const result = await axios.post(`http://localhost:${LOCAL_PORT}/attendancemodule/cameras/recording/start`,
                 { rtspUrl, label, format: entry.format }, { timeout: 10000 });
             entry.activeRecordingId = result.data.recordingId;
             entry.status = 'recording';
@@ -506,8 +695,8 @@ scheduleRecording(req, res) {
         if (!entry.activeRecordingId) return;
         try {
             const axios = require('axios');
-            const ML_URL = process.env.ML_SERVICE_URL || 'http://localhost:8500';
-            await axios.post(`${ML_URL}/stop-recording`,
+            const LOCAL_PORT = process.env.PORT || 8010;
+            await axios.post(`http://localhost:${LOCAL_PORT}/attendancemodule/cameras/recording/stop`,
                 { recordingId: entry.activeRecordingId }, { timeout: 15000 });
             entry.status = 'done';
             entry.activeRecordingId = null;

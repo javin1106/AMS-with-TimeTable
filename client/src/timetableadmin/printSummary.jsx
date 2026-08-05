@@ -356,6 +356,27 @@ const PrintSummary = () => {
         if (slots) {
           slots.forEach((slot) => {
             slot.forEach((cell) => {
+              // Lunch duty counts as 1 hr of load for the assigned faculty.
+              if (type == 'faculty' && period == 9) {
+                if (cell.subject || cell.room || cell.faculty) {
+                  const key = 'Lunch';
+                  if (!summaryData[key]) {
+                    summaryData[key] = {
+                      subCode: 'LUNCH',
+                      count: 1,
+                      faculties: [],
+                      subType: 'lunch',
+                      rooms: [],
+                      subjectFullName: 'Lunch Duty',
+                      subSem: '',
+                    };
+                  } else {
+                    summaryData[key].count++;
+                  }
+                }
+                return;
+              }
+
               if (cell.subject) {
                 const { subject, faculty, room } = cell;
                 let foundSubject = '';

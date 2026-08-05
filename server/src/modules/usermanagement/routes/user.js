@@ -8,9 +8,10 @@ const { upload } = require("../helper/multer.helper");
 const jwt = require("jsonwebtoken");
 const jwtSecret = process.env.JWT_SECRET;
 const { checkRole } = require("../../checkRole.middleware");
+const readAuthToken = require("../../readAuthToken");
 
 const verifyToken = (req, res, next) => {
-  const token = req.cookies.jwt;
+  const token = readAuthToken(req);
   // console.log(token)
 
   if (!token) {
@@ -55,6 +56,30 @@ userRouter.post("/assignrole", checkRole(['admin']), async (req, res) => {
   }
 });
 
+userRouter.post("/assign-dept-admin", checkRole(['admin', 'iams-admin']), async (req, res) => {
+  try {
+    await UserController.assignDeptAdminByEmail(req, res);
+  } catch (e) {
+    res.status(e?.status || 500).json({ error: e?.message || "Internal Server Error" });
+  }
+});
+
+userRouter.get("/dept-admins", checkRole(['admin', 'iams-admin']), async (req, res) => {
+  try {
+    await UserController.getDeptAdmins(req, res);
+  } catch (e) {
+    res.status(e?.status || 500).json({ error: e?.message || "Internal Server Error" });
+  }
+});
+
+userRouter.post("/remove-dept-admin", checkRole(['admin', 'iams-admin']), async (req, res) => {
+  try {
+    await UserController.removeDeptAdmin(req, res);
+  } catch (e) {
+    res.status(e?.status || 500).json({ error: e?.message || "Internal Server Error" });
+  }
+});
+
 userRouter.post("/deleterole", checkRole(['admin']), async (req, res) => {
   try {
     await UserController.deleteRole(req, res);
@@ -63,7 +88,7 @@ userRouter.post("/deleterole", checkRole(['admin']), async (req, res) => {
   }
 });
 
-userRouter.put("/department", checkRole(['admin']), async (req, res) => {
+userRouter.put("/department", checkRole(['admin', 'iams-admin']), async (req, res) => {
   try {
     await UserController.updateDepartment(req, res);
   } catch (e) {

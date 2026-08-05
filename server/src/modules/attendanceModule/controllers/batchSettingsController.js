@@ -95,6 +95,8 @@ class BatchSettingsController {
     livePreview: true,
     gpuMetrics: true,       // ← new
     confidenceMonitor: true,
+    extraClasses: false,             // off by default — enable per-dept from Dept Menu Config
+    alteringClasses: false,          // off by default — enable per-dept from Dept Menu Config
     instituteIdentification: false,  // off by default — enable per-dept from Dept Menu Config
     erpOverrides: false,             // off by default — enable per-dept from Dept Menu Config
     erpSync: false,                  // off by default — enable per-dept from Dept Menu Config

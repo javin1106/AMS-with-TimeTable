@@ -11,6 +11,11 @@ const UserSchema = new Mongoose.Schema({
   password: {
     type: String,
     required: true,
+    // Never returned by an ordinary query. Every controller that hands a user
+    // document back to a client — and the login response did — was shipping the
+    // bcrypt hash with it, which is offline-crackable at the attacker's leisure.
+    // The one place that legitimately needs it asks with .select("+password").
+    select: false,
   }, 
   profession: {type: String},
   dept: {
@@ -18,6 +23,12 @@ const UserSchema = new Mongoose.Schema({
     trim: true,
     default: "",
   },
+  // Additional department scopes shown only in Ground Truth Acquisition and
+  // Roll Assignment. `dept` remains the user's primary/dashboard department.
+  attendanceDepartments: [{
+    type: String,
+    trim: true,
+  }],
   email: [{
     type: String,
     required: true,

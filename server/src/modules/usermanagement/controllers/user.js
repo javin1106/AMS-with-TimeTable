@@ -5,13 +5,43 @@ const {
   getTimetableDepartment,
   findDepartmentCoordinator,
 } = require("./facultyDepartment");
+const { notifyUserCreated, notifyRoleAdded } = require("./adminNotifier");
+const { sendWelcomeEmail, resolveFrontendBase } = require("./welcomeMailer");
+const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 const getApiURL = require("../../certificateModule/helper/getApiURL")
 
 
 const fs = require('fs')
 const path = require("path")
 
+const departmentKey = (value) =>
+  String(value || "").trim().replace(/[\s_-]+/g, "").toUpperCase();
 
+const uniqueDepartments = (values) => {
+  const seen = new Set();
+  return (Array.isArray(values) ? values : [])
+    .map((value) => String(value || "").trim())
+    .filter((value) => {
+      const key = departmentKey(value);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+};
+
+const includePrimaryDepartment = (values, primaryDepartment) =>
+  uniqueDepartments([primaryDepartment, ...uniqueDepartments(values)]);
+
+async function resolveTimetableDepartments(values) {
+  const resolved = [];
+  for (const value of uniqueDepartments(values)) {
+    const department = await getTimetableDepartment(value);
+    if (!department) return { invalid: value, departments: [] };
+    resolved.push(department);
+  }
+  return { invalid: null, departments: uniqueDepartments(resolved) };
+}
 
 class UserController {
   async getUserDetails(req, res) {
@@ -105,7 +135,7 @@ class UserController {
           || await getFacultyDepartmentByEmail(user.email);
         if (!department) {
           return res.status(400).json({
-            error: "Assign a department to this user before adding the IAMS Department Admin role",
+            error: "Assign a department to this user before adding the iLEED Department Admin role",
           });
         }
 
@@ -115,14 +145,31 @@ class UserController {
         );
         if (existingCoordinator) {
           return res.status(409).json({
-            error: `${department} already has an IAMS Department Admin`,
+            error: `${department} already has an iLEED Department Admin`,
           });
         }
+        user.dept = department;
+        user.attendanceDepartments = includePrimaryDepartment(
+          user.attendanceDepartments,
+          department,
+        );
       }
 
       if (!user.role.includes(role)) {
         user.role.push(role);
         await user.save();
+        notifyRoleAdded(user, role);
+        const userEmail = Array.isArray(user.email) ? user.email[0] : user.email;
+        if (userEmail) {
+          sendWelcomeEmail({
+            email: userEmail,
+            frontendBase: resolveFrontendBase(req),
+            heading: "A new role has been added to your XCEED account",
+            intro: `<p>The role <strong>${role}</strong> has been added to your
+                      account on the XCEED platform (NIT Jalandhar).</p>`,
+            accountCreated: false,
+          });
+        }
       }
       res.status(200).json({ message: "Role assigned successfully", user });
     } catch (error) {
@@ -133,10 +180,19 @@ class UserController {
 
   async updateDepartment(req, res) {
     try {
-      const { userId, dept } = req.body;
+      const { userId, dept, attendanceDepartments } = req.body;
+      const hasAttendanceDepartments = Object.prototype.hasOwnProperty.call(
+        req.body,
+        "attendanceDepartments",
+      );
       if (!userId || typeof dept !== "string") {
         return res.status(400).json({
           error: "User ID and department are required",
+        });
+      }
+      if (hasAttendanceDepartments && !Array.isArray(attendanceDepartments)) {
+        return res.status(400).json({
+          error: "GT / Roll departments must be an array",
         });
       }
 
@@ -146,9 +202,25 @@ class UserController {
       }
 
       let department = dept.trim();
+      const actorRoles = Array.isArray(req.user?.roles) ? req.user.roles : [];
+      const attendanceAdminOnly = actorRoles.includes("iams-admin")
+        && !actorRoles.includes("admin");
+      if (attendanceAdminOnly) {
+        if (!user.role.includes("iams-dept-admin")) {
+          return res.status(403).json({
+            error: "iLEED admins can update only iLEED Department Admin access",
+          });
+        }
+        if (departmentKey(department) !== departmentKey(user.dept)) {
+          return res.status(403).json({
+            error: "Only a platform admin can change the primary department",
+          });
+        }
+      }
+
       if (!department && user.role.includes("iams-dept-admin")) {
         return res.status(400).json({
-          error: "Department is required for an IAMS Department Admin",
+          error: "Department is required for an iLEED Department Admin",
         });
       }
 
@@ -169,19 +241,165 @@ class UserController {
         );
         if (existingCoordinator) {
           return res.status(409).json({
-            error: `${department} already has an IAMS Department Admin`,
+            error: `${department} already has an iLEED Department Admin`,
           });
         }
       }
 
+      const requestedDepartments = hasAttendanceDepartments
+        ? attendanceDepartments
+        : user.attendanceDepartments;
+      const departmentList = includePrimaryDepartment(
+        requestedDepartments,
+        department,
+      );
+      const resolvedDepartments = await resolveTimetableDepartments(departmentList);
+      if (resolvedDepartments.invalid) {
+        return res.status(400).json({
+          error: `${resolvedDepartments.invalid} is not a valid timetable department`,
+        });
+      }
+
       user.dept = department;
+      user.attendanceDepartments = resolvedDepartments.departments;
       await user.save();
       const userResponse = user.toObject();
       delete userResponse.password;
       res.status(200).json({
-        message: "Department updated successfully",
+        message: "Department access updated successfully",
         user: userResponse,
       });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  }
+
+  // Assign the iams-dept-admin role by email; creates the account first if it
+  // doesn't exist yet (random password — the user sets their own via the
+  // forgot-password / OTP flow).
+  async assignDeptAdminByEmail(req, res) {
+    try {
+      const email = (req.body.email || "").trim().toLowerCase();
+      const deptInput = typeof req.body.dept === "string" ? req.body.dept.trim() : "";
+
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ error: "A valid email is required" });
+      }
+
+      if (!deptInput) {
+        return res.status(400).json({ error: "Department is required" });
+      }
+      const department = await getTimetableDepartment(deptInput);
+      if (!department) {
+        return res.status(400).json({
+          error: "Select a valid department from the timetable",
+        });
+      }
+
+      let user = await User.findOne({ email });
+
+      const existingCoordinator = await findDepartmentCoordinator(
+        department,
+        user?._id,
+      );
+      if (existingCoordinator) {
+        return res.status(409).json({
+          error: `${department} already has an iLEED Department Admin`,
+        });
+      }
+
+      let created = false;
+      let roleAdded = false;
+      if (!user) {
+        const randomPassword = crypto.randomBytes(24).toString("base64url");
+        const hash = await bcrypt.hash(randomPassword, 10);
+        user = await User.create({
+          name: email,
+          email: email,
+          password: hash,
+          role: ["iams-dept-admin"],
+          dept: department,
+          attendanceDepartments: [department],
+          isEmailVerified: false,
+          isFirstLogin: true,
+        });
+        created = true;
+        roleAdded = true;
+        notifyUserCreated(user);
+      } else {
+        user.dept = department;
+        user.attendanceDepartments = includePrimaryDepartment(
+          user.attendanceDepartments,
+          department,
+        );
+        if (!user.role.includes("iams-dept-admin")) {
+          user.role.push("iams-dept-admin");
+          await user.save();
+          roleAdded = true;
+          notifyRoleAdded(user, "iams-dept-admin");
+        } else {
+          await user.save();
+        }
+      }
+
+      if (roleAdded) {
+        sendWelcomeEmail({
+          email,
+          frontendBase: resolveFrontendBase(req),
+          heading: "You are now an iLEED Department Admin",
+          intro: `<p>You have been assigned as the <strong>iLEED Department Admin</strong>
+                    (Intelligent Learning Engagement and Entity Detection) for
+                    <strong>${department}</strong> on the XCEED platform (NIT Jalandhar).</p>` +
+                 (created
+                   ? "<p>An account has been created for this email address.</p>"
+                   : ""),
+          accountCreated: created,
+        });
+      }
+
+      const userResponse = user.toObject();
+      delete userResponse.password;
+      res.status(created ? 201 : 200).json({
+        message: created
+          ? "User created and iLEED Department Admin role assigned"
+          : "iLEED Department Admin role assigned",
+        created,
+        user: userResponse,
+      });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  }
+
+  // Scoped counterpart of deleteRole: only removes iams-dept-admin, so it can
+  // be exposed to iams-admin users without granting general role deletion.
+  async removeDeptAdmin(req, res) {
+    try {
+      const { userId } = req.body;
+      const user = await User.findById(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      user.role = user.role.filter((r) => r !== "iams-dept-admin");
+      await user.save();
+      const userResponse = user.toObject();
+      delete userResponse.password;
+      res.status(200).json({ message: "Role removed successfully", user: userResponse });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  }
+
+  async getDeptAdmins(req, res) {
+    try {
+      const users = await User.find(
+        { role: "iams-dept-admin" },
+        { password: 0 },
+      ).sort({ dept: 1 });
+      res.json({ users });
     } catch (error) {
       console.error(error);
       res.status(500).json({ error: "Internal server error" });

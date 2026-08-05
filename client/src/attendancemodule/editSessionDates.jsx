@@ -5,7 +5,10 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import getEnvironment from '../getenvironment';
 import NotificationSettingsTab from './NotificationSettingsTab';
 import FrameCleanupSettingsTab from './FrameCleanupSettingsTab';
+import RejectedSamplesCleanupSettingsTab from './RejectedSamplesCleanupSettingsTab';
+import OtherControlsSettingsTab from './OtherControlsSettingsTab';
 import { theme as T, cssReset } from './config';
+import BackButton from './BackButton';
 import DeptMenuConfig from './DeptMenuConfig';
 import DegreeManagement from './DegreeManagement';
 import ErpSyncSettingsTab from './ErpSyncSettingsTab';
@@ -179,10 +182,14 @@ export default function EditSessionDates() {
   const isFetching = useRef(false);
 
   // ── Tab ───────────────────────────────────────────────────────────────────
-  const initialTab = ['session', 'batch', 'notifications', 'deptMenu', 'degree', 'erpControls', 'frameCleanup', 'otherControls'].includes(
-    searchParams.get('tab'),
+  // Frame cleanup now lives inside the "Other Controls" tab, but keep old
+  // ?tab=frameCleanup deep links working by mapping them across.
+  const requestedTab =
+    searchParams.get('tab') === 'frameCleanup' ? 'otherControls' : searchParams.get('tab');
+  const initialTab = ['session', 'batch', 'notifications', 'deptMenu', 'degree', 'erpControls', 'otherControls'].includes(
+    requestedTab,
   )
-    ? searchParams.get('tab')
+    ? requestedTab
     : 'session';
   const [activeTab, setActiveTab] = useState(initialTab);
 
@@ -845,70 +852,59 @@ export default function EditSessionDates() {
                 color: T.text,
               }}
             >
-              iams-master-settings
+              ileed-master-settings
             </div>
             <div style={{ fontSize: 12, color: T.textMuted }}>
               Configure session dates, non-working days, and batch identifiers
             </div>
           </div>
+          <BackButton />
         </div>
 
         {/* Tabs */}
         <div className="ams-tabs">
-          {isIamsAdmin && (
-            <>
-              <button
-                className={`ams-tab${activeTab === 'session' ? ' active' : ''}`}
-                onClick={() => setActiveTab('session')}
-              >
-                Session Dates
-              </button>
-              <button
-                className={`ams-tab${activeTab === 'batch' ? ' active' : ''}`}
-                onClick={() => setActiveTab('batch')}
-              >
-                Batch Management
-              </button>
-              <button
-                className={`ams-tab${activeTab === 'notifications' ? ' active' : ''}`}
-                onClick={() => setActiveTab('notifications')}
-              >
-                Email Notifications
-              </button>
-              <button
-                className={`ams-tab${activeTab === 'deptMenu' ? ' active' : ''}`}
-                onClick={() => setActiveTab('deptMenu')}
-              >
-                Dept Menu Config
-              </button>
-              <button
-                className={`ams-tab${activeTab === 'degree' ? ' active' : ''}`}
-                onClick={() => setActiveTab('degree')}
-              >
-                Degree Management
-              </button>
-              <button
-                className={`ams-tab${activeTab === 'erpControls' ? ' active' : ''}`}
-                onClick={() => setActiveTab('erpControls')}
-              >
-                ERP Controls
-              </button>
-              <button
-                className={`ams-tab${activeTab === 'frameCleanup' ? ' active' : ''}`}
-                onClick={() => setActiveTab('frameCleanup')}
-              >
-                Frame Cleanup
-              </button>
-            </>
-          )}
-          {isIamsAdmin && (
-            <button
-              className={`ams-tab${activeTab === 'otherControls' ? ' active' : ''}`}
-              onClick={() => setActiveTab('otherControls')}
-            >
-              Other Controls
-            </button>
-          )}
+          <button
+            className={`ams-tab${activeTab === 'session' ? ' active' : ''}`}
+            onClick={() => setActiveTab('session')}
+          >
+            Session Dates
+          </button>
+          <button
+            className={`ams-tab${activeTab === 'batch' ? ' active' : ''}`}
+            onClick={() => setActiveTab('batch')}
+          >
+            Batch Management
+          </button>
+          <button
+            className={`ams-tab${activeTab === 'notifications' ? ' active' : ''}`}
+            onClick={() => setActiveTab('notifications')}
+          >
+            Email Notifications
+          </button>
+          <button
+            className={`ams-tab${activeTab === 'deptMenu' ? ' active' : ''}`}
+            onClick={() => setActiveTab('deptMenu')}
+          >
+            Dept Menu Config
+          </button>
+          <button
+            className={`ams-tab${activeTab === 'degree' ? ' active' : ''}`}
+            onClick={() => setActiveTab('degree')}
+          >
+            Degree Management
+          </button>
+          <button
+            className={`ams-tab${activeTab === 'erpControls' ? ' active' : ''}`}
+            onClick={() => setActiveTab('erpControls')}
+          >
+            ERP Controls
+          </button>
+          <button
+            className={`ams-tab${activeTab === 'otherControls' ? ' active' : ''}`}
+            onClick={() => setActiveTab('otherControls')}
+          >
+            Other Controls
+          </button>
         </div>
 
         {/* ══ SESSION DATES TAB ══════════════════════════════════════════════ */}
@@ -1712,8 +1708,38 @@ export default function EditSessionDates() {
             <ErpPushSettingsTab />
           </div>
         )}
-        {activeTab === 'frameCleanup' && <FrameCleanupSettingsTab />}
-        {activeTab === 'otherControls' && isIamsAdmin && <ReportDeletionSettingsTab />}
+        {activeTab === 'otherControls' && (
+          <div>
+            <OtherControlsSettingsTab />
+            <ReportDeletionSettingsTab />
+            <div
+              style={{
+                fontSize: 14,
+                fontWeight: 700,
+                color: T.text,
+                margin: '4px 0 16px',
+                paddingTop: 16,
+                borderTop: `1px solid ${T.border}`,
+              }}
+            >
+              Frame Cleanup
+            </div>
+            <FrameCleanupSettingsTab />
+            <div
+              style={{
+                fontSize: 14,
+                fontWeight: 700,
+                color: T.text,
+                margin: '4px 0 16px',
+                paddingTop: 16,
+                borderTop: `1px solid ${T.border}`,
+              }}
+            >
+              Rejected Samples Cleanup
+            </div>
+            <RejectedSamplesCleanupSettingsTab />
+          </div>
+        )}
       </div>
 
       {/* ── Holiday delete confirmation modal ── */}

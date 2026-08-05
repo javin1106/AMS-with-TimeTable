@@ -89,7 +89,7 @@ function buildDefaultPeriods() {
     numRuns: 1,
     runDurationSec: 120,
     checkIntervalMin: 5,
-    presentLogic: "majority",
+    minRunsPresent: 1,
     stopForDay: false,
   }));
 }
@@ -110,7 +110,7 @@ exports.updateGlobal = async (req, res) => {
     const doc = await getOrCreateDefault();
     const allowed = [
       "active",
-      "globalPresentLogic",
+      "globalMinRunsPresent",
       "globalNumRuns",
       "globalRunDurationSec",
       "globalCheckIntervalMin",
@@ -140,7 +140,7 @@ exports.updatePeriod = async (req, res) => {
       "numRuns",
       "runDurationSec",
       "checkIntervalMin",
-      "presentLogic",
+      "minRunsPresent",
       "stopForDay",
     ];
     for (const key of allowed) {
@@ -228,6 +228,7 @@ exports.addExtraClass = async (req, res) => {
       date,
       periodKey,
       room,
+      batch,
       subject,
       faculty,
       semester,
@@ -308,6 +309,10 @@ exports.addExtraClass = async (req, res) => {
       date,
       periodKey,
       room,
+      // A standalone extra class (one with no regular timetable row behind it)
+      // can only be acquired if it names its batch — that's what selects the
+      // embeddings and files the report.
+      batch,
       subject,
       faculty,
       semester,
@@ -563,10 +568,16 @@ exports.updateAttendanceThresholds = async (req, res) => {
       "min_detections",
       "auto_enroll_threshold",
       "alert_confidence",
+      "camera_switch_sec",
     ];
     for (const key of allowed) {
-      if (req.body[key] !== undefined)
-        doc.attendanceThresholds[key] = Number(req.body[key]);
+      if (req.body[key] === undefined) continue;
+      const val = Number(req.body[key]);
+      if (!Number.isFinite(val)) continue;
+      // Matches the clamp in rtsp_routes.py :: _attendance_pipeline, so what is
+      // stored is what the ML service will actually use.
+      doc.attendanceThresholds[key] =
+        key === "camera_switch_sec" ? Math.min(600, Math.max(5, Math.round(val))) : val;
     }
     doc.markModified("attendanceThresholds");
     await doc.save();

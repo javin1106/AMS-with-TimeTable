@@ -1,60 +1,116 @@
 // client/src/attendancemodule/groundtruthgen_rtsp.jsx
-// Live RTSP stream ground truth acquisition — select camera, start/stop,
-// auto-stops when every detected person has reached the target image count.
+// Live RTSP stream ground truth acquisition.
+//
+// Acquisition runs SERVER-SIDE: the browser starts a job, attaches to observe
+// its live progress, and can reattach after a reload or from another login.
+// A job keeps running (up to 60 min, or until Stop) even when this tab is
+// switched away or closed — the server owns the lifecycle, not this page.
+// See server/.../controllers/gtAcquisitionManager.js.
 
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import getEnvironment from '../getenvironment';
 import { API_BASE, DEGREES, theme, styles, cssReset } from './config';
 import { useDepartments } from './useDepartments';
 import { useBatchYears } from './useBatchYears';
+import { GT_OPTIONS } from './gtOptions';
 
 const _apiUrl    = getEnvironment();
 const CAMERA_API = `${_apiUrl}/attendancemodule/cameras`;
+const CAMERA_ROOMS_API = `${CAMERA_API}/rooms`;
+const OTHER_CONTROLS_API = `${_apiUrl}/attendancemodule/settings/other-controls`;
+const GT_CONFIG_API = `${_apiUrl}/api/v1/ml/gt-config`;   // ML Fine Tuning — GT Acquisition
 
-// ── Truth Microservice Endpoints Mapped Securely ──
-const TIMETABLE_API      = `${_apiUrl}/timetablemodule/timetable`;
-const CLASSTIMETABLE_API = `${_apiUrl}/timetablemodule/tt`;
-const MASTERSEM_API      = `${_apiUrl}/timetablemodule/mastersem`;
-const LOCK_API           = `${_apiUrl}/timetablemodule/lock`;
+// Current minutes-of-day (0–1439) in Asia/Kolkata, independent of the
+// browser timezone — mirrors the server-side timeWindowGuard.
+function nowMinIST() {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Asia/Kolkata',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+    }).formatToParts(new Date());
+    const h = Number(parts.find(p => p.type === 'hour')?.value ?? 0);
+    const m = Number(parts.find(p => p.type === 'minute')?.value ?? 0);
+    return ((h % 24) * 60 + m) % (24 * 60);
+}
+
+function timeStrToMin(hhmm, fallback) {
+    if (!hhmm || typeof hhmm !== 'string' || !hhmm.includes(':')) return fallback;
+    const [h, m] = hhmm.split(':').map(Number);
+    if (Number.isNaN(h) || Number.isNaN(m)) return fallback;
+    return h * 60 + m;
+}
+
+// Format a duration in seconds as H:MM:SS (or M:SS under an hour).
+function fmtDuration(totalSec) {
+    const s = Math.max(0, Math.floor(totalSec || 0));
+    const hh = Math.floor(s / 3600);
+    const mm = Math.floor((s % 3600) / 60);
+    const ss = s % 60;
+    const p2 = n => String(n).padStart(2, '0');
+    return hh > 0 ? `${hh}:${p2(mm)}:${p2(ss)}` : `${mm}:${p2(ss)}`;
+}
 
 const fetch = (input, init = {}) => window.fetch(input, {
     credentials: 'include',
     ...init,
 });
 
-// ─── Single-camera mode's camera list is now fetched dynamically from the
-// camera registry (CAMERA_API), the same way Room Mode already does — see
-// `allCameras` state inside the component. This used to be a hardcoded
-// array here, which meant newly registered cameras never appeared in this
-// mode even though the issue requires new cameras to appear automatically.
+const MODE_LABEL = { single: 'Single camera', combined: 'Combined (2 cameras)', room: 'Room (all cameras)' };
 
-// ─── Combined-mode camera pair ────────────────────────────────────────────────
-// These must match real `cameraId` values from the camera registry (the
-// same strings you'd see in the Room Mode camera list / camera registry
-// API responses) — previously this referenced fake IDs ('cam_side',
-// 'cam_lab1') that only matched the now-removed hardcoded CAMERAS array,
-// so combined mode would silently break once that array was removed.
-const COMBINED_CAMERAS = ['LT103-L', 'LT103-R'];    // LT103L ↔ LT103R
-const COMBINED_SWITCH_INTERVAL = 5 * 60;            // 5 minutes in seconds
+// Per-run tuning buttons. The value sets come from the shared GT_OPTIONS so
+// this page always offers everything ML Fine Tuning can save — the lists used
+// to be narrower, so a prefilled value like frame_skip 15 or target 20 landed
+// with no button highlighted even though it was sent correctly. Hints stay
+// here because they describe this page's live-preview behaviour.
 
-const TARGET_OPTIONS = [
-    { value: 5,  hint: 'Minimal storage — embedding uses all 5' },
-    { value: 8,  hint: '5 embed + 3 backup' },
-    { value: 10, hint: '5 embed + 5 backup (recommended)' },
-    { value: 15, hint: '5 embed + 10 backup for diversity' },
-];
+const TARGET_HINTS = {
+    5:  'Minimal storage — embedding uses all 5',
+    8:  '5 embed + 3 backup',
+    10: '5 embed + 5 backup (recommended)',
+    15: '5 embed + 10 backup for diversity',
+    20: '5 embed + 15 backup',
+    30: 'Maximum pose diversity — heaviest storage',
+};
+const TARGET_OPTIONS = GT_OPTIONS.target_imgs_per_person.map(value => ({
+    value, hint: TARGET_HINTS[value],
+}));
 
-const FRAME_SKIP_OPTIONS = [
-    { value: 5,   hint: 'Dense sampling — best for short sessions' },
-    { value: 10,  hint: 'Balanced — recommended for live streams' },
-    { value: 20,  hint: 'Fast, lighter on CPU' },
-    { value: 300, hint: 'Minimal CPU usage' },
-];
+const FRAME_SKIP_HINTS = {
+    1:   'Every frame — heaviest CPU, only for very short sessions',
+    3:   'Near-continuous sampling',
+    5:   'Dense sampling — best for short sessions',
+    10:  'Balanced — recommended for live streams',
+    15:  'Lighter than balanced',
+    20:  'Fast, lighter on CPU',
+    30:  'Fastest of the centrally tunable range',
+    // Preview frames are written once per *processed* frame, so the live preview
+    // refreshes at camera FPS ÷ frameSkip — at 300 that is roughly once every
+    // 10s, which reads as a frozen preview unless we say so up front.
+    300: 'Minimal CPU usage — live preview refreshes only ~every 10s',
+};
+// 300 is deliberately a per-run-only escape hatch: the ML service validates
+// frame_skip to 1–60, so it can never be saved as the ML Fine Tuning default.
+const FRAME_SKIP_OPTIONS = [...GT_OPTIONS.frame_skip, 300].map(value => ({
+    value, hint: FRAME_SKIP_HINTS[value],
+}));
 
-const DET_SIZE_OPTIONS = [
-    { value: 320, label: 'Fast (320)',     hint: '~4× faster, good for clear footage' },
-    { value: 640, label: 'Accurate (640)', hint: 'Better for small/distant faces' },
-];
+const DET_SIZE_META = {
+    320: { label: 'Fast (320)',     hint: '~4× faster, good for clear footage' },
+    640: { label: 'Accurate (640)', hint: 'Better for small/distant faces' },
+};
+const DET_SIZE_OPTIONS = GT_OPTIONS.det_size.map(value => ({
+    value, ...DET_SIZE_META[value],
+}));
+
+// One label format for every camera, so the name shown while acquiring reads the
+// same whether the job was started in single, combined or room mode — the server
+// echoes this string back on each camera_switch.
+const camLabel = (cam, fallbackRoom = '') => {
+    const room = cam.roomId || fallbackRoom;
+    const head = [cam.cameraId, room].filter(Boolean).join(' — ');
+    return cam.position ? `${head} (${cam.position})` : head;
+};
 
 // ─── tiny status dot ─────────────────────────────────────────────────────────
 const Dot = ({ color, pulse = false }) => (
@@ -92,29 +148,38 @@ const PersonCard = ({ id, count, target }) => {
 };
 
 // ─── Live Preview Component ───────────────────────────────────────────────────
-const LivePreview = ({ apiBase, isRunning, jobId }) => {
+// Streams /gt-acquisition/preview (keyed by acquisitionId, NOT the per-camera
+// Python jobId): the server relays the MJPEG of whichever camera is currently
+// acquiring and survives camera switches, so the <img> never remounts
+// mid-acquisition — this is what stopped the preview flickering.
+const LivePreview = ({ apiBase, isRunning, acquisitionId, cameraLabel }) => {
     const [showPreview, setShowPreview] = useState(true);
     const [loaded, setLoaded]           = useState(false);
     const [sessionKey, setSessionKey]   = useState(0);
-    const prevRunning = useRef(false);
+    const [errorStreak, setErrorStreak] = useState(0);
+    const prevKey     = useRef(null);
     const retryTimer  = useRef(null);
 
+    // Restart the <img> only when a different acquisition starts.
     useEffect(() => {
-        if (isRunning && !prevRunning.current) {
+        if (isRunning && acquisitionId && acquisitionId !== prevKey.current) {
             setLoaded(false);
+            setErrorStreak(0);
             setSessionKey(k => k + 1);
         }
         if (!isRunning) {
             setLoaded(false);
+            setErrorStreak(0);
             clearTimeout(retryTimer.current);
         }
-        prevRunning.current = isRunning;
-    }, [isRunning]);
+        prevKey.current = acquisitionId;
+    }, [isRunning, acquisitionId]);
 
     useEffect(() => () => clearTimeout(retryTimer.current), []);
 
     const handleImgError = useCallback(() => {
         setLoaded(false);
+        setErrorStreak(n => n + 1);
         clearTimeout(retryTimer.current);
         retryTimer.current = setTimeout(() => {
             setSessionKey(k => k + 1);
@@ -123,7 +188,13 @@ const LivePreview = ({ apiBase, isRunning, jobId }) => {
 
     const handleImgLoad = useCallback(() => {
         setLoaded(true);
+        setErrorStreak(0);
     }, []);
+
+    // A few early errors are normal while the first camera sub-run spins up; a
+    // sustained streak means the preview stream can't be established (commonly a
+    // stale python-ml-service with no /gt-job-preview route — restart it).
+    const stalled = errorStreak >= 3;
 
     return (
         <div style={{ marginBottom: 16 }}>
@@ -161,22 +232,43 @@ const LivePreview = ({ apiBase, isRunning, jobId }) => {
                             inset: 0, zIndex: 2,
                             width: '100%', aspectRatio: isRunning ? undefined : '16/9',
                             display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            color: '#555', fontSize: '13px',
+                            color: stalled ? '#f0c040' : '#555', fontSize: '13px',
+                            textAlign: 'center', padding: '0 16px',
                             background: isRunning ? 'rgba(0,0,0,0.6)' : '#000',
                         }}>
-                            {isRunning ? '⏳ Connecting to stream…' : 'Preview available once acquisition starts'}
+                            {!isRunning
+                                ? 'Preview available once acquisition starts'
+                                : stalled
+                                    ? '⚠️ Preview stream unavailable — the ML service may need a restart. Acquisition is still running.'
+                                    : '⏳ Connecting to stream…'}
                         </div>
                     )}
 
-                    {isRunning && jobId && (
+                    {isRunning && acquisitionId && (
                         <img
                             key={sessionKey}
-                            src={`${apiBase}/rtsp-preview?jobId=${encodeURIComponent(jobId)}`}
+                            src={`${apiBase}/gt-acquisition/preview?acquisitionId=${encodeURIComponent(acquisitionId)}`}
                             alt="Live RTSP Preview"
                             style={{ width: '100%', display: 'block' }}
                             onLoad={handleImgLoad}
                             onError={handleImgError}
                         />
+                    )}
+
+                    {isRunning && loaded && cameraLabel && (
+                        <div style={{
+                            position: 'absolute', top: 8, left: 8, zIndex: 3,
+                            padding: '3px 10px', borderRadius: 4,
+                            background: 'rgba(0,0,0,0.65)', color: '#fff',
+                            fontSize: '11px', fontWeight: 600,
+                            display: 'flex', alignItems: 'center', gap: 6,
+                        }}>
+                            <span style={{
+                                width: 7, height: 7, borderRadius: '50%',
+                                background: '#ef4444', display: 'inline-block',
+                            }} />
+                            {cameraLabel}
+                        </div>
                     )}
                 </div>
             )}
@@ -206,40 +298,18 @@ function extractSSEEvents(buffer) {
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
-export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartment = '' }) {
+export default function GroundTruthRTSP({
+    fixedDepartment = '',
+    departmentRestricted = false,
+}) {
+    const restrictedDepartmentAccess = departmentRestricted || Boolean(fixedDepartment);
     const [degree,     setDegree]     = useState('BTECH');
     const [degrees, setDegrees] = useState([]);
     const [department, setDepartment] = useState(fixedDepartment);
     const { departments, deptLoading, deptError } = useDepartments();
     const { batchYears, batchYearsLoading } = useBatchYears();
     const [year,       setYear]       = useState('');
-
-    // Single-camera mode's camera list — fetched from the same registry
-    // Room Mode already uses (CAMERA_API), so a newly added camera shows
-    // up here automatically too, with no code change needed.
-    const [allCameras,     setAllCameras]     = useState([]);
-    const [allCamerasLoad, setAllCamerasLoad] = useState(true);
     const [cameraId,   setCameraId]   = useState('');
-
-    useEffect(() => {
-        let cancelled = false;
-        setAllCamerasLoad(true);
-        fetch(CAMERA_API)
-            .then((r) => r.json())
-            .then((data) => {
-                if (cancelled) return;
-                const list = (Array.isArray(data) ? data : []).map((cam) => ({
-                    id:    cam.cameraId || cam._id,
-                    label: `${cam.cameraId || 'Camera'}${cam.roomId ? ` — ${cam.roomId}` : ''}${cam.position ? ` (${cam.position})` : ''}`,
-                    url:   cam.streamUrl,
-                }));
-                setAllCameras(list);
-                setCameraId((prev) => prev || list[0]?.id || '');
-            })
-            .catch((err) => console.error('Failed to fetch cameras:', err))
-            .finally(() => { if (!cancelled) setAllCamerasLoad(false); });
-        return () => { cancelled = true; };
-    }, []);
 
     const [detSize,    setDetSize]    = useState(320);
     const [frameSkip,  setFrameSkip]  = useState(10);
@@ -247,191 +317,154 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
     const [minSamples, setMinSamples] = useState(3);
     const [clusterThr, setClusterThr] = useState(0.45);
 
-    const [gtJobId,       setGtJobId]       = useState(null);
+    // ── Attached job (the one this page is currently observing) ──────────────
+    const [acquisitionId,   setAcquisitionId]   = useState(null);
+    const [status,          setStatus]          = useState('idle');  // idle | running | stopping | done
+    const [mode,            setMode]            = useState(null);     // single | combined | room
+    const [activeCameraLabel, setActiveCameraLabel] = useState('');
+    const [startedAt,       setStartedAt]       = useState(null);
+    const [elapsedSec,      setElapsedSec]      = useState(0);
+    const [jobTarget,       setJobTarget]       = useState(targetImgs);
 
-    const [status,        setStatus]        = useState('idle');  
     const [log,           setLog]           = useState([]);
     const [persons,       setPersons]       = useState({});
     const [summary,       setSummary]       = useState(null);
     const [toast,         setToast]         = useState(null);
-    const [retryCount,    setRetryCount]    = useState(0);
-    const [retryCountdown, setRetryCountdown] = useState(0);
 
-    const [combinedMode,     setCombinedMode]     = useState(false);
-    const [combinedIdx,      setCombinedIdx]      = useState(0);       
-    const [switchCountdown,  setSwitchCountdown]  = useState(0);       
-    const combinedTimerRef   = useRef(null);   
-    const combinedAbortRef   = useRef(false);  
+    // ── All active/recent jobs the user may see (for reopen + multi-user) ────
+    const [activeJobs,    setActiveJobs]    = useState([]);
 
-    const [timetableRooms,    setTimetableRooms]    = useState([]);
-    const [allotmentLoading,  setAllotmentLoading]  = useState(false);
+    // Optional 08:30–17:30 IST acquisition window (admin toggle, default off).
+    const [gtWindow, setGtWindow] = useState({ enabled: false, start: '08:30', end: '17:30' });
+    const [nowMin, setNowMin] = useState(nowMinIST());
+
+    const [registeredRooms,   setRegisteredRooms]   = useState([]);
+    const [registeredCameras, setRegisteredCameras] = useState([]);
+    const [roomsLoading,      setRoomsLoading]      = useState(false);
     const [selectedRoom,      setSelectedRoom]      = useState('');
 
-    const [roomCameras,   setRoomCameras]   = useState([]);   
+    const [roomCameras,   setRoomCameras]   = useState([]);
     const [roomCamsLoad,  setRoomCamsLoad]  = useState(false);
-    const [roomMode,      setRoomMode]      = useState(false);
-    const [roomCamIdx,    setRoomCamIdx]    = useState(0);
-    const [roomSwCount,   setRoomSwCount]   = useState(0);
-    const roomModeAbort   = useRef(false);
-    const roomModeTimer   = useRef(null);
 
-    const logRef          = useRef(null);
-    const abortRef        = useRef(null);
-    const retryTimerRef   = useRef(null);
-    const retryTickRef    = useRef(null);
-    const handleStartRef  = useRef(null);
+    const logRef        = useRef(null);
+    const streamAbort   = useRef(null);   // AbortController for the attached SSE feed
+    const attachedIdRef = useRef(null);
 
-    const RETRY_DELAY = 5;
-    
     const fetchDegrees = async () => {
         const url = `${_apiUrl}/attendancemodule/settings/batches/degrees`
         const res = await fetch(url, {credentials: "include"})
         const data = await res.json();
         setDegrees(data.degrees);
-        console.log(data.degrees)
     }
 
     useEffect(() => {
         fetchDegrees();
     }, [])
 
+    // Load the acquisition-window restriction and keep the current IST minute
+    // fresh (every 30s) so the Start button enables/disables as the window
+    // opens or closes without a page reload.
+    useEffect(() => {
+        fetch(`${OTHER_CONTROLS_API}/`)
+            .then(r => r.json())
+            .then(d => {
+                const s = d?.settings || {};
+                setGtWindow({
+                    enabled: !!s.groundTruthTimeWindowEnabled,
+                    start: s.windowStart || '08:30',
+                    end: s.windowEnd || '17:30',
+                });
+            })
+            .catch(() => {});
+        const id = setInterval(() => setNowMin(nowMinIST()), 30000);
+        return () => clearInterval(id);
+    }, []);
+
+    const windowOpen = !gtWindow.enabled || (
+        nowMin >= timeStrToMin(gtWindow.start, 510) &&
+        nowMin <= timeStrToMin(gtWindow.end, 1050)
+    );
+
     useEffect(() => {
         if (fixedDepartment) setDepartment(fixedDepartment);
     }, [fixedDepartment]);
 
-    const clearRetry = useCallback(() => {
-        if (retryTimerRef.current)  { clearTimeout(retryTimerRef.current);   retryTimerRef.current  = null; }
-        if (retryTickRef.current)   { clearInterval(retryTickRef.current);   retryTickRef.current   = null; }
-        setRetryCountdown(0);
+    const showToast = (msg, type = 'success') => {
+        setToast({ msg, type });
+        setTimeout(() => setToast(null), 5000);
+    };
+
+    const addLog = useCallback((msg, color = '#ccc') => {
+        const time = new Date().toLocaleTimeString();
+        setLog(prev => [...prev, { time, msg, color }].slice(-80));
+        setTimeout(() => {
+            if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+        }, 40);
     }, []);
 
-    useEffect(() => () => {
-        clearRetry();
-        clearInterval(combinedTimerRef.current);
-        clearInterval(roomModeTimer.current);
-    }, [clearRetry]);
-
-    // ── HARVEST ENTRIES DYNAMICALLY FROM ACTIVE SESSION ALLOTMENTS ──
+    // ── Seed tuning dropdowns from the ML Fine Tuning GT config ──────────────
+    // The saved gt-config values become this page's defaults; the user can
+    // still override per run. If the config can't be loaded we fall back to
+    // the built-in defaults above — and say so, per the fallback-visibility
+    // rule.
     useEffect(() => {
-        const roomDepartment = fixedRoomDepartment || department;
-        if (!roomDepartment) { setTimetableRooms([]); return; }
+        fetch(GT_CONFIG_API)
+            .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+            .then(cfg => {
+                if (cfg.det_size)               setDetSize(cfg.det_size);
+                if (cfg.frame_skip)             setFrameSkip(cfg.frame_skip);
+                if (cfg.target_imgs_per_person) setTargetImgs(cfg.target_imgs_per_person);
+                if (cfg.min_samples)            setMinSamples(cfg.min_samples);
+                if (cfg.cluster_threshold)      setClusterThr(cfg.cluster_threshold);
+            })
+            .catch(() => {
+                setToast({ msg: 'ML Fine Tuning GT config unavailable — using built-in defaults', type: 'error' });
+                setTimeout(() => setToast(null), 5000);
+            });
+    }, []);
 
-        const normDept = (d) =>
-            String(d || '').trim().toLowerCase().replace(/[\s_\-]+/g, '');
-
-        const targetNorm = normDept(roomDepartment);
-        const deptSpaces = roomDepartment.replace(/_/g, ' ');
-
+    // ── LOAD ONLY ROOMS THAT HAVE CAMERAS IN THE REGISTRY ────────────
+    useEffect(() => {
         const run = async () => {
             try {
-                setAllotmentLoading(true);
-                console.log('[RoomFetch] Harvesting allotments for dept=%s', roomDepartment);
+                setRoomsLoading(true);
+                const [roomsResponse, camerasResponse] = await Promise.all([
+                    fetch(CAMERA_ROOMS_API),
+                    fetch(CAMERA_API),
+                ]);
+                const roomData = roomsResponse.ok ? await roomsResponse.json() : { rooms: [] };
+                const cameraData = camerasResponse.ok ? await camerasResponse.json() : [];
+                const cameras = (Array.isArray(cameraData) ? cameraData : [])
+                    .filter(camera => camera?.streamUrl)
+                    .map(camera => ({
+                        id: camera._id || camera.cameraId,
+                        label: camLabel(camera),
+                        url: camera.streamUrl,
+                    }));
 
-                const sessData = await fetch(
-                    `${TIMETABLE_API}/sess/allsessanddept`
-                ).then(r => r.json());
-
-                const currentSess = (sessData?.uniqueSessions || []).find(s => s.currentSession === true);
-                if (!currentSess?.session) { setTimetableRooms([]); return; }
-
-                const allCodes = await fetch(
-                    `${TIMETABLE_API}/getallcodes/${encodeURIComponent(currentSess.session)}`
-                ).then(r => r.json());
-
-                const match = (Array.isArray(allCodes) ? allCodes : []).find(t => normDept(t.dept) === targetNorm);
-                const code = match?.code;
-                if (!code) { setTimetableRooms([]); return; }
-
-                const semData = await fetch(
-                    `${MASTERSEM_API}/dept/${encodeURIComponent(deptSpaces)}`
-                ).then(r => r.json());
-
-                const sems = (Array.isArray(semData) ? semData : []).map(s => s.sem).filter(Boolean);
-                if (sems.length === 0) { setTimetableRooms([]); return; }
-
-                const collectedEntries = [];
-                const sessionStartYear = parseInt(currentSess.session.split('-')[0]) || 2025;
-
-                const walk = (node, semDegree, calculatedBatchYear, semName) => {
-                    if (!node || typeof node !== 'object') return;
-                    if (Array.isArray(node)) { node.forEach(n => walk(n, semDegree, calculatedBatchYear, semName)); return; }
-                    if ('room' in node && node.room) {
-                        collectedEntries.push({
-                            roomName: String(node.room).trim().toUpperCase(),
-                            degree: semDegree,
-                            batchYear: calculatedBatchYear,
-                            sem: semName
-                        });
-                    }
-                    Object.values(node).forEach(n => walk(n, semDegree, calculatedBatchYear, semName));
-                };
-
-                await Promise.all(sems.map(async (sem) => {
-                    try {
-                        const semUpper = sem.toUpperCase();
-                        let semDegree = 'BTECH';
-                        if (semUpper.includes('M.TECH') || semUpper.includes('MTECH')) {
-                            semDegree = 'MTECH';
-                        } else if (semUpper.includes('PHD')) {
-                            semDegree = 'PHD';
-                        }
-
-                        const semNumMatch = semUpper.match(/\d+/);
-                        const semNum = semNumMatch ? parseInt(semNumMatch[0]) : 0;
-                        const yearOfStudy = semNum > 0 ? Math.ceil(semNum / 2) : 1;
-                        const calculatedBatchYear = String(sessionStartYear - (yearOfStudy - 1));
-
-                        const ttData = await fetch(
-                            `${CLASSTIMETABLE_API}/viewclasstt/${encodeURIComponent(code)}/${encodeURIComponent(sem)}`
-                        ).then(r => r.json());
-                        walk(ttData, semDegree, calculatedBatchYear, sem);
-
-                        const lockData = await fetch(
-                            `${LOCK_API}/lockclasstt/${encodeURIComponent(code)}/${encodeURIComponent(sem)}`
-                        ).then(r => r.json());
-                        walk(lockData, semDegree, calculatedBatchYear, sem);
-                    } catch (e) { console.warn('[RoomFetch] Bypassed segment exception:', sem, e); }
-                }));
-
-                setTimetableRooms(collectedEntries);
-            } catch (e) {
-                console.error('[RoomFetch] Matrix exception:', e);
-                setTimetableRooms([]);
+                setRegisteredRooms(Array.isArray(roomData.rooms) ? roomData.rooms : []);
+                setRegisteredCameras(cameras);
+                setCameraId(previous => (
+                    cameras.some(camera => camera.id === previous)
+                        ? previous
+                        : (cameras[0]?.id || '')
+                ));
+            } catch {
+                setRegisteredRooms([]);
+                setRegisteredCameras([]);
+                setCameraId('');
             } finally {
-                setAllotmentLoading(false);
+                setRoomsLoading(false);
             }
         };
 
         run();
-    }, [fixedRoomDepartment, department]);
-
-    // STABLE REFERENCE ALLOTMENT MEMOIZATION
-    const currentBatchRoomNames = useMemo(() => {
-        return Array.from(
-            new Set(
-                timetableRooms
-                    .filter(r => r.degree === degree && (year ? r.batchYear === year : true))
-                    .map(r => r.roomName)
-            )
-        ).sort();
-    }, [timetableRooms, degree, year]);
-    
-    const otherRooms = useMemo(() => {
-        const currentSet = new Set(currentBatchRoomNames);
-
-        return Array.from(
-          new Set(
-              timetableRooms
-                  .map(r => r.roomName)
-                  .filter(room => !currentSet.has(room))
-              )
-          ).sort();
-        }, [timetableRooms, currentBatchRoomNames]);
+    }, []);
 
     // Fetch cameras for the strictly selected allotment string
     useEffect(() => {
         if (!selectedRoom) { setRoomCameras([]); return; }
-        
+
         setRoomCamsLoad(true);
         fetch(`${CAMERA_API}?roomId=${encodeURIComponent(selectedRoom.trim().toUpperCase())}`)
             .then(r => r.ok ? r.json() : [])
@@ -439,7 +472,7 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                 const list = Array.isArray(data) ? data : [];
                 setRoomCameras(list.map(c => ({
                     id:    c._id || c.cameraId,
-                    label: `${c.roomId || selectedRoom} — ${c.position || c.cameraId}`,
+                    label: camLabel(c, selectedRoom),
                     url:   c.streamUrl,
                 })).filter(c => c.url));
             })
@@ -451,396 +484,320 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
         ? `${degree}_${department}_${year}`.toUpperCase()
         : null;
 
-    const selectedCamera = allCameras.find(c => c.id === cameraId);
+    const selectedCamera = registeredCameras.find(c => c.id === cameraId);
 
-    const showToast = (msg, type = 'success') => {
-        setToast({ msg, type });
-        setTimeout(() => setToast(null), 5000);
-    };
+    // ── Map the server's job status to this page's local status ──────────────
+    const mapStatus = (s) => (s === 'running' || s === 'stopping') ? s : 'done';
 
-    const addLog = useCallback((msg, color = '#ccc') => {
-        const time = new Date().toLocaleTimeString();
-        setLog(prev => [...prev, { time, msg, color }].slice(-60));
-        setTimeout(() => {
-            if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-        }, 40);
-    }, []);
+    // ── Attach to a server job and stream its live events ────────────────────
+    const attachToJob = useCallback(async (id) => {
+        // Tear down any previous attachment.
+        if (streamAbort.current) { streamAbort.current.abort(); streamAbort.current = null; }
 
-    const stopStream = useCallback(async () => {
-        try {
-            await fetch(`${API_BASE}/stop-rtsp-stream`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(gtJobId ? { jobId: gtJobId } : {}),
-            });
-        } catch { /* clean fallback trace exit */ }
-    }, [gtJobId]);
-
-    const handleStart = useCallback(async (overrideCamera) => {
-        if (!batchName) { showToast('Fill in Degree, Department and Year', 'error'); return; }
-
-        const cam = overrideCamera || selectedCamera;
-
-        clearRetry();
-        setStatus('running');
-        if (!overrideCamera) {
-            if (!combinedMode && !roomMode) {
-                setLog([]);
-                setPersons({});
-                setSummary(null);
-            }
-        }
+        attachedIdRef.current = id;
+        setAcquisitionId(id);
 
         const controller = new AbortController();
-        abortRef.current = controller;
+        streamAbort.current = controller;
 
-        addLog(`▶ Connecting to ${cam.label}…`, theme.accent);
-        let currentJobId = null;
         try {
-            const previewRes = await Promise.race([
-                fetch(`${API_BASE}/start-preview`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ rtspUrl: cam.url }),
-                }),
-                new Promise((_, rej) => setTimeout(() => rej(new Error('preview timeout')), 4000)),
-            ]);
-            if (!previewRes.ok) {
-                addLog('⚠ Preview stream unavailable', theme.textMuted);
-            } else {
-                const previewData = await previewRes.json().catch(() => ({}));
-                if (previewData.jobId) {
-                    currentJobId = previewData.jobId;
-                    setGtJobId(previewData.jobId);
-                }
-            }
-        } catch (e) {
-            addLog(`⚠ Preview: ${e.message}`, theme.textMuted);
-        }
-
-        await new Promise(r => setTimeout(r, 200));
-        try {
-            const response = await fetch(`${API_BASE}/extract-rtsp-stream`, {
-                method:  'POST',
-                headers: { 'Content-Type': 'application/json' },
-                signal:  controller.signal,
-                body: JSON.stringify({
-                    rtspUrl:             cam.url,
-                    batch:               batchName,
-                    detSize,
-                    frameSkip,
-                    targetImgsPerPerson: targetImgs,
-                    minSamples,
-                    clusterThreshold:    clusterThr,
-                    jobId:               currentJobId || '',
-                }),
+            const res = await fetch(`${API_BASE}/gt-acquisition/stream?acquisitionId=${encodeURIComponent(id)}`, {
+                signal: controller.signal,
             });
+            if (!res.ok || !res.body) return;
 
-            if (!response.ok) {
-                const text = await response.text().catch(() => '');
-                throw new Error(`Server error ${response.status}${text ? ': ' + text : ''}`);
-            }
-
-            const reader  = response.body.getReader();
+            const reader  = res.body.getReader();
             const decoder = new TextDecoder();
-            let   buffer  = '';
+            let buffer = '';
 
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
-
                 buffer += decoder.decode(value, { stream: true });
                 const { events, remaining } = extractSSEEvents(buffer);
                 buffer = remaining;
 
                 for (const ev of events) {
+                    // Ignore late events from a job we've since detached from.
+                    if (attachedIdRef.current !== id) continue;
                     switch (ev.type) {
-                        case 'stage':
-                            addLog(`▶ ${ev.message}`, theme.accent);
+                        case 'snapshot':
+                            setStatus(mapStatus(ev.status));
+                            setMode(ev.mode || null);
+                            setPersons(ev.persons || {});
+                            setStartedAt(ev.startedAt || null);
+                            setJobTarget(ev.target || targetImgs);
+                            setActiveCameraLabel(ev.activeCameraLabel || '');
+                            setSummary(ev.summary || null);
+                            setLog((ev.log || []).map(l => ({ time: l.time, msg: l.msg, color: l.color })));
                             break;
-                        case 'frame':
-                            if (ev.faces_this_frame > 0)
-                                addLog(`🎞 Frame ${ev.frame} — ${ev.faces_this_frame} face(s) detected`, '#aaa');
+                        case 'camera_switch':
+                            setActiveCameraLabel(ev.activeCameraLabel || '');
+                            addLog(`🔄 Switched to ${ev.activeCameraLabel}`, '#f0c040');
                             break;
                         case 'person_update':
                             setPersons(prev => ({
                                 ...prev,
                                 [ev.person_id]: { count: ev.count, done: ev.done },
                             }));
-                            if (ev.done)
-                                addLog(`✅ ${ev.person_id} reached ${ev.count} images`, theme.success);
+                            if (ev.done) addLog(`✅ ${ev.person_id} reached ${ev.count} images`, theme.success);
+                            break;
+                        case 'frame':
+                            if (ev.faces_this_frame > 0)
+                                addLog(`🎞 Frame ${ev.frame} — ${ev.faces_this_frame} face(s)`, '#aaa');
+                            break;
+                        case 'stage':
+                            addLog(`▶ ${ev.message}`, theme.accent);
                             break;
                         case 'progress':
                             addLog(`📊 ${ev.message}`, '#aaa');
                             break;
-                        case 'done':
-                            setRetryCount(0);
-                            if (!combinedMode && !roomMode) {
-                                setStatus('done');
-                            }
-                            setSummary({
-                                peopleDetected: ev.people_detected,
-                                imagesSaved:    ev.images_saved,
-                                batchDir:       ev.batch_dir,
-                                elapsedSec:     ev.elapsed_sec,
-                                framesRead:     ev.frames_read,
-                            });
-                            addLog(`✅ ${ev.message}`, theme.success);
-                            if (!combinedMode && !roomMode) {
-                                showToast(`${ev.people_detected} people — ${ev.images_saved} images saved`);
-                            }
-                            break;
-                        case 'job_id':
-                            if (ev.jobId && !currentJobId) setGtJobId(ev.jobId);
-                            break;
                         case 'error':
                             addLog(`❌ ${ev.message}`, theme.danger);
-                            showToast(ev.message, 'error');
+                            break;
+                        case 'gt_config_seeded':
+                            // ML service filled omitted knobs from the saved
+                            // GT config — surface the fallback to the user.
+                            addLog(`⚙ ${ev.message}`, '#f0c040');
+                            showToast(ev.message, 'success');
+                            break;
+                        case 'done':
+                            setStatus('done');
+                            setMode(null);
+                            setSummary({
+                                peopleDetected: ev.peopleDetected,
+                                imagesSaved:    ev.imagesSaved,
+                                batchDir:       ev.batchDir,
+                                elapsedSec:     ev.elapsedSec,
+                            });
+                            addLog(`✅ ${ev.message}`, theme.success);
                             break;
                         default:
                             break;
                     }
                 }
             }
-
-            if (abortRef.current && !controller.signal.aborted) {
-                if (!combinedMode && !roomMode) {
-                    setStatus(s => s === 'running' ? 'done' : s);
-                }
-            }
-
         } catch (err) {
-            if (err.name === 'AbortError') {
-                addLog(`⏹ Stream stopped (${cam.label})`, theme.textMuted);
-                if (!combinedMode && !roomMode) {
-                    setRetryCount(0);
-                    setStatus('done');
-                }
-            } else {
-                const attempt = retryCount + 1;
-                setRetryCount(attempt);
-                addLog(`❌ ${err.message} — retrying in ${RETRY_DELAY}s (attempt ${attempt})…`, theme.danger);
-                setStatus('retrying');
-                setRetryCountdown(RETRY_DELAY);
-
-                retryTickRef.current = setInterval(() => {
-                    setRetryCountdown(n => {
-                        if (n <= 1) { clearInterval(retryTickRef.current); retryTickRef.current = null; return 0; }
-                        return n - 1;
-                    });
-                }, 1000);
-
-                retryTimerRef.current = setTimeout(() => {
-                    handleStartRef.current?.(cam);
-                }, RETRY_DELAY * 1000);
+            if (err.name !== 'AbortError') {
+                // Stream ended (job finished or server closed) — refresh the list.
+                refreshActiveJobs();
             }
         }
-    }, [batchName, selectedCamera, detSize, frameSkip, targetImgs, minSamples, clusterThr, addLog, retryCount, clearRetry, combinedMode, roomMode]);
+    }, [addLog, targetImgs]);   // eslint-disable-line react-hooks/exhaustive-deps
 
-    handleStartRef.current = handleStart;
+    // ── Poll the active-jobs list (page reopen + multi-user visibility) ──────
+    const refreshActiveJobs = useCallback(async () => {
+        try {
+            const res = await fetch(`${API_BASE}/gt-acquisition/status`);
+            if (!res.ok) return;
+            const data = await res.json();
+            const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+            setActiveJobs(jobs);
 
-    const handleStartRoomMode = useCallback(async () => {
+            // On first load with nothing attached, auto-attach to the newest
+            // running job so a reopened page immediately shows live progress.
+            if (!attachedIdRef.current) {
+                const running = jobs.find(j => j.status === 'running' || j.status === 'stopping');
+                if (running) attachToJob(running.acquisitionId);
+            }
+        } catch { /* ignore */ }
+    }, [attachToJob]);
+
+    useEffect(() => {
+        refreshActiveJobs();
+        const id = setInterval(refreshActiveJobs, 8000);
+        return () => {
+            clearInterval(id);
+            if (streamAbort.current) streamAbort.current.abort();
+        };
+    }, [refreshActiveJobs]);
+
+    // ── Live elapsed timer for the attached job ──────────────────────────────
+    useEffect(() => {
+        if (!startedAt || (status !== 'running' && status !== 'stopping')) {
+            if (summary?.elapsedSec != null) setElapsedSec(summary.elapsedSec);
+            return;
+        }
+        const tick = () => setElapsedSec(Math.floor((Date.now() - startedAt) / 1000));
+        tick();
+        const id = setInterval(tick, 1000);
+        return () => clearInterval(id);
+    }, [startedAt, status, summary]);
+
+    // ── Start a new server-side job ──────────────────────────────────────────
+    const startJob = useCallback(async (jobMode, cameras) => {
         if (!batchName) { showToast('Fill in Degree, Department and Year', 'error'); return; }
-        if (roomCameras.length === 0) { showToast('No cameras found for this room', 'error'); return; }
+        if (!cameras || cameras.length === 0 || !cameras.every(c => c?.url)) {
+            showToast('Select a registered camera', 'error'); return;
+        }
 
-        setRoomMode(true);
-        roomModeAbort.current = false;
-        setRoomCamIdx(0);
         setLog([]);
         setPersons({});
         setSummary(null);
-        setRetryCount(0);
-        clearRetry();
+        setStatus('running');
+        setMode(jobMode);
+        setJobTarget(targetImgs);
 
-        const runRoomCycle = async (startIdx) => {
-            let idx = startIdx;
-            while (!roomModeAbort.current) {
-                const cam = roomCameras[idx % roomCameras.length];
-                if (!cam) break;
-
-                setRoomCamIdx(idx % roomCameras.length);
-                setCameraId(cam.id);
-                addLog(`🔄 Room mode — switching to ${cam.label}`, '#0ea5e9');
-
-                setRoomSwCount(COMBINED_SWITCH_INTERVAL);
-                clearInterval(roomModeTimer.current);
-
-                const countdownDone = new Promise((resolve) => {
-                    roomModeTimer.current = setInterval(() => {
-                        setRoomSwCount(n => {
-                            if (n <= 1) {
-                                clearInterval(roomModeTimer.current);
-                                roomModeTimer.current = null;
-                                resolve();
-                                return 0;
-                            }
-                            return n - 1;
-                        });
-                    }, 1000);
-                });
-
-                handleStartRef.current(cam);
-                await countdownDone;
-
-                if (roomModeAbort.current) break;
-
-                addLog(`⏸ Stopping ${cam.label} for camera switch…`, '#0ea5e9');
-                if (abortRef.current) { abortRef.current.abort(); abortRef.current = null; }
-                await stopStream();
-                await new Promise(r => setTimeout(r, 1500));
-
-                if (roomModeAbort.current) break;
-                idx++;
+        try {
+            const res = await fetch(`${API_BASE}/gt-acquisition/start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    mode: jobMode,
+                    batch: batchName,
+                    cameras: cameras.map(c => ({ id: c.id, label: c.label, url: c.url })),
+                    detSize, frameSkip,
+                    targetImgsPerPerson: targetImgs,
+                    minSamples, clusterThreshold: clusterThr,
+                }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.acquisitionId) {
+                setStatus('idle');
+                setMode(null);
+                showToast(data.error || `Failed to start (${res.status})`, 'error');
+                return;
             }
+            setStartedAt(Date.now());
+            attachToJob(data.acquisitionId);
+            refreshActiveJobs();
+        } catch (err) {
+            setStatus('idle');
+            setMode(null);
+            showToast(err.message || 'Failed to start acquisition', 'error');
+        }
+    }, [batchName, detSize, frameSkip, targetImgs, minSamples, clusterThr, attachToJob, refreshActiveJobs]);
 
-            if (!roomModeAbort.current) {
-                setRoomMode(false);
-                setStatus('done');
-            }
-        };
+    const handleStart = useCallback(() => {
+        if (selectedRoom && roomCameras.length > 0) startJob('room', roomCameras);
+        else startJob('single', selectedCamera ? [selectedCamera] : []);
+    }, [selectedRoom, roomCameras, selectedCamera, startJob]);
 
-        runRoomCycle(0);
-    }, [batchName, roomCameras, addLog, clearRetry, stopStream]);
+    const handleStartCombined = useCallback(() => {
+        startJob('combined', registeredCameras.slice(0, 2));
+    }, [registeredCameras, startJob]);
 
     const handleStop = useCallback(async () => {
-        clearRetry();
-        setRetryCount(0);
-
-        if (combinedMode) {
-            combinedAbortRef.current = true;
-            clearInterval(combinedTimerRef.current);
-            combinedTimerRef.current = null;
-            setCombinedMode(false);
-            setSwitchCountdown(0);
-        }
-
-        if (roomMode) {
-            roomModeAbort.current = true;
-            clearInterval(roomModeTimer.current);
-            roomModeTimer.current = null;
-            setRoomMode(false);
-            setRoomSwCount(0);
-        }
-
+        if (!acquisitionId) return;
         setStatus('stopping');
         addLog('⏹ Sending stop signal — waiting for final save…', theme.textMuted);
-
-        if (abortRef.current) {
-            abortRef.current.abort();
-            abortRef.current = null;
-        }
-
-        await stopStream();
-        setStatus('done');
-    }, [addLog, clearRetry, combinedMode, roomMode, stopStream]);
-
-    const handleStartCombined = useCallback(async () => {
-        if (!batchName) { showToast('Fill in Degree, Department and Year', 'error'); return; }
-
-        setCombinedMode(true);
-        combinedAbortRef.current = false;
-        setCombinedIdx(0);
-        setLog([]);
-        setPersons({});
-        setSummary(null);
-        setRetryCount(0);
-        clearRetry();
-
-        const runCycle = async (startIdx) => {
-            let idx = startIdx;
-
-            while (!combinedAbortRef.current) {
-                const camId = COMBINED_CAMERAS[idx % COMBINED_CAMERAS.length];
-                const cam   = allCameras.find(c => c.id === camId);
-                if (!cam) break;
-
-                setCombinedIdx(idx % COMBINED_CAMERAS.length);
-                setCameraId(camId);
-                addLog(`🔄 Combined mode — switching to ${cam.label}`, '#f0c040');
-
-                setSwitchCountdown(COMBINED_SWITCH_INTERVAL);
-                clearInterval(combinedTimerRef.current);
-
-                const countdownDone = new Promise((resolve) => {
-                    combinedTimerRef.current = setInterval(() => {
-                        setSwitchCountdown(n => {
-                            if (n <= 1) {
-                                clearInterval(combinedTimerRef.current);
-                                combinedTimerRef.current = null;
-                                resolve();
-                                return 0;
-                            }
-                            return n - 1;
-                        });
-                    }, 1000);
-                });
-
-                handleStartRef.current(cam);
-                await countdownDone;
-
-                if (combinedAbortRef.current) break;
-
-                addLog(`⏸ Stopping ${cam.label} for camera switch…`, '#f0c040');
-                if (abortRef.current) {
-                    abortRef.current.abort();
-                    abortRef.current = null;
-                }
-                await stopStream();
-
-                await new Promise(r => setTimeout(r, 1500));
-                if (combinedAbortRef.current) break;
-
-                idx++;
-            }
-
-            if (!combinedAbortRef.current) {
-                setCombinedMode(false);
-                setStatus('done');
-            }
-        };
-
-        runCycle(0);
-    }, [batchName, addLog, clearRetry, stopStream]);
+        try {
+            await fetch(`${API_BASE}/gt-acquisition/stop`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ acquisitionId }),
+            });
+        } catch { /* the stream will still report the final state */ }
+        refreshActiveJobs();
+    }, [acquisitionId, addLog, refreshActiveJobs]);
 
     const isRunning   = status === 'running';
     const isStopping  = status === 'stopping';
-    const isRetrying  = status === 'retrying';
     const isDone      = status === 'done';
-    const isError     = status === 'error';
     const isIdle      = status === 'idle';
+    const isBusy      = isRunning || isStopping;
+
+    const combinedMode = mode === 'combined' && isBusy;
+    const roomMode     = mode === 'room' && isBusy;
 
     const totalPersons       = Object.keys(persons).length;
     const donePersons        = Object.values(persons).filter(p => p.done).length;
     const allDone            = totalPersons > 0 && donePersons === totalPersons;
     const totalImagesSession = Object.values(persons).reduce((s, p) => s + (p.count || 0), 0);
 
-    const switchMM = String(Math.floor(switchCountdown / 60)).padStart(2, '0');
-    const switchSS = String(switchCountdown % 60).padStart(2, '0');
+    const maxDurationSec = 60 * 60;
 
-    const combinedActiveCam = combinedMode
-        ? allCameras.find(c => c.id === COMBINED_CAMERAS[combinedIdx])
-        : null;
-
-    const roomActiveCam = roomMode ? roomCameras[roomCamIdx] : null;
-    const roomSwMM = String(Math.floor(roomSwCount / 60)).padStart(2, '0');
-    const roomSwSS = String(roomSwCount % 60).padStart(2, '0');
-
-    const anyMode  = combinedMode || roomMode;
+    const otherRunningJobs = activeJobs.filter(
+        j => (j.status === 'running' || j.status === 'stopping') && j.acquisitionId !== acquisitionId
+    );
 
     return (
         <div style={styles.page}>
             <div style={{ marginBottom: 28 }}>
                 <div style={styles.heading}>Ground Truth Acquisition</div>
                 <div style={styles.subheading}>
-                    Acquire face images from a live RTSP camera stream →
-                    auto-stops when every detected person reaches the target image count
+                    Acquisition runs on the server for up to 60 minutes (or until you press Stop) —
+                    it keeps going even if you switch tabs or close this window. Reopen the page any
+                    time to see the running time and images captured per person.
                 </div>
             </div>
 
+            {/* ── Active acquisitions (reopen + other users) ─────────────────── */}
+            {activeJobs.length > 0 && (
+                <div style={{ ...styles.card, marginBottom: 20 }}>
+                    <div style={{ fontSize: '13px', fontWeight: 700, color: theme.accent, marginBottom: 10 }}>
+                        🟢 Active Acquisitions
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {activeJobs.map(j => {
+                            const attached = j.acquisitionId === acquisitionId;
+                            const live = j.status === 'running' || j.status === 'stopping';
+                            return (
+                                <div key={j.acquisitionId} style={{
+                                    display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+                                    padding: '10px 14px', borderRadius: 8,
+                                    background: attached ? theme.accentDim || (theme.accent + '18') : theme.bg,
+                                    border: `1px solid ${attached ? theme.accent : theme.border}`,
+                                }}>
+                                    <Dot color={live ? theme.success : theme.textMuted} pulse={live} />
+                                    <div style={{ minWidth: 200 }}>
+                                        <div style={{ fontSize: '13px', fontWeight: 700, color: theme.text }}>
+                                            {j.batch}
+                                        </div>
+                                        <div style={{ fontSize: '11px', color: theme.textMuted }}>
+                                            {MODE_LABEL[j.mode] || j.mode}
+                                            {j.activeCameraLabel ? ` · ${j.activeCameraLabel}` : ''}
+                                            {j.startedByName ? ` · ${j.startedByName}` : ''}
+                                        </div>
+                                    </div>
+                                    <div style={{ display: 'flex', gap: 8, marginLeft: 'auto', flexWrap: 'wrap', alignItems: 'center' }}>
+                                        <span style={{
+                                            fontSize: '12px', fontWeight: 700, fontFamily: theme.fontMono,
+                                            padding: '3px 10px', borderRadius: 20,
+                                            background: theme.accentDim, color: theme.accent,
+                                        }}>
+                                            ⏱ {fmtDuration(j.elapsedSec)}
+                                        </span>
+                                        <span style={{
+                                            fontSize: '12px', fontWeight: 700,
+                                            padding: '3px 10px', borderRadius: 20,
+                                            background: theme.bg, color: theme.textMuted,
+                                            border: `1px solid ${theme.border}`,
+                                        }}>
+                                            {j.totalImages} imgs · {j.doneCount}/{j.personCount} done
+                                        </span>
+                                        <span style={{
+                                            fontSize: '11px', fontWeight: 600, color:
+                                                j.status === 'running' ? theme.success
+                                                : j.status === 'stopping' ? '#f59e0b' : theme.textMuted,
+                                        }}>
+                                            {j.status}
+                                        </span>
+                                        {!attached && (
+                                            <button
+                                                onClick={() => attachToJob(j.acquisitionId)}
+                                                style={{
+                                                    fontSize: '12px', fontWeight: 700, padding: '5px 14px',
+                                                    borderRadius: 6, cursor: 'pointer',
+                                                    border: `1px solid ${theme.accent}`,
+                                                    background: 'transparent', color: theme.accent,
+                                                }}
+                                            >
+                                                View
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+
             <div style={{
                 ...styles.card, marginBottom: 24,
-                opacity: (isRunning || isStopping) ? 0.6 : 1,
-                pointerEvents: (isRunning || isStopping) ? 'none' : 'auto',
+                opacity: isBusy ? 0.6 : 1,
+                pointerEvents: isBusy ? 'none' : 'auto',
             }}>
                 <div style={{
                     display: 'grid',
@@ -883,7 +840,7 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                               </span>
                             </div>
                             {deptError && <div style={{ fontSize: '11px', color: theme.danger, marginTop: 4 }}>{deptError}</div>}
-                        </div> 
+                        </div>
                     )
                   }
                     <div>
@@ -901,58 +858,20 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                     <label style={styles.label}>
                         Room
                         <span style={{ marginLeft: 6, fontSize: '10px', color: theme.textMuted, fontWeight: 400, textTransform: 'none' }}>
-                            — optional: automatically sourced from active session timetable allotments
+                            — optional: rooms with registered cameras
                         </span>
                     </label>
-                    
+
                     <select
                         value={selectedRoom}
-                        onChange={e => { setSelectedRoom(e.target.value); setRoomMode(false); }}
+                        onChange={e => setSelectedRoom(e.target.value)}
                         style={styles.select}
-                        disabled={allotmentLoading || isRunning || isStopping || anyMode}
+                        disabled={roomsLoading || isBusy}
                     >
-                        <option value="">{!allotmentLoading ? "— No room (manual selection below) —" : "Loading..."}</option>
-                        {allotmentLoading ? (
-                            <option disabled>⏳ Fetching active session allotments…</option>
-                        ) : (
-                            <>
-                                {/* ── 🌟 PERFECTLY CONTEXT-TARGETED OPTGROUP DROPDOWN ENGINE ── */}
-                                {currentBatchRoomNames.length > 0 ? (
-                                    <>
-                                      <optgroup label={`── Allotted to ${degree} ${year ? 'Batch ' + year : ''}  ──`}>
-                                          {currentBatchRoomNames.map(room => (
-                                              <option key={room} value={room}>
-                                                  {room}
-                                              </option>
-                                          ))}
-                                      </optgroup>
-                                      {
-                                        !fixedDepartment && otherRooms.length > 0 && (
-                                          <optgroup label={`── Other Rooms ──`}>
-                                          {otherRooms.map(room => (
-                                              <option key={room} value={room}>
-                                                  {room}
-                                              </option>
-                                          ))}
-                                          </optgroup>
-                                        )
-                                      }
-                                    </>
-                                ) : 
-                                // If no rooms are there in currentBatchRoomNames this means
-                                // that otherRooms contains all the rooms (otherRooms = timetableRooms - currentBatchRoomNames, so otherRooms is just Set of timetableRooms)
-                                // Hence we will show otherRooms for both Department and Admin
-                                (
-                                    <optgroup label={`── All Rooms ──`}>
-                                          {otherRooms.map(room => (
-                                              <option key={room} value={room}>
-                                                  {room}
-                                              </option>
-                                          ))}
-                                    </optgroup>
-                                )}
-                            </>
-                        )}
+                        <option value="">{roomsLoading ? 'Loading registered rooms…' : '— No room (manual selection below) —'}</option>
+                        {registeredRooms.map(room => (
+                            <option key={room} value={room}>{room}</option>
+                        ))}
                     </select>
 
                     {selectedRoom && (
@@ -966,7 +885,7 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                                 <span style={{ color: theme.textMuted }}>Loading cameras…</span>
                             ) : roomCameras.length > 0 ? (
                                 <span style={{ color: '#0ea5e9' }}>
-                                    <strong>{roomCameras.length}</strong> camera{roomCameras.length > 1 ? 's' : ''} routed — tap "Start"
+                                    <strong>{roomCameras.length}</strong> camera{roomCameras.length > 1 ? 's' : ''} routed — the server switches between them automatically
                                 </span>
                             ) : (
                                 <span style={{ color: theme.danger }}>No cameras registered for room "{selectedRoom}"</span>
@@ -975,11 +894,11 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                     )}
                 </div>
 
-                {!selectedRoom && (
+                {!selectedRoom && !restrictedDepartmentAccess && (
                 <div style={{ marginBottom: 20 }}>
                     <label style={styles.label}>Camera</label>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
-                        {allCameras.map(cam => (
+                        {registeredCameras.map(cam => (
                             <button key={cam.id} onClick={() => setCameraId(cam.id)} title={cam.url} style={{
                                 padding: '7px 16px', borderRadius: 6, cursor: 'pointer',
                                 fontSize: '13px', fontWeight: 600, border: '1px solid',
@@ -991,6 +910,9 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                                 {cam.label}
                             </button>
                         ))}
+                        {!roomsLoading && registeredCameras.length === 0 && (
+                            <span style={{ color: theme.textMuted, fontSize: '12px' }}>No registered cameras found</span>
+                        )}
                     </div>
                     <div style={{ fontSize: '11px', color: theme.textMuted, marginTop: 5, fontFamily: theme.fontMono }}>
                         {selectedCamera?.url}
@@ -998,14 +920,15 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                 </div>
                 )}
 
+                {!restrictedDepartmentAccess && (
                 <div style={{ marginBottom: 20 }}>
                     <label style={styles.label}>
                         Target Images per Person
                         <span style={{ marginLeft: 6, fontSize: '11px', color: theme.textMuted, fontWeight: 400 }}>
-                            — stream stops when ALL detected persons reach this count
+                            — target count shown per person; acquisition keeps collecting new people until you Stop or 60 min
                         </span>
                     </label>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
                         {TARGET_OPTIONS.map(opt => (
                             <button key={opt.value} onClick={() => setTargetImgs(opt.value)} title={opt.hint} style={{
                                 padding: '7px 18px', borderRadius: 6, cursor: 'pointer',
@@ -1023,10 +946,12 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                         {TARGET_OPTIONS.find(o => o.value === targetImgs)?.hint}
                     </div>
                 </div>
+                )}
 
+                {!restrictedDepartmentAccess && (
                 <div style={{ marginBottom: 20 }}>
                     <label style={styles.label}>Detection Quality</label>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
                         {DET_SIZE_OPTIONS.map(opt => (
                             <button key={opt.value} onClick={() => setDetSize(opt.value)} title={opt.hint} style={{
                                 padding: '7px 18px', borderRadius: 6, cursor: 'pointer',
@@ -1041,10 +966,12 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                         ))}
                     </div>
                 </div>
+                )}
 
+                {!restrictedDepartmentAccess && (
                 <div style={{ marginBottom: 20 }}>
                     <label style={styles.label}>Frame Skip</label>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
                         {FRAME_SKIP_OPTIONS.map(opt => (
                             <button key={opt.value} onClick={() => setFrameSkip(opt.value)} title={opt.hint} style={{
                                 padding: '7px 18px', borderRadius: 6, cursor: 'pointer',
@@ -1059,7 +986,9 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                         ))}
                     </div>
                 </div>
+                )}
 
+                {!restrictedDepartmentAccess && (
                 <div style={{
                     padding: '10px 16px', background: theme.bg, borderRadius: '6px',
                     fontSize: '13px', fontFamily: theme.fontMono,
@@ -1069,28 +998,44 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                         ground_truth/{batchName || '…'}/person_001/ … person_NNN/
                     </span>
                 </div>
+                )}
             </div>
 
-            <LivePreview apiBase={API_BASE} isRunning={isRunning} jobId={gtJobId} />
+            <LivePreview
+                apiBase={API_BASE}
+                isRunning={isRunning}
+                acquisitionId={acquisitionId}
+                cameraLabel={activeCameraLabel}
+            />
+
+            {!windowOpen && (
+                <div style={{
+                    marginBottom: 16,
+                    padding: '10px 16px',
+                    borderRadius: 8,
+                    fontSize: 13,
+                    background: 'rgba(239,68,68,0.10)',
+                    color: theme.danger,
+                    border: `1px solid rgba(239,68,68,0.30)`,
+                }}>
+                    ⛔ Ground Truth acquisition is restricted to {gtWindow.start}–{gtWindow.end} IST. The Start button is disabled outside this window.
+                </div>
+            )}
 
             <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
                 <button
-                    onClick={() => {
-                        if (selectedRoom && roomCameras.length > 0) {
-                            handleStartRoomMode();
-                        } else {
-                            handleStart();
-                        }
-                    }}
-                    disabled={isRunning || isStopping || isRetrying || !batchName || anyMode
+                    onClick={handleStart}
+                    disabled={isBusy || !batchName || !windowOpen
+                        || (!selectedRoom && !selectedCamera)
                         || (selectedRoom && roomCameras.length === 0 && !roomCamsLoad)}
+                    title={!windowOpen ? `Ground Truth acquisition is restricted to ${gtWindow.start}–${gtWindow.end} IST` : undefined}
                     style={{
                         ...styles.btnPrimary,
-                        opacity: (isRunning || isStopping || isRetrying || !batchName || anyMode) ? 0.5 : 1,
+                        opacity: (isBusy || !batchName || !windowOpen) ? 0.5 : 1,
                         minWidth: 200,
                     }}
                 >
-                    {(isRunning && !anyMode) ? (
+                    {isBusy ? (
                         <span style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center' }}>
                             <span style={{
                                 width: 14, height: 14,
@@ -1110,51 +1055,37 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                 {!selectedRoom && (
                 <button
                     onClick={handleStartCombined}
-                    disabled={isRunning || isStopping || isRetrying || !batchName || anyMode}
+                    disabled={isBusy || !batchName || !windowOpen || registeredCameras.length < 2}
+                    title={!windowOpen ? `Ground Truth acquisition is restricted to ${gtWindow.start}–${gtWindow.end} IST` : undefined}
                     style={{
                         padding: '10px 24px', borderRadius: 8,
-                        cursor: (isRunning || isStopping || isRetrying || !batchName || anyMode) ? 'default' : 'pointer',
+                        cursor: (isBusy || !batchName || !windowOpen || registeredCameras.length < 2) ? 'default' : 'pointer',
                         fontSize: '14px', fontWeight: 700,
                         border: 'none',
-                        background: combinedMode
-                            ? '#0284c7'
-                            : (isRunning || isStopping || isRetrying || !batchName) ? '#94a3b8' : '#0ea5e9',
+                        background: (isBusy || !batchName || !windowOpen) ? '#94a3b8' : '#0ea5e9',
                         color: '#ffffff',
-                        boxShadow: combinedMode ? '0 2px 8px rgba(2,132,199,0.4)' : '0 2px 8px rgba(14,165,233,0.3)',
+                        boxShadow: '0 2px 8px rgba(14,165,233,0.3)',
                         transition: 'all 0.15s',
-                        opacity: (isRunning || isStopping || isRetrying || !batchName) && !combinedMode ? 0.5 : 1,
+                        opacity: (isBusy || !batchName || !windowOpen) ? 0.5 : 1,
                         minWidth: 200,
-                        display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center',
                     }}
                 >
-                    {combinedMode ? (
-                        <>
-                            <span style={{
-                                width: 14, height: 14,
-                                border: '2px solid rgba(255,255,255,0.4)',
-                                borderTopColor: '#ffffff',
-                                borderRadius: '50%',
-                                animation: 'spin 0.8s linear infinite',
-                                display: 'inline-block',
-                            }} />
-                            Combined ({combinedActiveCam?.label}) {switchMM}:{switchSS}
-                        </>
-                    ) : '🔄 Combined L ↔ R'}
+                    🔄 Combine First Two Cameras
                 </button>
                 )}
 
                 <button
                     onClick={handleStop}
-                    disabled={!isRunning && !isRetrying && !anyMode}
+                    disabled={!isBusy}
                     style={{
                         padding: '10px 24px', borderRadius: 8,
-                        cursor: (isRunning || isRetrying || anyMode) ? 'pointer' : 'default',
+                        cursor: isBusy ? 'pointer' : 'default',
                         fontSize: '14px', fontWeight: 700, border: 'none',
-                        background: (isRunning || isRetrying || anyMode) ? '#ef4444' : '#fca5a5',
+                        background: isBusy ? '#ef4444' : '#fca5a5',
                         color: '#ffffff',
-                        boxShadow: (isRunning || isRetrying || anyMode) ? '0 2px 8px rgba(239,68,68,0.4)' : 'none',
+                        boxShadow: isBusy ? '0 2px 8px rgba(239,68,68,0.4)' : 'none',
                         transition: 'all 0.15s',
-                        opacity: (isRunning || isRetrying || anyMode) ? 1 : 0.45,
+                        opacity: isBusy ? 1 : 0.45,
                         minWidth: 120,
                     }}
                 >
@@ -1162,105 +1093,50 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                 </button>
             </div>
 
-            {combinedMode && isRunning && (
+            {(combinedMode || roomMode) && (
                 <div style={{
                     display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16,
                     padding: '12px 16px', borderRadius: 8,
-                    background: 'rgba(240,192,64,0.08)',
-                    border: '1px solid rgba(240,192,64,0.4)',
+                    background: roomMode ? 'rgba(14,165,233,0.06)' : 'rgba(240,192,64,0.08)',
+                    border: `1px solid ${roomMode ? 'rgba(14,165,233,0.35)' : 'rgba(240,192,64,0.4)'}`,
                 }}>
-                    <span style={{ fontSize: '20px', lineHeight: 1 }}>🔄</span>
+                    <span style={{ fontSize: '20px', lineHeight: 1 }}>{roomMode ? '🏫' : '🔄'}</span>
                     <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: '13px', fontWeight: 700, color: '#f0c040' }}>
-                            Combined Mode — {combinedActiveCam?.label}
+                        <div style={{ fontSize: '13px', fontWeight: 700, color: roomMode ? '#0ea5e9' : '#f0c040' }}>
+                            {roomMode ? 'Room Mode' : 'Combined Mode'}{activeCameraLabel ? ` — ${activeCameraLabel}` : ''}
                         </div>
                         <div style={{ fontSize: '11px', color: theme.textMuted, marginTop: 2 }}>
-                            Switching to {allCameras.find(c => c.id === COMBINED_CAMERAS[(combinedIdx + 1) % COMBINED_CAMERAS.length])?.label} in_
-                            <span style={{ fontWeight: 700, color: '#f0c040', fontFamily: theme.fontMono }}>
-                                {switchMM}:{switchSS}
-                            </span>
-                            {' '}· persons are preserved across switches
+                            The server switches cameras automatically · persons are preserved across switches
                         </div>
                     </div>
                 </div>
             )}
 
-            {roomMode && isRunning && (
-                <div style={{
-                    display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16,
-                    padding: '12px 16px', borderRadius: 8,
-                    background: 'rgba(14,165,233,0.06)',
-                    border: '1px solid rgba(14,165,233,0.35)',
-                }}>
-                    <span style={{ fontSize: '20px', lineHeight: 1 }}>🏫</span>
-                    <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: '13px', fontWeight: 700, color: '#0ea5e9' }}>
-                            Room Mode — {selectedRoom} · {roomActiveCam?.label}
-                        </div>
-                        <div style={{ fontSize: '11px', color: theme.textMuted, marginTop: 2 }}>
-                            {roomCameras.length > 1 ? (
-                                <>
-                                    Next camera in_
-                                    <span style={{ fontWeight: 700, color: '#0ea5e9', fontFamily: theme.fontMono }}>
-                                        {roomSwMM}:{roomSwSS}
-                                    </span>
-                                    {' '}· {roomCameras[(roomCamIdx + 1) % roomCameras.length]?.label}
-                                    {' '}· persons preserved across switches
-                                </>
-                            ) : 'Single camera — no switching needed'}
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {isRetrying && (
-                <div style={{
-                    display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16,
-                    padding: '12px 16px', borderRadius: 8,
-                    background: theme.dangerDim, border: `1px solid ${theme.danger}`,
-                }}>
-                    <span style={{ fontSize: '20px', lineHeight: 1 }}>⚠</span>
-                    <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: '13px', fontWeight: 700, color: theme.danger }}>
-                            Network error — reconnecting in {retryCountdown}s
-                        </div>
-                        <div style={{ fontSize: '11px', color: theme.textMuted, marginTop: 2 }}>
-                            Attempt #{retryCount} · persons kept from previous run
-                        </div>
-                    </div>
-                    <button
-                        onClick={handleStop}
-                        style={{
-                            padding: '6px 14px', borderRadius: 6, cursor: 'pointer',
-                            fontSize: '12px', fontWeight: 700,
-                            border: `1px solid ${theme.danger}`,
-                            background: 'transparent', color: theme.danger,
-                        }}
-                    >
-                        Cancel
-                    </button>
-                </div>
-            )}
-
-            {(isRunning || isStopping || isRetrying || isDone || isError) && (
+            {(isRunning || isStopping || isDone) && (
                 <div style={{
                     ...styles.card, marginBottom: 20,
-                    borderColor: isRunning ? theme.accent : isDone ? theme.success : isRetrying ? theme.danger : theme.danger,
+                    borderColor: isRunning ? theme.accent : isDone ? theme.success : theme.accent,
                 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
                         <Dot
-                            color={isRunning ? theme.accent : isDone ? theme.success : theme.danger}
+                            color={isRunning ? theme.accent : isDone ? theme.success : theme.accent}
                             pulse={isRunning || isStopping}
                         />
                         <span style={{
                             fontWeight: 700, fontSize: '14px',
-                            color: isRunning ? theme.accent : isDone ? theme.success : theme.danger,
+                            color: isRunning ? theme.accent : isDone ? theme.success : theme.accent,
                         }}>
-                            {isRunning   && `Acquiring from ${roomMode ? roomActiveCam?.label : selectedCamera?.label}…`}
+                            {isRunning   && `Acquiring${activeCameraLabel ? ` from ${activeCameraLabel}` : ''}…`}
                             {isStopping  && 'Stopping stream…'}
-                            {isRetrying  && `Reconnecting… (attempt #${retryCount})`}
                             {isDone      && 'Acquisition complete'}
-                            {isError     && 'Acquisition failed'}
+                        </span>
+
+                        <span style={{
+                            fontSize: '12px', fontWeight: 700, fontFamily: theme.fontMono,
+                            padding: '3px 10px', borderRadius: 20,
+                            background: theme.accentDim, color: theme.accent,
+                        }}>
+                            ⏱ {fmtDuration(elapsedSec)} / {fmtDuration(maxDurationSec)}
                         </span>
 
                         {totalPersons > 0 && (
@@ -1282,7 +1158,7 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                                     color: '#a855f7',
                                     border: '1px solid rgba(168,85,247,0.25)',
                                 }}>
-                                    {totalPersons} clusters
+                                    {totalPersons} people
                                 </span>
                                 <span style={{
                                     fontSize: '12px', fontWeight: 700,
@@ -1302,7 +1178,7 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                             {Object.entries(persons)
                                 .sort(([a], [b]) => a.localeCompare(b))
                                 .map(([id, { count }]) => (
-                                    <PersonCard key={id} id={id} count={count} target={targetImgs} />
+                                    <PersonCard key={id} id={id} count={count} target={jobTarget} />
                                 ))}
                         </div>
                     )}
@@ -1330,12 +1206,11 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                     <div style={{ fontSize: '18px', fontWeight: 700, color: theme.success, marginBottom: 12 }}>
                         ✅ Acquisition Complete
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 16, marginBottom: 16 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginBottom: 16 }}>
                         {[
                             { label: 'People Detected', value: summary.peopleDetected },
                             { label: 'Images Saved',    value: summary.imagesSaved    },
-                            { label: 'Frames Read',     value: summary.framesRead     },
-                            { label: 'Time Taken',      value: `${summary.elapsedSec}s` },
+                            { label: 'Time Taken',      value: fmtDuration(summary.elapsedSec) },
                         ].map(s => (
                             <div key={s.label} style={{
                                 background: '#fff', borderRadius: 8,
@@ -1361,7 +1236,13 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                         to map clusters to students.
                     </div>
                     <button
-                        onClick={() => { setStatus('idle'); setSummary(null); setPersons({}); setLog([]); }}
+                        onClick={() => {
+                            setStatus('idle'); setSummary(null); setPersons({}); setLog([]);
+                            setAcquisitionId(null); attachedIdRef.current = null; setMode(null);
+                            setStartedAt(null); setElapsedSec(0); setPythonJobId(null);
+                            if (streamAbort.current) { streamAbort.current.abort(); streamAbort.current = null; }
+                            refreshActiveJobs();
+                        }}
                         style={{
                             marginTop: 16, padding: '9px 22px', borderRadius: 8,
                             fontSize: '13px', fontWeight: 700, cursor: 'pointer',
@@ -1375,19 +1256,31 @@ export default function GroundTruthRTSP({ fixedDepartment = '', fixedRoomDepartm
                 </div>
             )}
 
-            {isIdle && (
+            {isIdle && otherRunningJobs.length === 0 && (
                 <div style={{ ...styles.card, textAlign: 'center', padding: '60px 20px', borderStyle: 'dashed' }}>
                     <div style={{ fontSize: '40px', marginBottom: 12, opacity: 0.4 }}>📡</div>
                     <div style={{ fontSize: '15px', fontWeight: 600, marginBottom: 6 }}>Ready to acquire</div>
                     <div style={{ fontSize: '13px', color: theme.textMuted }}>
                         Select batch → optionally pick a room → set target images → click "Start Acquisition"
                         <br />
-                        Stream stops automatically once every person reaches the target
+                        Acquisition runs on the server for up to 60 min and continues if you close this tab
                         <br />
-                        <span style={{ color: '#0ea5e9' }}>🏫 Room mode</span> auto-switches between all cameras in the room every 5 min
+                        <span style={{ color: '#0ea5e9' }}>🏫 Room mode</span> switches between all cameras in the room automatically
                         <br />
-                        <span style={{ color: '#f0c040' }}>🔄 Combined L ↔ R</span> alternates LT103L and LT103R every 5 min (manual mode)
+                        <span style={{ color: '#f0c040' }}>🔄 Combined</span> alternates the first two cameras automatically
                     </div>
+                </div>
+            )}
+
+            {toast && (
+                <div style={{
+                    position: 'fixed', bottom: 24, right: 24, zIndex: 50,
+                    padding: '12px 18px', borderRadius: 8, maxWidth: 360,
+                    fontSize: '13px', fontWeight: 600, color: '#fff',
+                    background: toast.type === 'error' ? theme.danger : theme.success,
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
+                }}>
+                    {toast.msg}
                 </div>
             )}
         </div>

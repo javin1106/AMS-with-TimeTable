@@ -2,11 +2,12 @@ const express = require("express");
 const router = express.Router();
 const jwt = require("jsonwebtoken");
 const getUserDetails = require("./controllers/dto");
+const readAuthToken = require("../readAuthToken");
 const jwtSecret = process.env.JWT_SECRET;
 
 // this route is for checking department timetable coordinators
 async function facultyRoute(req, res, next) {  
-  const token = req.cookies.jwt;
+  const token = readAuthToken(req);
   //console.log(token)
 
   if (!token) {

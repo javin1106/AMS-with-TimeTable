@@ -13,14 +13,16 @@ const cookieParser = require("cookie-parser");
 
 const axios = require("axios");
 const helmet = require("helmet");
-const rateLimit = require("express-rate-limit");
+const { applyAuthRateLimits } = require("./modules/usermanagement/loginRateLimit");
 // Must load before any route module makes its first request to the ML
 // service — registers the axios interceptor that attaches the shared-secret
 // header (see mlServiceAuth.js).
 require("./modules/attendanceModule/controllers/mlServiceAuth");
 const v1router = require("./routes");
 const { startAutoScheduler } = require('./modules/attendanceModule/controllers/autoAttendanceScheduler');
+const { startGpuMetricsCollector } = require('./modules/attendanceModule/controllers/gpuMetricsCollector');
 const alertNotifier = require("./modules/attendanceModule/controllers/alertNotifier");
+const cameraHealthScheduler = require("./modules/attendanceModule/controllers/cameraHealthScheduler");
 
 process.on('uncaughtException',  (err) => console.error('UNCAUGHT EXCEPTION:', err));
 process.on('unhandledRejection', (err) => console.error('UNHANDLED REJECTION:', err));
@@ -39,19 +41,6 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
 }));
 
-// Rate limiting for auth endpoints
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20,
-  message: { message: "Too many requests, please try again later." },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-app.use("/api/v1/users/login", authLimiter);
-app.use("/api/v1/users/register", authLimiter);
-app.use("/users/login", authLimiter);
-app.use("/users/register", authLimiter);
-
 // CORS configuration
 app.use(
   cors({
@@ -60,6 +49,8 @@ app.use(
       "http://127.0.0.1:5173",
       "https://nitjtt.netlify.app",
       "http://localhost:8010",
+      "http://xceed.learning.app",
+      "capacitor://xceed.learning.app",
       //for chemcon
       "http://localhost:5174","https://chemcon2024.com",
   //for eaic2025
@@ -85,7 +76,10 @@ app.use(
     ], // Change this to your allowed origins or '*' to allow all origins
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
     optionsSuccessStatus: 204,
-    allowedHeaders: "Content-Type, Authorization",
+    // X-Short-Guest carries a live Short's guest identity for participants with
+    // no account. Omitting it here makes the browser fail the preflight, so an
+    // open Short would be unjoinable from any deployed origin.
+    allowedHeaders: "Content-Type, Authorization, X-Short-Guest",
     credentials: true, // Set to true if you need to allow credentials (e.g., cookies)
   })
 );
@@ -156,6 +150,18 @@ app.use(express.json({
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 // app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+// Throttling for the credential endpoints.
+//
+// Registered here, *after* express.json, and not up with the other top-of-file
+// middleware: the per-account limiter keys on req.body.email, and before the
+// body parser runs that is always undefined — every request would land in one
+// shared bucket and five bad passwords anywhere would lock out the whole
+// installation.
+//
+// See loginRateLimit.js for why the strict limit is keyed on the account rather
+// than the IP, and for the paths the previous limiter was watching by mistake.
+applyAuthRateLimits(app);
+
 app.use(checkDatabaseConnection);
 app.use(express.static(path.join(__dirname + "/../../client/dist")));
 app.use("/uploads",express.static(path.join(__dirname ,"..","uploads")));
@@ -199,11 +205,17 @@ mongoose
       
       // Register lifecycle alerts (startup & shutdown)
       alertNotifier.setupServerLifecycleAlerts();
-      
+
+      // Checks the SMTP settings once, here, rather than per message — bad
+      // credentials or an unreachable host now show up in the boot log instead
+      // of as an invite that quietly went nowhere. Never throws.
+      require("./modules/mailerModule/transport").verifyTransport();
+
      // ── Auto Attendance Scheduler ─────────────────────────────
       // No args needed — rooms, periods, and run settings are now read
       // live from AcquisitionControl + the Camera Registry on every tick.
       startAutoScheduler();
+      cameraHealthScheduler.start();
       console.log('[AutoScheduler] Scheduler started — DB-driven (rooms, periods, embeddings).'); 
 
       // ── Frame Cleanup Scheduler (Task #1544) ──────────────────
@@ -215,6 +227,16 @@ mongoose
         console.log('[FrameCleanup] Production storage retention scheduler registered successfully.');
       } else {
         console.log('[FrameCleanup] Development environment detected — Scheduler paused to protect local assets.');
+      }
+
+      // ── Rejected Samples Cleanup Scheduler (Issue #1711) ──────
+      // Deletes liveness-rejected crops older than 7 days.
+      const { startRejectedSamplesCleanupScheduler } = require('./modules/attendanceModule/controllers/rejectedSamplesCleanupScheduler');
+      if (process.env.NODE_ENV === 'production') {
+        startRejectedSamplesCleanupScheduler();
+        console.log('[RejectedSamplesCleanup] Production 7-day retention scheduler registered successfully.');
+      } else {
+        console.log('[RejectedSamplesCleanup] Development environment detected — Scheduler paused to protect local assets.');
       }
 
       // ── HOD Daily/Weekly Attendance Summary Scheduler ─────────
@@ -233,7 +255,7 @@ mongoose
       // ── ERP Auto-Sync Scheduler ───────────────────────────────
       // Nightly: re-fetches every subject's ERP roster and regenerates
       // embeddings ONLY for subjects whose roster actually changed since
-      // last sync (no-op until ERP_API_URL is configured; toggle on/off
+      // last sync (no-op until ERP_PORTAL_KEY is configured; toggle on/off
       // from the ERP Sync page — see ErpSyncSettings).
       const { startErpAutoSyncScheduler } = require('./modules/attendanceModule/controllers/erpAutoSyncScheduler');
       startErpAutoSyncScheduler();
@@ -249,6 +271,21 @@ mongoose
       const { startErpPushRetryScheduler, startErpNightlyRetryScheduler } = require('./modules/attendanceModule/controllers/erpAttendancePushController');
       startErpPushRetryScheduler();
       startErpNightlyRetryScheduler();
+
+      // ── Scheduled Uptime Digest ───────────────────────────────
+      // Twice a day (08:30 & 13:30 IST, Mon–Fri) probes the Client,
+      // Node server public URL, ERP, and H100 ML service, and emails one
+      // consolidated Server Down digest if any are unreachable. Distinct
+      // from the edge-triggered 30s health monitor in healthRoutes.js —
+      // recipients come from the same serverDown opt-in. Probe targets are
+      // CLIENT_HEALTH_URL / SERVER_HEALTH_URL (plus ML_SERVICE_URL / ERP_STUDENTS_API_URL).
+      const { startUptimeDigestScheduler } = require('./modules/attendanceModule/controllers/uptimeDigestScheduler');
+      startUptimeDigestScheduler();
+
+      // ── Continuous GPU Metrics Collection (Issue #1739) ──────
+      // Samples the ML/GPU service independently of the View Metrics page.
+      // MongoDB TTL retention keeps the history bounded.
+      startGpuMetricsCollector();
 
     });
     server.setTimeout(600000); // 10 min — prevents Node killing long SSE connections

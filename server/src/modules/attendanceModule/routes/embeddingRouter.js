@@ -2,8 +2,21 @@
 const express = require('express');
 const router  = express.Router();
 const EmbeddingController = require('../controllers/embeddingController');
+const { previewRolls } = require('../controllers/erpSyncController');
 
 const ctrl = new EmbeddingController();
+
+// POST /attendancemodule/embeddings/erp-rolls
+//   { subjectId, degree?, department?, semester?, abbreviation? }
+// ERP roster lookup backing the Manual Generation tab's "Fetch from ERP"
+// button — fills the roll-number textarea and persists the roster onto the
+// Subject, the same way the ERP Sync page's Fetch does. It lives on this
+// router rather than /erp-sync so it inherits the embeddings menu's access,
+// which is what that tab is gated on.
+router.post('/erp-rolls', async (req, res) => {
+    try { await previewRolls(req, res); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // GET  /attendancemodule/embeddings/enrolled-roll-nos/:sem/:dept
 // Returns roll nos enrolled for a sem+dept (used by frontend before generating embeddings)

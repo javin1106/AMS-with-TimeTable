@@ -9,8 +9,6 @@ const axios = require('axios');
 
 const AcquisitionControl = require('../../../models/acquisitionControl');
 const Allotment = require('../../../models/allotment');
-const LockSem = require('../../../models/locksem');
-const TimeTable = require('../../../models/timetable');
 const Camera = require('../../../models/attendanceModule/camera');
 const Subject = require('../../../models/subject');
 const AttendanceReport = require('../../../models/attendanceReport');
@@ -20,6 +18,8 @@ const {
   buildEnrolledEmbeddingsAdaface,
   buildEnrolledEmbeddingsAdafaceTopK,
 } = require('./embeddingSyncHelper');
+const { checkAttendanceRunAllowed } = require('./timeWindowGuard');
+const { resolveClassContext } = require('./classContextResolver');
 
 const ML_URL = process.env.ML_SERVICE_URL || 'http://localhost:8500';
 const EMBEDDINGS_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'embeddings');
@@ -27,11 +27,6 @@ const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data',
 
 function todayStr() {
   return new Date().toISOString().split('T')[0];
-}
-
-function dayOfWeek(dateStr) {
-  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  return days[new Date(dateStr).getDay()];
 }
 
 function safeSubject(raw) {
@@ -46,9 +41,10 @@ function currentSession() {
   return `${start}-${String(start + 1).slice(2)}`;
 }
 
-// Merge per-student status across multiple ML runs according to presentLogic
-// (any_run | all_runs | first_run | majority). Returns { attendance, summary }.
-function mergeRunResults(runResults, presentLogic) {
+// Merge per-student status across multiple ML runs. A student is Present if
+// detected as present in at least minRunsPresent of the runs (out of the
+// total runs actually completed). Returns { attendance, summary }.
+function mergeRunResults(runResults, minRunsPresent) {
   const rollMap = {};
   for (const r of runResults) {
     for (const [rollNo, data] of Object.entries(r.attendance || {})) {
@@ -59,11 +55,7 @@ function mergeRunResults(runResults, presentLogic) {
     attendance: Object.fromEntries(
       Object.entries(rollMap).map(([rollNo, entries]) => {
         const presentCount = entries.filter((e) => e.status === 'present').length;
-        const isPresent =
-          presentLogic === 'any_run'   ? presentCount > 0 :
-          presentLogic === 'all_runs'  ? presentCount === entries.length :
-          presentLogic === 'first_run' ? entries[0].status === 'present' :
-          /* majority */                  presentCount > entries.length / 2;
+        const isPresent = presentCount >= minRunsPresent;
         const best = entries.reduce((p, c) => (c.avg_confidence > p.avg_confidence ? c : p), entries[0]);
         return [rollNo, { ...best, status: isPresent ? 'present' : (entries.some(e => e.status === 'review') ? 'review' : 'absent') }];
       }),
@@ -84,86 +76,13 @@ function timeStrToMin(t) {
   return (h || 0) * 60 + (m || 0);
 }
 
-// ── Step: resolve slot context for a room (LockSem primary, ExtraClass fallback) ──
+// ── Step: resolve slot context for a room ──────────────────────────────────
+// Shared with the cron scheduler and the developer lookup page — see
+// classContextResolver.js. Returns null when nothing should run; callers that
+// want the "why" can call resolveClassContext directly.
 async function resolveRoomContext(room, slot, date, config) {
-  const day = dayOfWeek(date);
-
-  // Primary: LockSem
-  const records = await LockSem.aggregate([
-    {
-      $match: {
-        slot: { $regex: new RegExp(`^${slot}$`, 'i') },
-        day: { $regex: new RegExp(`^${day}$`, 'i') },
-        'slotData.room': { $regex: new RegExp(`^${room}$`, 'i') },
-      },
-    },
-    {
-      $lookup: {
-        from: 'timetables',
-        localField: 'timetable',
-        foreignField: '_id',
-        as: 'tt',
-      },
-    },
-    { $unwind: { path: '$tt', preserveNullAndEmptyArrays: false } },
-    { $match: { 'tt.currentSession': true } },
-    { $limit: 1 },
-  ]);
-
-  if (records.length) {
-    const rec = records[0];
-    const tt = rec.tt;
-    const slotEntry = rec.slotData.find(
-      (s) => s.room && s.room.toLowerCase() === room.toLowerCase(),
-    );
-    if (slotEntry) {
-      const session = tt.session || currentSession();
-      const sessionStartYear = parseInt(session.split('-')[0]) || new Date().getFullYear();
-      const semNum = parseInt((rec.sem || '').match(/\d+/)?.[0] || '0');
-      const yearOfStudy = semNum > 0 ? Math.ceil(semNum / 2) : 1;
-      const batchYear = String(sessionStartYear - (yearOfStudy - 1));
-      const ttName = (tt.name || '').toUpperCase();
-      let degree = 'BTECH';
-      for (const d of ['MTECH', 'PHD', 'BSC', 'MSC', 'MBA', 'MCA', 'BTECH']) {
-        if (ttName.includes(d)) { degree = d; break; }
-      }
-      const dept = (tt.dept || '').trim().toUpperCase().replace(/\s+/g, '_');
-      const batch = `${degree}_${dept}_${batchYear}`;
-
-      return {
-        source: 'locksem',
-        batch,
-        subject: slotEntry.subject || '',
-        faculty: slotEntry.faculty || '',
-        sem: rec.sem || '',
-        dept,
-        session,
-        locksemId: rec._id.toString(),
-      };
-    }
-  }
-
-  // Fallback: ExtraClass
-  const extra = (config.extraClasses || []).find(
-    (ec) => ec.active
-      && ec.room?.toLowerCase().trim() === room.toLowerCase().trim()
-      && ec.periodKey === slot
-      && ec.date === date,
-  );
-  if (extra) {
-    return {
-      source: 'extraClass',
-      batch: extra.batch,
-      subject: extra.subject || '',
-      faculty: extra.faculty || '',
-      sem: extra.semester || '',
-      dept: '',
-      session: currentSession(),
-      locksemId: null,
-    };
-  }
-
-  return null;
+  const { ctx } = await resolveClassContext(room, slot, date, config);
+  return ctx;
 }
 
 // ── Step: resolve cameras for a room ──────────────────────────────────────
@@ -276,11 +195,14 @@ async function runRoom({ room, roomOverride, slot, date, config }) {
   push('Working day check passed');
 
   // 2. Slot data
-  const ctx = await resolveRoomContext(room, slot, date, config);
+  const { ctx, reason: ctxReason, day } = await resolveClassContext(room, slot, date, config);
   if (!ctx) {
-    return { room, status: 'skipped', reason: 'No Class Scheduled', log };
+    return { room, status: 'skipped', reason: ctxReason || 'No Class Scheduled', log };
   }
-  push(`Class resolved: ${ctx.batch} — ${ctx.subject} (${ctx.source})`);
+  push(`Class resolved (${day}): ${ctx.batch} — ${ctx.subject} (${ctx.source})`);
+  if (ctx.altered) {
+    push(`Alteration applied: was "${ctx.originalSubject}" / ${ctx.originalFaculty}`);
+  }
 
   // 3. Cameras
   const cameras = await resolveCameras(room, roomOverride);
@@ -306,14 +228,16 @@ async function runRoom({ room, roomOverride, slot, date, config }) {
   const periodCfg = (config.periods || []).find((p) => p.periodKey === slot) || {};
   const numRuns = config.globalNumRuns ?? 1;
   const runDurationSec = config.globalRunDurationSec ?? 120;
-  const presentLogic = config.globalPresentLogic ?? 'majority';
+  // Clamp to numRuns — a stale/higher setting can't require more runs than
+  // will actually happen this period.
+  const minRunsPresent = Math.min(config.globalMinRunsPresent ?? 1, numRuns);
   const startMin = timeStrToMin(periodCfg.startTime);
   const endMin   = timeStrToMin(periodCfg.endTime);
   const periodDurationMin = endMin > startMin ? endMin - startMin : 50;
   const checkIntervalMin = numRuns > 1 ? Math.max(1, Math.floor(periodDurationMin / numRuns)) : 0;
 
   // 6. Call Python ML service — numRuns times, checkIntervalMin apart
-  push(`Plan: ${numRuns} run(s), ${runDurationSec}s each, ${checkIntervalMin}min apart, logic=${presentLogic}`);
+  push(`Plan: ${numRuns} run(s), ${runDurationSec}s each, ${checkIntervalMin}min apart, present if seen in >=${minRunsPresent}/${numRuns} runs`);
   // Shadow comparisons (diagnostic only) fire once per period — on the run
   // nearest the middle of the numRuns runs. Which models run (and which is
   // the PRIMARY decision-maker) is decided Python-side by
@@ -352,6 +276,7 @@ async function runRoom({ room, roomOverride, slot, date, config }) {
         semester: ctx.sem,
         locksemId: ctx.locksemId,
         embeddingsPklData: pkl.pklData,
+        cameraSwitchSec: config.attendanceThresholds?.camera_switch_sec ?? 30,
         ...enrolledDicts,
       };
       if (i === middleRunIndex) {
@@ -377,8 +302,8 @@ async function runRoom({ room, roomOverride, slot, date, config }) {
     return { room, status: 'error', reason: 'All ML runs failed', ctx, cameras, pkl, log };
   }
 
-  // Merge per-student status across runs according to presentLogic
-  const mlResult = mergeRunResults(runResults, presentLogic);
+  // Merge per-student status across runs according to minRunsPresent
+  const mlResult = mergeRunResults(runResults, minRunsPresent);
 
 
   // 8. Save report
@@ -470,6 +395,10 @@ exports.runAll = async (req, res) => {
     const { slot } = req.body;
     const date = req.body.date || todayStr();
     if (!slot) return res.status(400).json({ error: 'slot is required' });
+
+    // Optional 08:30–17:30 IST restriction (admin toggle, default off).
+    const runGate = await checkAttendanceRunAllowed();
+    if (!runGate.allowed) return res.status(403).json({ error: runGate.reason });
 
     const config = await AcquisitionControl.findOne({ profileName: 'default' }).lean();
     if (!config) return res.status(404).json({ error: 'AcquisitionControl config not found' });

@@ -41,7 +41,7 @@ async function resolveGenerateParams(subject, isFirstYear) {
 
 async function runErpAutoSync() {
   if (!erpConfigured()) {
-    console.log("[ErpAutoSync] ERP_API_URL not configured — skipping run.");
+    console.log("[ErpAutoSync] ERP_PORTAL_KEY not configured — skipping run.");
     return;
   }
   const settings = await ErpSyncSettings.getSettings();
@@ -63,7 +63,7 @@ async function runErpAutoSync() {
     const isFirstYear = firstYearCodes.has(subject.code);
 
     try {
-      const result = await syncSubjectRolls(subject, false, isFirstYear);
+      const result = await syncSubjectRolls(subject, isFirstYear);
 
       if (!result.ok) {
         failed += 1;
@@ -83,7 +83,6 @@ async function runErpAutoSync() {
         dept,
         subjectCode: subject.subCode || "",
         rollNos: result.rollNos,
-        instituteWise: isFirstYear,
         subjectId: subject._id,
         rosterExact: true,
       });

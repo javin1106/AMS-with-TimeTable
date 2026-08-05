@@ -11,6 +11,7 @@
     "test:coverage": "jest --coverage"
   },
   "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "async-mutex": "^0.4.0",
     "axios": "^1.13.6",
     "bcryptjs": "^2.4.3",
