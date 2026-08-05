@@ -139,6 +139,10 @@ router.use('/settings/frame-cleanup',
     ...attendanceRoleAccess,
     require("./frameCleanupSettingsRoutes"));
 router.use(
+    '/settings/report-deletion',
+    require('./reportDeletionSettingsRoutes'),
+);
+router.use(
     '/health',
     ...attendanceRoleAccess,
     require("./healthRoutes"),

@@ -8,6 +8,7 @@ const { authCookie } = require("../helpers/auth");
 const AttendanceReport = require("../../src/models/attendanceReport");
 const User = require("../../src/models/usermanagement/user");
 const Batch = require("../../src/models/attendanceModule/batch");
+const ReportDeletionSettings = require("../../src/models/attendanceModule/reportDeletionSettings");
 
 const BASE = "/api/v1/attendancemodule/reports";
 
@@ -130,6 +131,93 @@ describe("POST /reports/:id/finalize", () => {
     const report = await AttendanceReport.create(baseReport({ status: "finalized" }));
     const res = await request(app).post(`${BASE}/${report._id}/finalize`).set("Cookie", authCookie());
     expect(res.status).toBe(400);
+  });
+});
+
+describe("saved report deletion controls", () => {
+  const SETTINGS = "/api/v1/attendancemodule/settings/report-deletion";
+
+  it("is disabled by default and preserves the report", async () => {
+    const report = await AttendanceReport.create(baseReport());
+    const res = await request(app)
+      .delete(`${BASE}/${report._id}`)
+      .set("Cookie", authCookie());
+
+    expect(res.status).toBe(403);
+    expect(await AttendanceReport.findById(report._id)).not.toBeNull();
+  });
+
+  it("lets only platform admin change the feature flag", async () => {
+    const denied = await request(app)
+      .patch(SETTINGS)
+      .set("Cookie", authCookie(["iams-dept-admin"]))
+      .send({ enabled: true });
+    expect(denied.status).toBe(403);
+
+    const iamsDenied = await request(app)
+      .patch(SETTINGS)
+      .set("Cookie", authCookie())
+      .send({ enabled: true });
+    expect(iamsDenied.status).toBe(403);
+
+    const enabled = await request(app)
+      .patch(SETTINGS)
+      .set("Cookie", authCookie(["admin"]))
+      .send({ enabled: true });
+    expect(enabled.status).toBe(200);
+    expect(enabled.body.enabled).toBe(true);
+
+    const fetched = await request(app).get(SETTINGS).set("Cookie", authCookie());
+    expect(fetched.status).toBe(200);
+    expect(fetched.body.enabled).toBe(true);
+  });
+
+  it("still rejects iams-dept-admin when the feature is enabled", async () => {
+    await ReportDeletionSettings.create({ enabled: true });
+    const report = await AttendanceReport.create(baseReport());
+    const res = await request(app)
+      .delete(`${BASE}/${report._id}`)
+      .set("Cookie", authCookie(["iams-dept-admin"]));
+
+    expect(res.status).toBe(403);
+    expect(await AttendanceReport.findById(report._id)).not.toBeNull();
+  });
+
+  it("deletes finalized reports and refreshes proxy links for iams-admin", async () => {
+    await ReportDeletionSettings.create({ enabled: true });
+    const report = await AttendanceReport.create(baseReport({ status: "finalized" }));
+    const linked = await AttendanceReport.create(baseReport({
+      batch: "BTECH_ECE_2027",
+      department: "ECE",
+      hasProxyStudents: true,
+      proxyStudents: [{
+        rollNo: "21CS001",
+        otherReports: [{ reportId: report._id, room: "LT101" }],
+      }],
+    }));
+
+    const res = await request(app)
+      .delete(`${BASE}/${report._id}`)
+      .set("Cookie", authCookie());
+
+    expect(res.status).toBe(200);
+    expect(res.body.deletedReportId).toBe(String(report._id));
+    expect(await AttendanceReport.findById(report._id)).toBeNull();
+
+    const refreshed = await AttendanceReport.findById(linked._id);
+    expect(refreshed.hasProxyStudents).toBe(false);
+    expect(refreshed.proxyStudents).toHaveLength(0);
+  });
+
+  it("allows the platform admin role at the protected route", async () => {
+    await ReportDeletionSettings.create({ enabled: true });
+    const report = await AttendanceReport.create(baseReport());
+    const res = await request(app)
+      .delete(`${BASE}/${report._id}`)
+      .set("Cookie", authCookie(["admin"]));
+
+    expect(res.status).toBe(200);
+    expect(await AttendanceReport.findById(report._id)).toBeNull();
   });
 });
 

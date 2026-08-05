@@ -4,6 +4,9 @@ const AttendanceReport = require("../../../models/attendanceReport");
 const LockSem = require("../../../models/locksem");
 const Student = require("../../../models/student");
 const Subject = require("../../../models/subject");
+const mongoose = require('mongoose');
+const attendanceSessionController = require('./attendanceSessionController');
+const { deleteUnknownFacesForReport } = require('./unknownFaceWriter');
 
 function mergeStudentStatus(slotResults) {
   const rollMap = {};
@@ -716,20 +719,39 @@ class AttendanceReportController {
     }
   }
 
-  // Delete a draft report
+  // Permanently delete a saved report and data tied to that report id.
   // DELETE /attendancemodule/reports/:id
   async deleteReport(req, res) {
     try {
+      if (!mongoose.isValidObjectId(req.params.id)) {
+        return res.status(400).json({ error: "Invalid report id" });
+      }
+
       const report = await AttendanceReport.findById(req.params.id);
       if (!report) return res.status(404).json({ error: "Report not found" });
-      if (report.status === "finalized") {
-        return res
-          .status(400)
-          .json({ error: "Cannot delete a finalized report" });
+
+      // Stop timers before deleting a live report so no background callback can
+      // recreate or update it after the destructive action completes.
+      if (attendanceSessionController.getSessionStatus(String(report._id)).active) {
+        await attendanceSessionController.stopSession(String(report._id));
       }
+
+      const unknownFaceCleanup = await deleteUnknownFacesForReport(report._id);
+      const { date, timeSlot } = report;
       await report.deleteOne();
-      res.json({ message: "Report deleted" });
+
+      // Proxy links are embedded in neighbouring reports. Rebuilding the slot
+      // after deletion removes references to the deleted report and refreshes
+      // each remaining report's proxy flag/count.
+      await detectAndUpdateProxies(date, timeSlot);
+
+      res.json({
+        message: "Attendance report and associated data deleted",
+        deletedReportId: String(report._id),
+        cleanup: unknownFaceCleanup,
+      });
     } catch (err) {
+      console.error('[AttendanceReport] deleteReport error:', err);
       res.status(500).json({ error: err.message });
     }
   }

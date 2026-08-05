@@ -10,6 +10,7 @@ import DeptMenuConfig from './DeptMenuConfig';
 import DegreeManagement from './DegreeManagement';
 import ErpSyncSettingsTab from './ErpSyncSettingsTab';
 import ErpPushSettingsTab from './ErpPushSettingsTab';
+import ReportDeletionSettingsTab from './ReportDeletionSettingsTab';
 
 const apiUrl = getEnvironment();
 const ALLOTMENT_API = `${apiUrl}/timetablemodule/allotment`;
@@ -178,7 +179,7 @@ export default function EditSessionDates() {
   const isFetching = useRef(false);
 
   // ── Tab ───────────────────────────────────────────────────────────────────
-  const initialTab = ['session', 'batch', 'notifications', 'deptMenu', 'degree', 'erpControls', 'frameCleanup'].includes(
+  const initialTab = ['session', 'batch', 'notifications', 'deptMenu', 'degree', 'erpControls', 'frameCleanup', 'otherControls'].includes(
     searchParams.get('tab'),
   )
     ? searchParams.get('tab')
@@ -187,6 +188,8 @@ export default function EditSessionDates() {
 
   // ── Auth ──────────────────────────────────────────────────────────────────
   const [isAuthorized, setIsAuthorized] = useState(null);
+  const [isIamsAdmin, setIsIamsAdmin] = useState(false);
+  const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
 
   // ── Session Setup state ───────────────────────────────────────────────────
   const [sessions, setSessions] = useState([]);
@@ -308,7 +311,12 @@ export default function EditSessionDates() {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         const roles = d?.user?.role || [];
-        setIsAuthorized(roles.includes('iams-admin'));
+        const hasIamsAdmin = roles.includes('iams-admin');
+        const hasPlatformAdmin = roles.includes('admin');
+        setIsIamsAdmin(hasIamsAdmin);
+        setIsPlatformAdmin(hasPlatformAdmin);
+        setIsAuthorized(hasIamsAdmin || hasPlatformAdmin);
+        if (!hasIamsAdmin && hasPlatformAdmin) setActiveTab('otherControls');
       })
       .catch(() => setIsAuthorized(false));
   }, []);
@@ -769,8 +777,8 @@ export default function EditSessionDates() {
           Access Restrictions Enforced
         </div>
         <div style={{ fontSize: 13, color: T.textMuted }}>
-          Only accounts holding <strong>iams-admin</strong> clearances can alter
-          session registries.
+          Only accounts holding <strong>iams-admin</strong> or platform-admin
+          clearances can access these controls.
         </div>
       </div>
     );
@@ -851,48 +859,60 @@ export default function EditSessionDates() {
 
         {/* Tabs */}
         <div className="ams-tabs">
-          <button
-            className={`ams-tab${activeTab === 'session' ? ' active' : ''}`}
-            onClick={() => setActiveTab('session')}
-          >
-            Session Dates
-          </button>
-          <button
-            className={`ams-tab${activeTab === 'batch' ? ' active' : ''}`}
-            onClick={() => setActiveTab('batch')}
-          >
-            Batch Management
-          </button>
-          <button
-            className={`ams-tab${activeTab === 'notifications' ? ' active' : ''}`}
-            onClick={() => setActiveTab('notifications')}
-          >
-            Email Notifications
-          </button>
-          <button
-            className={`ams-tab${activeTab === 'deptMenu' ? ' active' : ''}`}
-            onClick={() => setActiveTab('deptMenu')}
-          >
-            Dept Menu Config
-          </button>
-          <button
-            className={`ams-tab${activeTab === 'degree' ? ' active' : ''}`}
-            onClick={() => setActiveTab('degree')}
-          >
-            Degree Management
-          </button>
-          <button
-            className={`ams-tab${activeTab === 'erpControls' ? ' active' : ''}`}
-            onClick={() => setActiveTab('erpControls')}
-          >
-            ERP Controls
-          </button>
-          <button
-            className={`ams-tab${activeTab === 'frameCleanup' ? ' active' : ''}`}
-            onClick={() => setActiveTab('frameCleanup')}
-          >
-            Frame Cleanup
-          </button>
+          {isIamsAdmin && (
+            <>
+              <button
+                className={`ams-tab${activeTab === 'session' ? ' active' : ''}`}
+                onClick={() => setActiveTab('session')}
+              >
+                Session Dates
+              </button>
+              <button
+                className={`ams-tab${activeTab === 'batch' ? ' active' : ''}`}
+                onClick={() => setActiveTab('batch')}
+              >
+                Batch Management
+              </button>
+              <button
+                className={`ams-tab${activeTab === 'notifications' ? ' active' : ''}`}
+                onClick={() => setActiveTab('notifications')}
+              >
+                Email Notifications
+              </button>
+              <button
+                className={`ams-tab${activeTab === 'deptMenu' ? ' active' : ''}`}
+                onClick={() => setActiveTab('deptMenu')}
+              >
+                Dept Menu Config
+              </button>
+              <button
+                className={`ams-tab${activeTab === 'degree' ? ' active' : ''}`}
+                onClick={() => setActiveTab('degree')}
+              >
+                Degree Management
+              </button>
+              <button
+                className={`ams-tab${activeTab === 'erpControls' ? ' active' : ''}`}
+                onClick={() => setActiveTab('erpControls')}
+              >
+                ERP Controls
+              </button>
+              <button
+                className={`ams-tab${activeTab === 'frameCleanup' ? ' active' : ''}`}
+                onClick={() => setActiveTab('frameCleanup')}
+              >
+                Frame Cleanup
+              </button>
+            </>
+          )}
+          {isPlatformAdmin && (
+            <button
+              className={`ams-tab${activeTab === 'otherControls' ? ' active' : ''}`}
+              onClick={() => setActiveTab('otherControls')}
+            >
+              Other Controls
+            </button>
+          )}
         </div>
 
         {/* ══ SESSION DATES TAB ══════════════════════════════════════════════ */}
@@ -1697,6 +1717,7 @@ export default function EditSessionDates() {
           </div>
         )}
         {activeTab === 'frameCleanup' && <FrameCleanupSettingsTab />}
+        {activeTab === 'otherControls' && isPlatformAdmin && <ReportDeletionSettingsTab />}
       </div>
 
       {/* ── Holiday delete confirmation modal ── */}
