@@ -5,6 +5,7 @@ import { useDepartments } from './useDepartments';
 
 const apiUrl = getEnvironment();
 const API_BASE = `${apiUrl}/attendancemodule/unknown-faces`;
+const encodePath = (path) => path.split('/').map(encodeURIComponent).join('/');
 
 export default function UnknownFaces({ embedded = false, defaultDate = '', defaultDept = '', fixedDept = '' }) {
     const [clusters, setClusters] = useState([]);
@@ -55,7 +56,7 @@ export default function UnknownFaces({ embedded = false, defaultDate = '', defau
 
     const updateStatus = async (clusterPath, newStatus) => {
         try {
-            const res = await fetch(`${API_BASE}/cluster/${encodeURIComponent(clusterPath)}/status`, {
+            const res = await fetch(`${API_BASE}/cluster/${encodePath(clusterPath)}/status`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ status: newStatus })
@@ -73,7 +74,7 @@ export default function UnknownFaces({ embedded = false, defaultDate = '', defau
     const deleteCluster = async (clusterPath) => {
         if (!window.confirm('Delete this cluster forever?')) return;
         try {
-            const res = await fetch(`${API_BASE}/cluster/${encodeURIComponent(clusterPath)}`, {
+            const res = await fetch(`${API_BASE}/cluster/${encodePath(clusterPath)}`, {
                 method: 'DELETE'
             });
             const data = await res.json();
@@ -87,7 +88,7 @@ export default function UnknownFaces({ embedded = false, defaultDate = '', defau
     };
 
     const downloadCluster = (clusterPath) => {
-        window.open(`${API_BASE}/cluster/${encodeURIComponent(clusterPath)}/download`, '_blank');
+        window.open(`${API_BASE}/cluster/${encodePath(clusterPath)}/download`, '_blank');
     };
 
     const openEditModal = (clusterPath, currentRollNo) => {
@@ -103,7 +104,7 @@ export default function UnknownFaces({ embedded = false, defaultDate = '', defau
         }
         
         try {
-            const res = await fetch(`${API_BASE}/cluster/${encodeURIComponent(clusterPath)}/rollno`, {
+            const res = await fetch(`${API_BASE}/cluster/${encodePath(clusterPath)}/rollno`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ rollNo: newRoll })
@@ -211,7 +212,7 @@ export default function UnknownFaces({ embedded = false, defaultDate = '', defau
                                     style={{ position: 'relative', width: 80, height: 80, cursor: 'pointer' }}
                                 >
                                     <img 
-                                        src={`${API_BASE}/image/${encodeURIComponent(c.clusterPath)}/representative.jpg`}
+                                        src={`${API_BASE}/image/${encodePath(c.clusterPath)}/representative.jpg`}
                                         style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 8, background: '#f0f0f0' }}
                                         alt="Representative"
                                         onError={(e) => { e.target.style.display = 'none'; }}
@@ -308,7 +309,7 @@ export default function UnknownFaces({ embedded = false, defaultDate = '', defau
                         {(galleryModal.cluster.images || ['representative.jpg']).map((imgName, idx) => (
                             <div key={idx} style={{ background: '#000', borderRadius: 8, overflow: 'hidden', border: imgName === 'representative.jpg' ? `2px solid ${theme.accent}` : '2px solid transparent' }}>
                                 <img 
-                                    src={`${API_BASE}/image/${encodeURIComponent(galleryModal.cluster.clusterPath)}/${imgName}`} 
+                                    src={`${API_BASE}/image/${encodePath(galleryModal.cluster.clusterPath)}/${imgName}`} 
                                     style={{ height: 200, width: 'auto', objectFit: 'contain', display: 'block' }} 
                                     alt="Cluster crop" 
                                 />
