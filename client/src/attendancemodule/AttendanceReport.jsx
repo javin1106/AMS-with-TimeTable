@@ -5,6 +5,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { DEGREES, YEARS, theme, styles, cssReset } from './config';
 import { useDepartments } from './useDepartments';
+import { usePeriods } from './usePeriods';
 import UnknownFaces from './UnknownFaces';
 import RejectedSamples from './RejectedSamples';
 import getEnvironment from '../getenvironment';
@@ -46,18 +47,8 @@ const DEFAULT_CAMERA_SWITCH_SEC = 30;
 // ── LT103 dual-camera preset (same as groundtruthgen_rtsp) ───────────────────
 //const LT103L_URL = 'rtsp://admin:Admin%401234%23@10.10.177.249:554/video/live?channel=1&subtype=0&rtsp_transport=tcp';
 //const LT103R_URL = 'rtsp://admin:Admin%401234%23@10.10.177.250:554/video/live?channel=1&subtype=0&rtsp_transport=tcp';
-const SLOT_LABELS = {
-  period1: 'Period 1 — 08:30',
-  period2: 'Period 2 — 09:30',
-  period3: 'Period 3 — 10:30',
-  period4: 'Period 4 — 11:30',
-  period5: 'Period 5 — 13:30',
-  period6: 'Period 6 — 14:30',
-  period7: 'Period 7 — 15:30',
-  period8: 'Period 8 — 16:30',
-};
-
 export default function AttendanceReport() {
+  const { slotLabel, slotKeys } = usePeriods();
   const navigate = useNavigate();
   const location = useLocation();
   const [tab, setTab] = useState('run');
@@ -202,7 +193,7 @@ export default function AttendanceReport() {
 
   // ── Timetable auto-lookup when room + slot change ─────────────
   useEffect(() => {
-    if (!room || !slot) {
+    if (!room || !slot || !date) {
       setDerivedCtx(null);
       setTtStatus(null);
       return;
@@ -211,7 +202,9 @@ export default function AttendanceReport() {
     setTtStatus('loading');
     (async () => {
       try {
-        const params = new URLSearchParams({ room, slot });
+        // date matters: the same room+slot holds a different subject each
+        // weekday, and extra classes / alterations are per-date.
+        const params = new URLSearchParams({ room, slot, date });
         const res = await fetch(
           `${apiUrl}/timetablemodule/lock/attendance-lookup?${params}`,
           { signal: ctrl.signal },
@@ -227,7 +220,7 @@ export default function AttendanceReport() {
       }
     })();
     return () => ctrl.abort();
-  }, [room, slot]);
+  }, [room, slot, date]);
 
   // ── Auto-fetch camera RTSPs for the selected room from Camera model ────────
   useEffect(() => {
@@ -882,9 +875,9 @@ export default function AttendanceReport() {
                   style={styles.select}
                 >
                   <option value="">Select slot...</option>
-                  {Object.entries(SLOT_LABELS).map(([val, label]) => (
+                  {slotKeys.map((val) => (
                     <option key={val} value={val}>
-                      {label}
+                      {slotLabel(val)}
                     </option>
                   ))}
                 </select>
@@ -913,7 +906,7 @@ export default function AttendanceReport() {
                   color: theme.accent,
                 }}
               >
-                🔍 Looking up timetable for {room} / {SLOT_LABELS[slot]}…
+                🔍 Looking up timetable for {room} / {slotLabel(slot)}…
               </div>
             )}
             {ttStatus === 'notfound' && (
@@ -949,7 +942,7 @@ export default function AttendanceReport() {
                 }}
               >
                 <span style={{ color: theme.success, fontWeight: 700 }}>
-                  ✓ Timetable matched
+                  ✓ Timetable matched{derivedCtx.day ? ` (${derivedCtx.day})` : ''}
                 </span>
                 {[
                   ['Batch', derivedCtx.batch],
@@ -971,6 +964,24 @@ export default function AttendanceReport() {
                       </span>
                     </span>
                   ))}
+                {derivedCtx.altered && (
+                  <span style={{ color: theme.warning, fontWeight: 600 }}>
+                    ⇄ Altered for this date — originally{' '}
+                    {derivedCtx.originalSubject || '—'} /{' '}
+                    {derivedCtx.originalFaculty || '—'}
+                  </span>
+                )}
+                {derivedCtx.source === 'extraClass' && (
+                  <span style={{ color: theme.warning, fontWeight: 600 }}>
+                    ➕ Extra class (not on the regular timetable)
+                  </span>
+                )}
+                {derivedCtx.ambiguous && (
+                  <span style={{ color: theme.danger, fontWeight: 600 }}>
+                    ⚠ More than one current-session timetable books this room in
+                    this slot — verify the batch before running.
+                  </span>
+                )}
               </div>
             )}
 
@@ -1868,7 +1879,7 @@ export default function AttendanceReport() {
                           <td
                             style={{ padding: '11px 14px', color: theme.textMuted }}
                           >
-                            {SLOT_LABELS[r.timeSlot] || r.timeSlot || '—'}
+                            {r.timeSlot ? slotLabel(r.timeSlot) : '—'}
                           </td>
                           <td style={{ padding: '11px 14px', color: theme.text }}>
                             {r.subject || '—'}
@@ -2046,7 +2057,7 @@ export default function AttendanceReport() {
                         ['Date', detailReport.date],
                         [
                           'Slot',
-                          SLOT_LABELS[detailReport.timeSlot] ||
+                          slotLabel(detailReport.timeSlot) ||
                           detailReport.timeSlot ||
                           '—',
                         ],

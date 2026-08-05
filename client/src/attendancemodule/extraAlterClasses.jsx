@@ -9,12 +9,11 @@
 // source of truth for the add/edit UI.
 
 import { useState, useEffect, useCallback } from 'react';
-import { theme, styles, cssReset } from './config';
+import { theme, styles, cssReset, formatSlotLabel } from './config';
 import BackButton from './BackButton';
 import {
   AC_API,
   CAMERA_API,
-  SLOT_LABELS,
   Toast,
   SectionHead,
   ConflictModal,
@@ -384,7 +383,7 @@ export function ExtraClassPage() {
                       color: theme.textMuted,
                     }}
                   >
-                    {SLOT_LABELS[ec.periodKey] || ec.periodKey}
+                    {formatSlotLabel(ec.periodKey, config?.periods)}
                   </td>
                   <td style={{ padding: '10px 12px', fontWeight: 700 }}>
                     {ec.room}
@@ -611,7 +610,7 @@ export function AlterClassPage() {
                         color: theme.textMuted,
                       }}
                     >
-                      {SLOT_LABELS[ec.periodKey] || ec.periodKey}
+                      {formatSlotLabel(ec.periodKey, config?.periods)}
                     </td>
                     <td style={{ padding: '10px 12px', fontWeight: 700 }}>
                       {ec.room}

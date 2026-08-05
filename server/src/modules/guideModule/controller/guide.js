@@ -474,7 +474,7 @@ const TAB_TIMETABLE = `<h2>Timetable Module — API Reference</h2>
     <tr><td>All rooms (locked timetable)</td><td>GET</td><td><code>/timetablemodule/lock/rooms</code></td></tr>
     <tr><td>Semesters in a locked session by dept</td><td>GET</td><td><code>/timetablemodule/lock/sems-by-dept?dept=CSE</code></td></tr>
     <tr><td>Subjects for dept + sem</td><td>GET</td><td><code>/timetablemodule/lock/subjects-by-dept-sem?dept=CSE&amp;sem=6</code></td></tr>
-    <tr><td>Attendance context (room + slot lookup)</td><td>GET</td><td><code>/timetablemodule/lock/attendance-lookup?room=LT103&amp;slot=8:30-9:30</code></td></tr>
+    <tr><td>Attendance context (room + slot lookup)</td><td>GET</td><td><code>/timetablemodule/lock/attendance-lookup?room=LT103&amp;slot=period1&amp;date=2026-08-05</code></td></tr>
     <tr><td>Locked class timetable</td><td>GET</td><td><code>/timetablemodule/lock/lockclasstt/:code/:sem</code></td></tr>
     <tr><td>Faculty list for a department</td><td>GET</td><td><code>/timetablemodule/faculty/dept/:dept</code></td></tr>
     <tr><td>Subjects for a session + semester</td><td>GET</td><td><code>/timetablemodule/subject/filteredsubject/:code/:sem</code></td></tr>
@@ -517,7 +517,7 @@ const TAB_TIMETABLE = `<h2>Timetable Module — API Reference</h2>
     <tr><td>GET</td><td>/rooms</td><td>—</td><td>Returns array of all unique room names that appear in any locked timetable. Used to populate room dropdowns in attendance.</td></tr>
     <tr><td>GET</td><td>/sems-by-dept</td><td>—</td><td>Query: <code>?dept=CSE</code>. Returns all semester numbers for that department in the locked timetable.</td></tr>
     <tr><td>GET</td><td>/subjects-by-dept-sem</td><td>—</td><td>Query: <code>?dept=CSE&amp;sem=6</code>. Returns list of subjects for that dept + semester from the locked timetable.</td></tr>
-    <tr><td>GET</td><td>/attendance-lookup</td><td>—</td><td>Query: <code>?room=LT103&amp;slot=8:30-9:30</code>. Returns the class scheduled in that room at that slot — batch, subject, faculty, semester. Core of the attendance auto-lookup.</td></tr>
+    <tr><td>GET</td><td>/attendance-lookup</td><td>—</td><td>Query: <code>?room=LT103&amp;slot=period1&amp;date=2026-08-05</code> (date optional, defaults to today). Returns the class scheduled in that room at that slot <em>on that weekday</em>, with any extra class / alteration for the date applied — batch, subject, faculty, semester. Core of the attendance auto-lookup.</td></tr>
     <tr><td>GET</td><td>/lockclasstt/:code/:sem</td><td>—</td><td>Get the full locked class timetable for a session code + semester. Returns a 2D slot grid with faculty and room assignments.</td></tr>
     <tr><td>GET</td><td>/lockfacultytt/:code/:faculty</td><td>—</td><td>Get locked timetable filtered to one faculty member.</td></tr>
     <tr><td>GET</td><td>/lockroomtt/:code/:room</td><td>—</td><td>Get locked timetable filtered to one room.</td></tr>
@@ -652,14 +652,23 @@ GET /api/v1/timetablemodule/lock/lockclasstt/ODD2425_CSE/6
 → { slotGrid: [[...], ...], faculty: [...], rooms: [...] }</code></pre>
 
 <h4>Attendance Auto-Lookup Flow</h4>
-<pre><code># Given a room and time slot, resolve which class is running:
-GET /api/v1/timetablemodule/lock/attendance-lookup?room=LT103&amp;slot=8:30-9:30
+<pre><code># Given a room, time slot and date, resolve which class is running.
+# The date matters: a room hosts a different subject each weekday, and
+# extra classes / alterations are booked per date. Omitting it defaults
+# to today. Same resolver the automatic scheduler uses, so this always
+# shows what a run would actually acquire.
+GET /api/v1/timetablemodule/lock/attendance-lookup?room=LT103&amp;slot=period1&amp;date=2026-08-05
 → {
     batch: "BTECH_CSE_2023",
     subject: "Digital Electronics",
     faculty: "Dr. Sharma",
-    semester: "6",
-    department: "CSE"
+    sem: "6",
+    dept: "CSE",
+    date: "2026-08-05",
+    day: "Wednesday",
+    source: "locksem",      # or "locksem+extraClass" / "extraClass"
+    altered: false,         # true when an alteration replaced the regular class
+    ambiguous: false        # true when >1 current-session timetable claims the slot
   }</code></pre>`;
 
 const DEFAULT_TABS = [
