@@ -371,9 +371,68 @@ function windowState(quiz, now = new Date()) {
 
 /** Whether marks and answers may be shown yet. */
 function resultsVisible(quiz, now = new Date()) {
-  const releaseAt = quiz.settings?.resultReleaseAt;
+  const releaseAt = quiz?.settings?.resultReleaseAt;
   if (!releaseAt) return true;
   return now >= new Date(releaseAt);
+}
+
+/**
+ * Whether a student may see their marks — the question every result path
+ * actually asks, and not the same one as `resultsVisible`.
+ *
+ * Two things hold marks back, and either alone is enough:
+ *
+ *  - `settings.resultReleaseAt`, a moment in the future. Time answers this one.
+ *  - `settings.showScoreImmediately: false`, which the Exam preset sets and
+ *    describes to the teacher as "results held until you release them". It had
+ *    no release step behind it: with no release date set, `resultsVisible` said
+ *    yes, the attempt was reported as not pending, and the score fields were
+ *    dropped anyway — which is what put `undefined/undefined` on the last page
+ *    of every exam. It now means what it says, and `resultsAnnouncedAt` is the
+ *    release it waits for.
+ */
+function resultsReleased(quiz, now = new Date()) {
+  if (!resultsVisible(quiz, now)) return false;
+  if (quiz?.settings?.showScoreImmediately === false) return Boolean(quiz?.resultsAnnouncedAt);
+  return true;
+}
+
+/**
+ * The result clock, as a set of answers rather than one.
+ *
+ * `released` is the gate. The rest is what the screens need to *explain* a
+ * withheld mark: a student told only "not yet" asks staff when, and a teacher
+ * on the results page needs to see the moment they set — and whether it has
+ * been and gone — before deciding to bring it forward.
+ */
+function resultState(quiz, now = new Date()) {
+  const at = quiz?.settings?.resultReleaseAt ? new Date(quiz.settings.resultReleaseAt) : null;
+  const released = resultsReleased(quiz, now);
+  return {
+    released,
+    visible: resultsVisible(quiz, now),
+    releaseAt: at,
+    scheduled: Boolean(at && now < at),
+    // True when nothing but a teacher pressing "release" will produce the
+    // marks — there is no date to wait for, so no date may be quoted.
+    awaitingTeacher: !released && (!at || now >= at),
+    announcedAt: quiz?.resultsAnnouncedAt || null,
+  };
+}
+
+/** The same test as `resultsReleased`, as a Mongo filter. */
+function releasedResultsFilter(now = new Date()) {
+  return {
+    $and: [
+      { $or: [{ 'settings.resultReleaseAt': null }, { 'settings.resultReleaseAt': { $lte: now } }] },
+      {
+        $or: [
+          { 'settings.showScoreImmediately': { $ne: false } },
+          { resultsAnnouncedAt: { $ne: null } },
+        ],
+      },
+    ],
+  };
 }
 
 /**
@@ -499,6 +558,9 @@ module.exports = {
   liveQuizFilter,
   publishState,
   resultsVisible,
+  resultsReleased,
+  resultState,
+  releasedResultsFilter,
   questionDeadline,
   attemptDeadline,
   deadlineState,

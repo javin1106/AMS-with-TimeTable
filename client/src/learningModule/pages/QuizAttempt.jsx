@@ -26,6 +26,7 @@ import QuizReview from '../components/QuizReview';
 import QuizStage from '../components/QuizStage';
 import QuizCalculator from '../components/QuizCalculator';
 import { requestQuizFullscreen, scrollStageToTop } from '../quizStage';
+import { formatDateTime } from '../format';
 
 const clock = (seconds) => {
   const safe = Math.max(0, Math.round(seconds || 0));
@@ -137,6 +138,9 @@ export default function QuizAttempt() {
   const [confirmSubmit, setConfirmSubmit] = useState(false);
   const finishedRef = useRef(false);
   const noticeTimer = useRef(null);
+  // The proctoring hook's queue drain, held in a ref because the paths that bank
+  // work are declared above the hook that owns it. See `finish` and `advance`.
+  const flushRef = useRef(null);
   // Question card nodes, so the navigator can jump straight to one.
   const questionRefs = useRef({});
 
@@ -232,6 +236,12 @@ export default function QuizAttempt() {
   const finish = useCallback(
     async (expired = false) => {
       if (finishedRef.current) return;
+      // Anything queued while the connection was down goes first. If it ends the
+      // attempt, `finishedRef` is already set by the time we look again and this
+      // submit never happens — a student cannot outrun their own report by
+      // submitting the moment they reconnect.
+      await flushRef.current?.();
+      if (finishedRef.current) return;
       finishedRef.current = true;
       setBusy('submit');
       try {
@@ -269,7 +279,8 @@ export default function QuizAttempt() {
   const proctoring = useProctoring({
     settings: settings || {},
     active: sitting,
-    onViolation: (type) => lmApi.recordViolation(classId, attemptId, type),
+    attemptId,
+    onViolation: (type, at) => lmApi.recordViolation(classId, attemptId, type, at),
     onHeartbeat: () => lmApi.heartbeat(classId, attemptId),
     onTerminated: async () => {
       finishedRef.current = true;
@@ -281,6 +292,8 @@ export default function QuizAttempt() {
     },
   });
 
+  flushRef.current = proctoring.flushViolations;
+
   /* ------------------------------ timers ------------------------------- */
 
   const deadline = sequential ? current?.deadline : paper?.deadline;
@@ -288,6 +301,11 @@ export default function QuizAttempt() {
   const advance = useCallback(
     async (direction = 'forward', autoSubmitted = false) => {
       if (!current) return;
+      // Same rule as `finish`: a queued departure is judged before the answer it
+      // might have bought. If it terminates the attempt the answer POST below
+      // returns FINISHED, and `onTerminated` has already swapped in the result.
+      await flushRef.current?.();
+      if (finishedRef.current) return;
       const value = answers[current.question._id] || {};
       setBusy('advance');
       try {
@@ -313,6 +331,18 @@ export default function QuizAttempt() {
         );
         scrollStageToTop();
       } catch (err) {
+        // The server ended the sitting under us — a device change, or a
+        // violation that landed first. Show the result rather than an error on
+        // a paper the student can no longer write on.
+        if (err?.payload?.code === 'TERMINATED' || err?.payload?.code === 'FINISHED') {
+          finishedRef.current = true;
+          const finished = await lmApi.getAttempt(classId, attemptId).catch(() => null);
+          if (finished) {
+            setAttempt(finished.attempt);
+            setResult(finished);
+            return;
+          }
+        }
         notify({ status: 'error', title: err.message });
       } finally {
         setBusy('');
@@ -387,7 +417,28 @@ export default function QuizAttempt() {
 
   let content;
   if (loading) content = <Loading label="Loading your paper…" />;
-  else if (error) content = <ErrorState error={error} onRetry={load} />;
+  else if (error?.payload?.code === 'SESSION_CONFLICT') {
+    /* ---- second screen ----
+       Deliberately not an ErrorState with a Retry button: retrying is exactly
+       what a student trying to open the paper on a second device would do, and
+       the fix is not here — it is on the machine they started on. */
+    content = (
+      <SectionCard title="This test is open somewhere else">
+        <Alert status="error" borderRadius="md" mb={4}>
+          <AlertIcon />
+          <Box>
+            <Text fontWeight="600">Your test is already running in another browser</Text>
+            <Text fontSize="sm">{error.message}</Text>
+          </Box>
+        </Alert>
+        <Text fontSize="sm" color="gray.600">
+          Your clock is still running, and your answers are safe. If the other browser has
+          closed or crashed, wait a couple of minutes and reload this page — it will let you
+          back in once that one has stopped responding.
+        </Text>
+      </SectionCard>
+    );
+  } else if (error) content = <ErrorState error={error} onRetry={load} />;
   else if (finished) {
     /* ---- finished: show the result ---- */
     content = (
@@ -403,29 +454,44 @@ export default function QuizAttempt() {
             </Alert>
           )}
 
+          {/* `pending` and the score fields are decided by one answer on the
+              server, so this branch is the only place a missing score can be
+              rendered. The two used to be judged separately, which is how a
+              submitted exam reported its results as ready and then printed
+              `undefined/undefined` where the marks should have been. */}
           {pending ? (
             <Alert status="info" borderRadius="md">
               <AlertIcon />
-              Your answers are saved. Results will be released by your teacher.
+              <Box>
+                <Text fontWeight="600">Your answers are saved</Text>
+                <Text fontSize="sm">
+                  {attempt.resultReleaseAt
+                    ? `Results for the whole class are announced on ${formatDateTime(attempt.resultReleaseAt)}. You will be notified, and the subject will be marked on your dashboard.`
+                    : 'Your teacher releases the results for the whole class together. You will be notified when they do.'}
+                </Text>
+              </Box>
             </Alert>
           ) : (
             <>
               <Flex gap={3} wrap="wrap" mb={4}>
-                <StatTile label="Score" value={`${attempt.score}/${attempt.maxScore}`} />
+                {/* `?? '—'` rather than trusting the payload: a mark that is
+                    genuinely missing should read as missing, not as the word
+                    "undefined" printed where a student's score belongs. */}
+                <StatTile label="Score" value={`${attempt.score ?? '—'}/${attempt.maxScore ?? '—'}`} />
                 <StatTile
                   label="Percent"
-                  value={`${attempt.percent}%`}
+                  value={attempt.percent === undefined ? '—' : `${attempt.percent}%`}
                   accent={attempt.passed ? 'green.500' : 'red.500'}
                 />
-                <StatTile label="Correct" value={attempt.totalCorrect} accent="green.500" />
-                <StatTile label="Wrong" value={attempt.totalWrong} accent="red.500" />
-                <StatTile label="Unattempted" value={attempt.totalUnattempted} accent="gray.500" />
+                <StatTile label="Correct" value={attempt.totalCorrect ?? '—'} accent="green.500" />
+                <StatTile label="Wrong" value={attempt.totalWrong ?? '—'} accent="red.500" />
+                <StatTile label="Unattempted" value={attempt.totalUnattempted ?? '—'} accent="gray.500" />
                 {attempt.negativeApplied > 0 && (
                   <StatTile label="Negative" value={`−${attempt.negativeApplied}`} accent="red.500" />
                 )}
               </Flex>
               <Progress
-                value={attempt.percent}
+                value={attempt.percent || 0}
                 colorScheme={attempt.passed ? 'green' : 'red'}
                 borderRadius="full"
                 mb={4}

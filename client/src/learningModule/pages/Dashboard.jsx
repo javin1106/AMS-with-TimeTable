@@ -119,6 +119,17 @@ function ClassCard({ klass, onOpen }) {
           </Flex>
         )}
 
+        {/* Quiz marks released and not yet read. Deliberately on the subject
+            card rather than only in the notification bell: a student who was in
+            a lecture when the announcement went out has a read bell and no idea
+            their marks are waiting. It clears itself the moment they open the
+            result — see quizController.getAttempt. */}
+        {!isTeacher && klass.myNewResults > 0 && (
+          <Badge mt={3} colorScheme="green" borderRadius="full" px={2}>
+            🎯 {klass.myNewResults} quiz result{klass.myNewResults === 1 ? '' : 's'} announced
+          </Badge>
+        )}
+
         {klass.myStatus === 'pending' && (
           <Badge mt={3} colorScheme="orange">
             Waiting for approval

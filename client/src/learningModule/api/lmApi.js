@@ -46,6 +46,50 @@ export const shortGuest = {
   },
 };
 
+/**
+ * The token naming this browser as the one sitting a given quiz attempt.
+ *
+ * Minted server-side when the attempt starts and echoed on every request that
+ * drives the sitting, so the server can tell one student's two screens apart —
+ * the phone reading the paper beside the laptop breaks no browser-side rule, and
+ * this is the only angle from which it is visible at all.
+ *
+ * sessionStorage, so it belongs to this tab: a reload keeps it and carries on,
+ * while a genuinely new browser has to earn the binding through the server's
+ * rule (allowed only once the first has stopped checking in). Keyed by attempt
+ * so two quizzes in two tabs do not overwrite each other.
+ */
+const QUIZ_SESSION_KEY = (attemptId) => `lmQuizSession:${attemptId}`;
+
+export const quizSession = {
+  save: (attemptId, token) => {
+    if (!attemptId || !token) return;
+    try {
+      sessionStorage.setItem(QUIZ_SESSION_KEY(attemptId), token);
+    } catch {
+      // Without storage the sitting still works; it just cannot prove it is the
+      // same browser after a reload, and rebinds once the old one goes quiet.
+    }
+  },
+  token: (attemptId) => {
+    try {
+      return sessionStorage.getItem(QUIZ_SESSION_KEY(attemptId)) || null;
+    } catch {
+      return null;
+    }
+  },
+  clear: (attemptId) => {
+    try {
+      sessionStorage.removeItem(QUIZ_SESSION_KEY(attemptId));
+    } catch {
+      /* nothing to clear */
+    }
+  },
+};
+
+/** `/classes/:classId/attempts/:attemptId/...` → the attempt id, or null. */
+const attemptIdIn = (path) => path.match(/\/attempts\/([a-f\d]{24})(?:\/|$)/i)?.[1] || null;
+
 async function request(path, { method = 'GET', body, raw = false, signal } = {}) {
   const options = {
     method,
@@ -61,6 +105,12 @@ async function request(path, { method = 'GET', body, raw = false, signal } = {})
   // token is resolved by their account, and the server ignores the header.
   const guestToken = shortGuest.token();
   if (guestToken) options.headers['X-Short-Guest'] = guestToken;
+
+  // Attached by path rather than by each call site, so a sitting endpoint added
+  // later cannot forget it and silently reopen the second-screen hole.
+  const attemptId = attemptIdIn(path);
+  const sessionToken = attemptId && quizSession.token(attemptId);
+  if (sessionToken) options.headers['X-Quiz-Session'] = sessionToken;
 
   if (body instanceof FormData) {
     // Let the browser set the multipart boundary.
@@ -216,6 +266,19 @@ const lmApi = {
   bulkGrade: (classId, grades) => request(`/classes/${classId}/gradebook/bulk`, { method: 'POST', body: { grades } }),
   gradebookCsvUrl: (classId) => `${BASE()}/classes/${classId}/gradebook.csv`,
 
+  /* reusing questions from another class the same teacher staffs. `type` is one
+     of quiz | short | tutorial | notebook, and never crosses: quiz questions go
+     into a quiz, slides into a Short. */
+  importSources: (classId, type) =>
+    request(`/classes/${classId}/import/sources?type=${encodeURIComponent(type)}`),
+  importItems: (classId, sourceClassId, type) =>
+    request(`/classes/${classId}/import/sources/${sourceClassId}/items?type=${encodeURIComponent(type)}`),
+  importParts: (classId, itemId, type) =>
+    request(`/classes/${classId}/import/items/${itemId}/parts?type=${encodeURIComponent(type)}`),
+  importTargets: (classId, type) =>
+    request(`/classes/${classId}/import/targets?type=${encodeURIComponent(type)}`),
+  importInto: (classId, body) => request(`/classes/${classId}/import`, { method: 'POST', body }),
+
   /* quizzes */
   listQuizzes: (classId) => request(`/classes/${classId}/quizzes`),
   createQuiz: (classId, body) => request(`/classes/${classId}/quizzes`, { method: 'POST', body }),
@@ -233,16 +296,31 @@ const lmApi = {
 
   /* quiz sitting */
   quizBrief: (classId, quizId) => request(`/classes/${classId}/quizzes/${quizId}/brief`),
-  startAttempt: (classId, quizId) =>
-    request(`/classes/${classId}/quizzes/${quizId}/attempts`, { method: 'POST', body: {} }),
+  // The only call that mints a session token, so it is also the only one that
+  // stores it. Everything else on the attempt picks it up from `request`.
+  startAttempt: async (classId, quizId) => {
+    const result = await request(`/classes/${classId}/quizzes/${quizId}/attempts`, {
+      method: 'POST',
+      body: {},
+    });
+    quizSession.save(result?.attempt?._id, result?.sessionToken);
+    return result;
+  },
   getAttemptPaper: (classId, attemptId) => request(`/classes/${classId}/attempts/${attemptId}/paper`),
   getCurrentQuestion: (classId, attemptId) => request(`/classes/${classId}/attempts/${attemptId}/current`),
   answerAndAdvance: (classId, attemptId, body) =>
     request(`/classes/${classId}/attempts/${attemptId}/answer`, { method: 'POST', body }),
   saveAttemptDraft: (classId, attemptId, answers) =>
     request(`/classes/${classId}/attempts/${attemptId}/save`, { method: 'POST', body: { answers } }),
-  recordViolation: (classId, attemptId, type) =>
-    request(`/classes/${classId}/attempts/${attemptId}/violation`, { method: 'POST', body: { type } }),
+  // `at` is when the event happened, which is not always when it is sent: a
+  // report that failed offline is queued and replayed, and the server judges it
+  // by this timestamp rather than by its arrival. Clamped server-side, so a
+  // hand-written one buys nothing.
+  recordViolation: (classId, attemptId, type, at) =>
+    request(`/classes/${classId}/attempts/${attemptId}/violation`, {
+      method: 'POST',
+      body: at ? { type, at } : { type },
+    }),
   // Sent on a timer while a paper is open. Its absence is the signal — a client
   // that has had its reporting blocked stops sending these, and the server notes
   // the silence.
@@ -274,6 +352,10 @@ const lmApi = {
   // Re-mark every finished sitting against the answer key as it stands now.
   regradeQuiz: (classId, quizId) =>
     request(`/classes/${classId}/quizzes/${quizId}/regrade`, { method: 'POST', body: {} }),
+  // Marks out now, whatever the schedule said, and every student who sat the
+  // paper is notified.
+  releaseQuizResults: (classId, quizId) =>
+    request(`/classes/${classId}/quizzes/${quizId}/release-results`, { method: 'POST', body: {} }),
 
   /* parameterised tutorials */
   listTutorials: (classId) => request(`/classes/${classId}/tutorials`),

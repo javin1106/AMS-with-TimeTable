@@ -33,6 +33,7 @@ import lmApi from '../api/lmApi';
 import { ErrorState, Loading, SectionCard } from '../components/common';
 import RichTextEditor from '../components/RichTextEditor';
 import { isRichTextEmpty } from '../richTextUtils';
+import ImportQuestionsModal from '../components/ImportQuestionsModal';
 
 /**
  * Authoring surface for a Short.
@@ -579,6 +580,7 @@ export default function ShortEditor() {
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [serverProblems, setServerProblems] = useState([]);
+  const [importing, setImporting] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -611,10 +613,11 @@ export default function ShortEditor() {
       return next;
     });
 
+  /** @returns {Promise<boolean>} whether the deck actually reached the server. */
   const save = async ({ thenPresent = false } = {}) => {
     if (problems.length) {
       toast({ status: 'warning', title: problems[0] });
-      return;
+      return false;
     }
     setSaving(true);
     setServerProblems([]);
@@ -637,12 +640,14 @@ export default function ShortEditor() {
       if (thenPresent) {
         const { session } = await lmApi.presentShort(classId, shortId);
         navigate(`/learning/class/${classId}/short/${shortId}/present/${session.sessionId}`);
-        return;
+        return true;
       }
       await load();
+      return true;
     } catch (err) {
       setServerProblems(err.payload?.errors || [err.message]);
       toast({ status: 'error', title: err.message });
+      return false;
     } finally {
       setSaving(false);
     }
@@ -776,7 +781,31 @@ export default function ShortEditor() {
             + {type.label}
           </Button>
         ))}
+        {/* Save first: the import appends to the stored deck and this page
+            reloads it afterwards, so unsaved slides would go with the reload. */}
+        <Button
+          size="sm"
+          variant="outline"
+          colorScheme="blue"
+          isLoading={saving}
+          onClick={async () => {
+            if (!(await save())) return;
+            setImporting(true);
+          }}
+        >
+          📥 Import slides
+        </Button>
       </HStack>
+
+      <ImportQuestionsModal
+        isOpen={importing}
+        onClose={() => setImporting(false)}
+        classId={classId}
+        type="short"
+        targetId={shortId}
+        partLabel="slides"
+        onImported={load}
+      />
     </VStack>
   );
 }
