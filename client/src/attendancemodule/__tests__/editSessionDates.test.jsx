@@ -50,6 +50,19 @@ describe('EditSessionDates', () => {
     renderWithProviders(<EditSessionDates />);
     expect(await screen.findByText('Batch Management')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Session Dates' })).toHaveClass('active');
+    expect(screen.getByRole('button', { name: 'Other Controls' })).toBeInTheDocument();
+  });
+
+  it('does not expose the controls page to a platform admin without iams-admin', async () => {
+    global.fetch = vi.fn((url) => {
+      if (String(url).includes('/user/getuser')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ user: { role: ['admin'] } }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+    renderWithProviders(<EditSessionDates />);
+    expect(await screen.findByText(/Only accounts holding/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Other Controls' })).not.toBeInTheDocument();
   });
 
   it('switching to the Email Notifications tab mounts NotificationSettingsTab and fetches its settings', async () => {

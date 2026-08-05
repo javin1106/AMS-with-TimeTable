@@ -15,6 +15,8 @@ import ProxyModal from './ProxyModal';
 
 const apiUrl = getEnvironment();
 const REPORT_API = `${apiUrl}/attendancemodule/reports`;
+const REPORT_DELETE_SETTINGS_API = `${apiUrl}/attendancemodule/settings/report-deletion`;
+const USER_API = `${apiUrl}/user/getuser`;
 const ML_API = `${apiUrl}/ml`;
 const OTHER_CONTROLS_API = `${apiUrl}/attendancemodule/settings/other-controls`;
 const pct = (a, b) => (b > 0 ? Math.round((a / b) * 100) : 0);
@@ -62,10 +64,9 @@ export default function AttendanceReport() {
   const [rtspUrl2, setRtspUrl2] = useState('');
   const [checkIntervalMin, setCheckIntervalMin] = useState(5);
 
-  // ── Room list from DB ─────────────────────────────────────────
+  // ── Room list from DB (only rooms that have cameras registered) ──
   const [rooms, setRooms] = useState([]);
-  const [roomSearch, setRoomSearch] = useState('');
-  const [showRoomDrop, setShowRoomDrop] = useState(false);
+  const [roomsLoading, setRoomsLoading] = useState(true);
 
   // ── Timetable auto-lookup state ───────────────────────────────
   const [ttStatus, setTtStatus] = useState(null); // null | 'loading' | 'found' | 'notfound'
@@ -157,6 +158,8 @@ export default function AttendanceReport() {
   const [filterDate, setFilterDate] = useState('');
   const [availableSems, setAvailableSems] = useState([]);
   const [semsLoading, setSemsLoading] = useState(false);
+  const [canDeleteReports, setCanDeleteReports] = useState(false);
+  const [deletingReportId, setDeletingReportId] = useState(null);
 
   // ── Detail ────────────────────────────────────────────────────
   const [detailReport, setDetailReport] = useState(null);
@@ -179,14 +182,19 @@ export default function AttendanceReport() {
   };
 
   // ── Fetch room list from DB on mount ──────────────────────────
+  // Only rooms that already have a camera registered are shown
+  // (Camera registry → distinct roomId).
   useEffect(() => {
     (async () => {
+      setRoomsLoading(true);
       try {
-        const res = await fetch(`${apiUrl}/timetablemodule/lock/rooms`);
+        const res = await fetch(`${apiUrl}/attendancemodule/cameras/rooms`);
         const data = await res.json();
         setRooms(data.rooms || []);
       } catch {
         /* silently ignore */
+      } finally {
+        setRoomsLoading(false);
       }
     })();
   }, []);
@@ -324,6 +332,40 @@ export default function AttendanceReport() {
   useEffect(() => {
     if (tab === 'history') fetchReports();
   }, [tab, fetchReports]);
+
+  // Platform admins and iams-admin have deletion access by default. The
+  // platform-admin setting only opts iams-dept-admin into the action; the
+  // backend independently enforces the same role and department rules.
+  useEffect(() => {
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const userResponse = await fetch(USER_API, {
+          credentials: 'include',
+          signal: controller.signal,
+        });
+        if (!userResponse.ok) return;
+        const userData = await userResponse.json();
+        const roles = Array.isArray(userData?.user?.role) ? userData.user.role : [];
+        if (roles.includes('admin') || roles.includes('iams-admin')) {
+          setCanDeleteReports(true);
+          return;
+        }
+        if (!roles.includes('iams-dept-admin')) return;
+
+        const settingsResponse = await fetch(REPORT_DELETE_SETTINGS_API, {
+          credentials: 'include',
+          signal: controller.signal,
+        });
+        if (!settingsResponse.ok) return;
+        const settings = await settingsResponse.json();
+        setCanDeleteReports(settings.enabled === true);
+      } catch (error) {
+        if (error.name !== 'AbortError') setCanDeleteReports(false);
+      }
+    })();
+    return () => controller.abort();
+  }, []);
 
   // ── Auto-poll detail report when session is live ──────────────
   useEffect(() => {
@@ -679,20 +721,24 @@ export default function AttendanceReport() {
   };
 
   const deleteReport = async (id) => {
-    if (!window.confirm('Delete this draft?')) return;
+    if (!window.confirm(
+      'Permanently delete this attendance report and its associated data? This cannot be undone.',
+    )) return;
+    setDeletingReportId(id);
     try {
-      const data = await (
-        await fetch(`${REPORT_API}/${id}`, { method: 'DELETE' })
-      ).json();
-      if (data.error) {
-        showToast(data.error, 'error');
-        return;
-      }
-      showToast('Deleted');
-      setTab('history');
-      fetchReports();
-    } catch {
-      showToast('Delete failed', 'error');
+      const response = await fetch(`${REPORT_API}/${id}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Delete failed');
+      setReports((current) => current.filter((report) => report._id !== id));
+      if (detailReport?._id === id) setDetailReport(null);
+      showToast('Attendance report deleted');
+    } catch (error) {
+      showToast(error.message || 'Delete failed', 'error');
+    } finally {
+      setDeletingReportId(null);
     }
   };
 
@@ -787,83 +833,33 @@ export default function AttendanceReport() {
                 marginBottom: 14,
               }}
             >
-              <div style={{ position: 'relative' }}>
+              <div>
                 <label style={styles.label}>Room No</label>
-                <input
-                  placeholder="Search room..."
-                  value={showRoomDrop ? roomSearch : room}
-                  onChange={(e) => {
-                    setRoomSearch(e.target.value);
-                    setShowRoomDrop(true);
-                  }}
-                  onFocus={() => {
-                    setRoomSearch('');
-                    setShowRoomDrop(true);
-                  }}
-                  onBlur={() => setTimeout(() => setShowRoomDrop(false), 150)}
-                  style={styles.input}
-                />
-                {showRoomDrop && (
+                <select
+                  value={room}
+                  onChange={(e) => setRoom(e.target.value)}
+                  style={styles.select}
+                  disabled={roomsLoading}
+                >
+                  <option value="">
+                    {roomsLoading ? 'Loading rooms with cameras...' : 'Select room with camera...'}
+                  </option>
+                  {rooms.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+                {!roomsLoading && rooms.length === 0 && (
                   <div
                     style={{
-                      position: 'absolute',
-                      top: '100%',
-                      left: 0,
-                      right: 0,
-                      background: '#ffffff',
-                      border: `1px solid ${theme.border}`,
-                      borderRadius: '8px',
-                      zIndex: 100,
-                      maxHeight: 220,
-                      overflowY: 'auto',
-                      boxShadow: '0 8px 24px rgba(26,31,60,0.12)',
+                      marginTop: 6,
+                      fontSize: '11px',
+                      color: theme.danger,
                     }}
                   >
-                    {rooms
-                      .filter((r) =>
-                        r.toLowerCase().includes(roomSearch.toLowerCase()),
-                      )
-                      .map((r) => (
-                        <div
-                          key={r}
-                          onMouseDown={() => {
-                            setRoom(r);
-                            setRoomSearch('');
-                            setShowRoomDrop(false);
-                          }}
-                          style={{
-                            padding: '9px 14px',
-                            cursor: 'pointer',
-                            fontSize: '13px',
-                            color: theme.text,
-                            borderBottom: `1px solid ${theme.border}`,
-                            background:
-                              r === room ? theme.accentDim : 'transparent',
-                          }}
-                          onMouseEnter={(e) =>
-                            (e.currentTarget.style.background = theme.accentDim)
-                          }
-                          onMouseLeave={(e) =>
-                          (e.currentTarget.style.background =
-                            r === room ? theme.accentDim : 'transparent')
-                          }
-                        >
-                          {r}
-                        </div>
-                      ))}
-                    {rooms.filter((r) =>
-                      r.toLowerCase().includes(roomSearch.toLowerCase()),
-                    ).length === 0 && (
-                        <div
-                          style={{
-                            padding: '9px 14px',
-                            color: theme.textMuted,
-                            fontSize: '12px',
-                          }}
-                        >
-                          No rooms match &quot;{roomSearch}&quot;
-                        </div>
-                      )}
+                    No cameras registered for any room. Add a camera in the
+                    Camera Registry first.
                   </div>
                 )}
               </div>
@@ -1849,7 +1845,7 @@ export default function AttendanceReport() {
                           'A',
                           '%',
                           'Status',
-                          '',
+                          'Action',
                         ].map((h) => (
                           <th key={h}>{h}</th>
                         ))}
@@ -1930,11 +1926,38 @@ export default function AttendanceReport() {
                           <td
                             style={{
                               padding: '11px 14px',
-                              color: theme.accent,
                               fontSize: '12px',
                             }}
+                            onClick={(event) => event.stopPropagation()}
                           >
-                            View
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <button
+                                type="button"
+                                onClick={() => openDetail(r._id)}
+                                style={{
+                                  ...styles.btnGhost,
+                                  padding: '6px 10px',
+                                  fontSize: 11,
+                                }}
+                              >
+                                View
+                              </button>
+                              {canDeleteReports && (
+                                <button
+                                  type="button"
+                                  onClick={() => deleteReport(r._id)}
+                                  disabled={deletingReportId === r._id}
+                                  style={{
+                                    ...styles.btnDanger,
+                                    padding: '6px 10px',
+                                    fontSize: 11,
+                                    opacity: deletingReportId === r._id ? 0.6 : 1,
+                                  }}
+                                >
+                                  {deletingReportId === r._id ? 'Deleting…' : 'Delete'}
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))}

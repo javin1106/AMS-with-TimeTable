@@ -1,5 +1,5 @@
 const fs = require('fs');
-const fsPromises = require('fs').promises;
+const fsPromises = fs.promises;
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const Student = require('../../../models/student');
@@ -167,4 +167,37 @@ async function processUnknownFaces(unmatchedClusters, config, reportId) {
     }
 }
 
-module.exports = { saveUnknownFaces };
+async function deleteUnknownFacesForReport(reportId, rootDirectory = UNKNOWN_FACES_DIR) {
+    const targetId = String(reportId || '').trim();
+    if (!targetId || !fs.existsSync(rootDirectory)) {
+        return { clustersDeleted: 0 };
+    }
+
+    const metadataFiles = [];
+    async function walk(directory) {
+        const entries = await fsPromises.readdir(directory, { withFileTypes: true });
+        for (const entry of entries) {
+            const entryPath = path.join(directory, entry.name);
+            if (entry.isDirectory()) await walk(entryPath);
+            else if (entry.isFile() && entry.name === 'metadata.json') metadataFiles.push(entryPath);
+        }
+    }
+
+    await walk(rootDirectory);
+
+    let clustersDeleted = 0;
+    for (const metadataPath of metadataFiles) {
+        try {
+            const metadata = JSON.parse(await fsPromises.readFile(metadataPath, 'utf8'));
+            if (String(metadata.sessionId || '') !== targetId) continue;
+            await fsPromises.rm(path.dirname(metadataPath), { recursive: true, force: true });
+            clustersDeleted += 1;
+        } catch (error) {
+            console.error(`[UnknownFaceWriter] Failed to inspect ${metadataPath}: ${error.message}`);
+        }
+    }
+
+    return { clustersDeleted };
+}
+
+module.exports = { saveUnknownFaces, deleteUnknownFacesForReport };
