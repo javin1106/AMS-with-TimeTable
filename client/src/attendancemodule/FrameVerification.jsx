@@ -5,7 +5,7 @@ import { usePeriods } from './usePeriods';
 import getEnvironment from '../getenvironment';
 
 const apiUrl = getEnvironment();
-const ROOMS_API = `${apiUrl}/timetablemodule/lock/rooms`;
+const CAMERA_ROOMS_API = `${apiUrl}/attendancemodule/cameras/rooms`;
 const MASTERROOM_API = `${apiUrl}/timetablemodule/masterroom`;
 const VERIFY_API = `${apiUrl}/attendancemodule/frame-verification`;
 const CLASS_INFO_API = `${apiUrl}/timetablemodule/lock/attendance-lookup`;
@@ -75,6 +75,7 @@ export default function FrameVerification({ fixedDepartment = '' }) {
     // pre-fills the selectors so the linked folder loads without manual clicks.
     const [searchParams] = useSearchParams();
     const [rooms, setRooms] = useState([]);
+    const [roomsLoading, setRoomsLoading] = useState(true);
     const [room, setRoom] = useState(() => searchParams.get('room') || '');
     const [availableDates, setAvailableDates] = useState([]);
     const [availablePeriods, setAvailablePeriods] = useState([]);
@@ -103,14 +104,17 @@ export default function FrameVerification({ fixedDepartment = '' }) {
         let cancelled = false;
 
         (async () => {
+            setRoomsLoading(true);
             try {
-                const res = await fetch(ROOMS_API);
+                // Only rooms that already have a camera registered are shown
+                // (Camera registry → distinct roomId).
+                const res = await fetch(CAMERA_ROOMS_API);
                 const data = await res.json();
                 let allRooms = Array.isArray(data.rooms) ? data.rooms : [];
 
                 if (fixedDepartment) {
                     // Dept-admin: only show rooms belonging to their department.
-                    // Intersect the locked-timetable room list with the dept's
+                    // Intersect the camera-registered room list with the dept's
                     // master room list so we never show a room outside scope.
                     try {
                         const deptRes  = await fetch(`${MASTERROOM_API}/dept/${encodeURIComponent(fixedDepartment)}`);
@@ -134,6 +138,8 @@ export default function FrameVerification({ fixedDepartment = '' }) {
                 if (!cancelled) {
                     setRooms([]);
                 }
+            } finally {
+                if (!cancelled) setRoomsLoading(false);
             }
         })();
 
@@ -471,12 +477,19 @@ export default function FrameVerification({ fixedDepartment = '' }) {
                         }}>
                             <div>
                                 <label style={styles.label}>Room</label>
-                                <select value={room} onChange={(e) => setRoom(e.target.value)} style={styles.select}>
-                                    <option value="">Select room</option>
+                                <select value={room} onChange={(e) => setRoom(e.target.value)} style={styles.select} disabled={roomsLoading}>
+                                    <option value="">
+                                        {roomsLoading ? 'Loading rooms with cameras...' : 'Select room'}
+                                    </option>
                                     {rooms.map((roomName) => (
                                         <option key={roomName} value={roomName}>{roomName}</option>
                                     ))}
                                 </select>
+                                {!roomsLoading && rooms.length === 0 && (
+                                    <div style={{ marginTop: 6, fontSize: '11px', color: theme.danger }}>
+                                        No cameras registered for any room. Add a camera in the Camera Registry first.
+                                    </div>
+                                )}
                             </div>
 
                             <div>
