@@ -104,6 +104,14 @@ const TEACHER_ONLY = [
   // Correcting the answer key of a paper already sat, and re-marking the cohort.
   `PATCH ${C}/quizzes/:quizId/answer-key`,
   `POST ${C}/quizzes/:quizId/regrade`,
+  // Announcing the marks to the class — the moment a cohort's results go out.
+  `POST ${C}/quizzes/:quizId/release-results`,
+  // Copying questions out of another class the same teacher staffs.
+  `GET ${C}/import/sources`,
+  `GET ${C}/import/sources/:sourceClassId/items`,
+  `GET ${C}/import/items/:itemId/parts`,
+  `GET ${C}/import/targets`,
+  `POST ${C}/import`,
   `GET ${C}/quizzes/:quizId/results`,
   `GET ${C}/quizzes/:quizId/results.csv`,
 

@@ -14,6 +14,7 @@ const TYPE_ICONS = {
   invite: '✉️',
   join_request: '🙋',
   quiz: '🧠',
+  quiz_result: '🎯',
   material: '📚',
   feedback: '🕊️',
 };

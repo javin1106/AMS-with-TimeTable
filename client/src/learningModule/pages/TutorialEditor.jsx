@@ -34,6 +34,7 @@ import lmApi from '../api/lmApi';
 import { ErrorState, Loading, SectionCard } from '../components/common';
 import RichText from '../components/RichText';
 import RichTextEditor from '../components/RichTextEditor';
+import ImportQuestionsModal from '../components/ImportQuestionsModal';
 
 const BLANK_VARIABLE = { name: '', type: 'range', min: 1, max: 10, step: 0, decimals: 2, values: [], unit: '' };
 const BLANK_ANSWER = { key: '', label: '', formula: '', unit: '', tolerancePercent: 1, toleranceAbs: 0, marks: 1 };
@@ -506,6 +507,7 @@ export default function TutorialEditor() {
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [reference, setReference] = useState(null);
+  const [importing, setImporting] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -716,13 +718,36 @@ export default function TutorialEditor() {
         />
       ))}
 
-      <Button
-        variant="outline"
-        mb={5}
-        onClick={() => update({ questions: [...tutorial.questions, JSON.parse(JSON.stringify(BLANK_QUESTION))] })}
-      >
-        + Add question
-      </Button>
+      <Flex gap={2} mb={5} wrap="wrap">
+        <Button
+          variant="outline"
+          onClick={() => update({ questions: [...tutorial.questions, JSON.parse(JSON.stringify(BLANK_QUESTION))] })}
+        >
+          + Add question
+        </Button>
+        {/* Save first: the import appends to the stored tutorial and this page
+            reloads it afterwards, so unsaved edits would go with the reload. */}
+        <Button
+          variant="outline"
+          isLoading={saving}
+          onClick={async () => {
+            if (!(await save())) return;
+            setImporting(true);
+          }}
+        >
+          📥 Import questions
+        </Button>
+      </Flex>
+
+      <ImportQuestionsModal
+        isOpen={importing}
+        onClose={() => setImporting(false)}
+        classId={classId}
+        type="tutorial"
+        targetId={tutorialId}
+        partLabel="questions"
+        onImported={load}
+      />
 
       <PreviewPanel classId={classId} tutorialId={tutorialId} dirty={dirty} />
     </Box>

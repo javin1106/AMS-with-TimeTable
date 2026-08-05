@@ -1,5 +1,7 @@
+const crypto = require("node:crypto");
 const LmQuiz = require("../models/lmQuiz");
 const LmQuizAttempt = require("../models/lmQuizAttempt");
+const LmClass = require("../models/lmClass");
 const LmCoursework = require("../models/lmCoursework");
 const LmSubmission = require("../models/lmSubmission");
 const LmMembership = require("../models/lmMembership");
@@ -56,21 +58,51 @@ const paperHeader = (klass, quiz) => ({
   facultyName: klass.ownerName || quiz?.createdByName || "",
 });
 
-/** Answer key stripped. Applied to every student-facing read of a quiz. */
-const forStudent = (quiz) => ({
-  ...quiz,
-  questions: (quiz.questions || []).map((question) => engine.questionForStudent(question, null)),
-});
+/**
+ * A quiz as a student may read it *outside* a sitting: everything about the
+ * paper except the paper.
+ *
+ * The questions are not merely stripped of their answer key here — they are not
+ * sent at all. Handing over the question list was the single largest hole in the
+ * whole module, and it undid two separate defences at once:
+ *
+ *  - **One-at-a-time delivery became decoration.** The cursor, the per-question
+ *    clock and the late-answer check are all server-side and all correct, and a
+ *    student could read the entire paper off this endpoint while sitting on
+ *    question one.
+ *  - **The paper was readable before it was sat.** This route needs no attempt,
+ *    so during a multi-day window it returned the questions on the first day to
+ *    anybody who could see the quiz existed.
+ *
+ * Questions now come from exactly two places, both of which require an open
+ * attempt belonging to the caller: `getAttemptPaper` and `getCurrentQuestion`.
+ * `questionCount` is kept because the pre-test screen legitimately says how long
+ * the paper is.
+ */
+const forStudent = (quiz) => {
+  const { questions, ...rest } = quiz;
+  return { ...rest, questionCount: (questions || []).length };
+};
 
 const optionOrderOf = (attempt) =>
   attempt.optionOrder instanceof Map
     ? Object.fromEntries(attempt.optionOrder)
     : attempt.optionOrder || {};
 
-/** Everything a student may see about their own attempt. */
+/**
+ * Everything a student may see about their own attempt.
+ *
+ * The score fields travel together with `resultsPending`, and both are decided
+ * by the one predicate: either the marks are released and every field is here,
+ * or they are withheld and none of them is. They used to be governed by two
+ * different tests — `resultsVisible` for the flag, `showScoreImmediately` for
+ * the fields — so an exam paper reported "results are out" and then sent no
+ * numbers, and the result screen rendered `undefined/undefined`.
+ */
 const attemptForStudent = (attempt, quiz, now = new Date()) => {
-  const reveal = attempt.status !== "in_progress" && engine.resultsVisible(quiz, now);
-  const showScore = reveal && quiz.settings?.showScoreImmediately !== false;
+  const finished = attempt.status !== "in_progress";
+  const released = engine.resultState(quiz, now);
+  const showScore = finished && released.released;
 
   return {
     _id: attempt._id,
@@ -83,7 +115,13 @@ const attemptForStudent = (attempt, quiz, now = new Date()) => {
     totalQuestions: (attempt.questionOrder || []).length,
     tabSwitches: attempt.tabSwitches,
     terminationReason: attempt.terminationReason,
-    resultsPending: attempt.status !== "in_progress" && !reveal,
+    resultsPending: finished && !released.released,
+    // So a waiting student is told *when*, or told there is no date to wait
+    // for, rather than only "not yet" — the shape that sends them to the
+    // faculty to ask.
+    resultReleaseAt: released.releaseAt,
+    resultsAwaitingTeacher: finished && !released.released && released.awaitingTeacher,
+    resultViewedAt: attempt.resultViewedAt || null,
     ...(showScore
       ? {
           score: attempt.score,
@@ -221,14 +259,19 @@ exports.listQuizzes = async (req, res) => {
     classId: req.lmClass._id,
     studentId: req.lmUser.id,
   })
-    .select("quizId status score maxScore percent passed attemptNumber submittedAt")
+    .select("quizId status score maxScore percent passed attemptNumber submittedAt resultViewedAt")
     .lean();
 
   return res.json(
     quizzes.map((quiz) => {
       const mine = myAttempts.filter((attempt) => String(attempt.quizId) === String(quiz._id));
       const best = mine.reduce((top, attempt) => (!top || attempt.percent > top.percent ? attempt : top), null);
-      const visible = engine.resultsVisible(quiz, now);
+      const results = engine.resultState(quiz, now);
+      const visible = results.released;
+      // Announced but not yet read by this student — what puts the marker on
+      // the quiz row and on the class card, and what clears when they open it.
+      const unread =
+        visible && mine.some((attempt) => attempt.submittedAt && !attempt.resultViewedAt);
       // Deliberately outside the `visible` gate below. When a student finished
       // is not a mark and does not leak one — withholding it while withholding
       // the score just leaves them unsure whether the submission registered at
@@ -250,6 +293,15 @@ exports.listQuizzes = async (req, res) => {
         attemptsUsed: mine.length,
         bestAttempt: visible ? best : null,
         resultsPending: Boolean(best && !visible),
+        resultsUnread: Boolean(unread),
+        resultReleaseAt: results.releaseAt,
+        // The sitting to open when the student asks to review — their latest,
+        // which is the one the announcement is about. Without it the "Review"
+        // button has nowhere to go but the brief, which never shows a mark.
+        lastAttemptId:
+          mine
+            .filter((attempt) => attempt.submittedAt)
+            .sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt))[0]?._id || null,
         window: engine.windowState(quiz, now),
         estimatedDurationSec: engine.estimatedDurationSec(quiz),
       };
@@ -491,14 +543,19 @@ exports.publishQuiz = async (req, res) => {
     return res.json({ published: false });
   }
 
-  // The three clocks, set together because only together do they make sense.
+  // The clocks, set together because only together do they make sense.
   // `publishAt` decides when the link answers; `availableFrom` when the Start
   // button unlocks behind it; `startDeadline` when it locks again for anyone
-  // who has not begun. Out of order they produce a quiz nobody can ever sit,
-  // so the ordering is checked here rather than discovered on the day.
+  // who has not begun; `availableTo` when the paper shuts for everyone; and
+  // `resultReleaseAt` when the marks go out afterwards. Out of order they
+  // produce a quiz nobody can sit or a result nobody can wait for, so the
+  // ordering is checked here rather than discovered on the day.
   const publishAt = readDate(req.body.publishAt);
   const availableFrom = readDate(req.body.availableFrom);
   const startDeadline = readDate(req.body.startDeadline);
+  const resultReleaseAt = readDate(req.body.resultReleaseAt);
+  const availableTo =
+    req.body.availableTo !== undefined ? readDate(req.body.availableTo) : quiz.settings.availableTo;
 
   if (publishAt && availableFrom && availableFrom < publishAt) {
     return res.status(400).json({
@@ -515,10 +572,40 @@ exports.publishQuiz = async (req, res) => {
       message: "Entry would close before the quiz is published. Move the entry cut-off later.",
     });
   }
+  // Results announced before the paper shuts would hand the answer key to
+  // everyone still sitting it — the one ordering mistake here that cannot be
+  // undone once it has happened.
+  if (resultReleaseAt && availableTo && resultReleaseAt < availableTo) {
+    return res.status(400).json({
+      message:
+        "Results would be announced while the test is still open, so students still sitting it could read the answers. Announce them after the test closes.",
+    });
+  }
+  if (resultReleaseAt && availableFrom && resultReleaseAt < availableFrom) {
+    return res.status(400).json({
+      message: "Results would be announced before the test starts. Move the announcement later.",
+    });
+  }
 
   quiz.publishAt = publishAt && publishAt > now ? publishAt : null;
   if (req.body.availableFrom !== undefined) quiz.settings.availableFrom = availableFrom;
-  if (req.body.availableTo !== undefined) quiz.settings.availableTo = readDate(req.body.availableTo);
+  if (req.body.availableTo !== undefined) quiz.settings.availableTo = availableTo;
+  if (req.body.resultReleaseAt !== undefined) {
+    quiz.settings.resultReleaseAt = resultReleaseAt;
+    // Answering the results question settles the whole policy, so the older
+    // "hold the score back" flag stops being a second, invisible gate on top
+    // of it. Left alone it would contradict the answer just given: an Exam
+    // preset carries `showScoreImmediately: false`, and a teacher who chose
+    // "as each student submits" would still have had every mark withheld.
+    quiz.settings.showScoreImmediately = true;
+    // Rescheduling into the future un-announces: the sweep re-announces when
+    // the new moment arrives, and without this a teacher who pushed the date
+    // back would find the marks still on show and no way to take them off it.
+    if (resultReleaseAt && resultReleaseAt > now) {
+      quiz.resultsAnnouncedAt = null;
+      quiz.resultsAnnouncedByName = "";
+    }
+  }
   if (req.body.startDeadline !== undefined) {
     quiz.settings.startDeadline = startDeadline;
     // Clearing the cut-off has to clear the relative form too, or a quiz
@@ -598,8 +685,108 @@ exports.publishQuiz = async (req, res) => {
     link,
     publish: engine.publishState(quiz, now),
     window: engine.windowState(quiz, now),
+    results: engine.resultState(quiz, now),
   });
 };
+
+/* ─────────────────────────── announcing results ───────────────────────── */
+
+/**
+ * Tells the students who sat a quiz that their marks are out.
+ *
+ * Shared by the teacher pressing "Publish results now" and by the sweep that
+ * catches a scheduled release, so both produce the same notification and the
+ * same latch. Idempotent: `resultsAnnouncedAt` is written first, and a quiz
+ * that already carries one is left alone, so nobody is told twice.
+ *
+ * Only students with a finished sitting are notified — a class-wide message
+ * about marks would reach thirty people who never took the paper.
+ *
+ * @returns {Promise<number>} how many students were notified
+ */
+async function announceResults(quiz, klass, actorName = "") {
+  if (!quiz || quiz.resultsAnnouncedAt) return 0;
+
+  const now = new Date();
+  quiz.resultsAnnouncedAt = now;
+  quiz.resultsAnnouncedByName = actorName || "";
+  await quiz.save();
+
+  const finished = await LmQuizAttempt.find({
+    quizId: quiz._id,
+    status: { $in: ["submitted", "expired", "terminated"] },
+  })
+    .select("studentId")
+    .lean();
+
+  const studentIds = [...new Set(finished.map((attempt) => String(attempt.studentId)))];
+  if (!studentIds.length) return 0;
+
+  await notifyClass({
+    klass,
+    userIds: studentIds,
+    type: "quiz_result",
+    title: `Results are out: ${quiz.title}`,
+    body: `Your marks for "${quiz.title}" have been released. Open the quiz to see your score and go through the answers.`,
+    link: `/learning/class/${klass._id}/quizzes`,
+    actorName,
+    email: true,
+  });
+
+  return studentIds.length;
+}
+
+/** Teacher override: marks out now, whatever the schedule said. */
+exports.releaseResults = async (req, res) => {
+  const quiz = await LmQuiz.findOne({ _id: req.params.quizId, classId: req.lmClass._id });
+  if (!quiz) return res.status(404).json({ message: "Quiz not found." });
+  if (!requireManage(req, res, quiz)) return undefined;
+
+  const now = new Date();
+  // Bringing the announcement forward means moving the date, not working
+  // around it: a release time still sitting in the future would otherwise keep
+  // `resultsVisible` false and hide the marks the teacher just published.
+  quiz.settings.resultReleaseAt = now;
+  const notified = await announceResults(quiz, req.lmClass, req.lmUser.name);
+  // `announceResults` saves only when it is the one doing the announcing. A
+  // second press has nothing to announce but still moved the date above, and
+  // that has to reach the database or the marks stay hidden.
+  if (quiz.isModified()) await quiz.save();
+
+  return res.json({
+    results: engine.resultState(quiz, now),
+    notified,
+  });
+};
+
+/**
+ * Announces every quiz whose scheduled release time has arrived.
+ *
+ * Lazy release is enough to *show* a mark — every read path asks the clock —
+ * but not to tell anybody it happened, and a result nobody is told about is one
+ * students keep asking staff for. So this runs alongside the attempt reaper,
+ * on the same interval, and is bounded for the same reason.
+ */
+async function announceDueResults({ limit = 100, now = new Date() } = {}) {
+  const due = await LmQuiz.find({
+    published: true,
+    resultsAnnouncedAt: null,
+    "settings.resultReleaseAt": { $ne: null, $lte: now },
+  })
+    .limit(limit);
+
+  let announced = 0;
+  for (const quiz of due) {
+    // eslint-disable-next-line no-await-in-loop
+    const klass = await LmClass.findById(quiz.classId).lean();
+    if (!klass) continue;
+    // eslint-disable-next-line no-await-in-loop
+    await announceResults(quiz, klass);
+    announced += 1;
+  }
+
+  return { scanned: due.length, announced };
+}
 
 /* ───────────────────────────── attempts ───────────────────────────────── */
 
@@ -635,7 +822,18 @@ exports.startAttempt = async (req, res) => {
   // dropped connection must not cost the student their paper.
   const inProgress = existing.find((attempt) => attempt.status === "in_progress");
   if (inProgress) {
-    return res.json({ attempt: attemptForStudent(inProgress, quiz, now), resumed: true });
+    // Resuming re-binds through the same rule as everything else, so pressing
+    // Start on a second device while the first is live is refused here rather
+    // than one request later.
+    const guard = await guardSitting(inProgress, quiz, req, res, now);
+    if (guard.stop) return undefined;
+    await inProgress.save();
+    res.set(SESSION_HEADER, guard.token);
+    return res.json({
+      attempt: attemptForStudent(inProgress, quiz, now),
+      sessionToken: guard.token,
+      resumed: true,
+    });
   }
 
   const state = engine.windowState(quiz, now);
@@ -656,6 +854,10 @@ exports.startAttempt = async (req, res) => {
 
   const attemptNumber = existing.length + 1;
   const paper = engine.buildPaper(quiz.toObject(), req.lmUser.id, attemptNumber);
+  // Minted here rather than accepted from the client: the browser that starts
+  // the paper is the one that owns it, and it should not get to choose its own
+  // name for itself.
+  const sessionToken = mintSessionToken();
 
   const attempt = await LmQuizAttempt.create({
     quizId: quiz._id,
@@ -671,9 +873,16 @@ exports.startAttempt = async (req, res) => {
     cursor: 0,
     currentServedAt: now,
     device: { userAgent, isMobile },
+    sessionToken,
+    sessionBoundAt: now,
   });
 
-  return res.status(201).json({ attempt: attemptForStudent(attempt, quiz, now), resumed: false });
+  res.set(SESSION_HEADER, sessionToken);
+  return res.status(201).json({
+    attempt: attemptForStudent(attempt, quiz, now),
+    sessionToken,
+    resumed: false,
+  });
 };
 
 /**
@@ -690,6 +899,15 @@ exports.getAttemptPaper = async (req, res) => {
 
   const quiz = await LmQuiz.findById(attempt.quizId).lean();
   if (!quiz) return res.status(404).json({ message: "Quiz not found." });
+
+  // Only a live sitting is guarded. Re-reading a paper already submitted is the
+  // student's own finished work and has no second-screen to deny.
+  if (attempt.status === "in_progress") {
+    const guard = await guardSitting(attempt, quiz, req, res);
+    if (guard.stop) return undefined;
+    await attempt.save();
+    res.set(SESSION_HEADER, guard.token);
+  }
 
   const byId = new Map(quiz.questions.map((question) => [String(question._id), question]));
   const orders = optionOrderOf(attempt);
@@ -728,8 +946,16 @@ exports.getCurrentQuestion = async (req, res) => {
   const quiz = await LmQuiz.findById(attempt.quizId);
   if (!quiz) return res.status(404).json({ message: "Quiz not found." });
 
+  // Ahead of the cursor check and the deadline check both: a second screen must
+  // be turned away before it is told anything at all about the paper, including
+  // how far through it the real session is.
+  const guard = await guardSitting(attempt, quiz, req, res);
+  if (guard.stop) return undefined;
+  res.set(SESSION_HEADER, guard.token);
+
   const total = attempt.questionOrder.length;
   if (attempt.cursor >= total) {
+    await attempt.save();
     return res.json({ done: true, cursor: attempt.cursor, totalQuestions: total });
   }
 
@@ -745,7 +971,6 @@ exports.getCurrentQuestion = async (req, res) => {
 
   // Refuse to hand out another question after the paper has closed. Without
   // this, reopening a stale tab resumed a sitting whose time was long gone.
-  noteDevice(attempt, req);
   const timing = await enforceDeadline(attempt, quiz, req, question);
   if (timing.expiredAttempt) {
     return res.json({
@@ -780,32 +1005,46 @@ exports.getCurrentQuestion = async (req, res) => {
 };
 
 /**
- * Notes the machine an attempt is being driven from, and flags a change.
+ * Notes the machine an attempt is being driven from, and says whether it is a
+ * machine the sitting may continue on.
  *
- * Every request on an attempt goes through this. A User-Agent or IP that moves
- * mid-sitting is the visible trace of the two things browser-side proctoring
- * cannot see at all: a second device, and somebody talking to the API directly
- * with a token lifted out of localStorage.
+ * Every request on a live attempt goes through this. A User-Agent or IP that
+ * moves mid-sitting is the visible trace of the two things browser-side
+ * proctoring cannot see at all: a second device, and somebody talking to the API
+ * directly with a token lifted out of localStorage.
  *
- * Recorded, never enforced. A student legitimately moving from wifi to mobile
- * data changes IP, and a browser that updates itself changes User-Agent, so
- * blocking on this would fail honest people. It goes in front of the teacher
- * instead.
+ * The two signals are not worth the same, and treating them alike was why this
+ * used to record everything and enforce nothing:
+ *
+ *  - **IP is a note.** Campus NAT means most of a class shares one, wifi-to-
+ *    mobile-data handover changes it mid-question, and it is not an identity.
+ *    Blocking on it would fail honest students constantly.
+ *  - **User-Agent ends the sitting.** A browser does not change its User-Agent
+ *    between one request and the next; a second machine does. The false positive
+ *    — a browser that updated itself *during the exam* and kept the same
+ *    session — costs a student their paper, so it is reported with the reason
+ *    spelled out and is reopenable by staff, which is the same remedy the rest
+ *    of the proctoring rules already rely on.
+ *
+ * @returns {{terminate: string}|null} the termination reason, or null to carry on
  */
-function noteDevice(attempt, req) {
+function noteDevice(attempt, req, quiz) {
   const userAgent = String(req.get?.("User-Agent") || "").slice(0, 400);
   const ip = String(req.ip || "").slice(0, 64);
 
   if (!attempt.device) attempt.device = {};
 
-  const changes = [];
-  if (attempt.device.userAgent && userAgent && attempt.device.userAgent !== userAgent) {
-    changes.push("browser");
-  }
-  if (attempt.device.ip && ip && attempt.device.ip !== ip) changes.push("network");
+  const browserChanged = Boolean(
+    attempt.device.userAgent && userAgent && attempt.device.userAgent !== userAgent,
+  );
+  const ipChanged = Boolean(attempt.device.ip && ip && attempt.device.ip !== ip);
 
   if (!attempt.device.userAgent) attempt.device.userAgent = userAgent;
   if (!attempt.device.ip) attempt.device.ip = ip;
+
+  const changes = [];
+  if (browserChanged) changes.push("browser");
+  if (ipChanged) changes.push("network");
 
   if (changes.length) {
     attempt.violations.push({
@@ -818,6 +1057,141 @@ function noteDevice(attempt, req) {
     attempt.device.userAgent = userAgent || attempt.device.userAgent;
     attempt.device.ip = ip || attempt.device.ip;
   }
+
+  // A paper that refused to start on a phone must also refuse to *continue* on
+  // one. The check used to live only in `startAttempt`, so beginning on a laptop
+  // and finishing on a handset walked straight past it.
+  if (quiz?.settings?.preventMobile && engine.isMobileUserAgent(userAgent)) {
+    if (!changes.length) {
+      attempt.violations.push({
+        type: "mobile_detected",
+        at: new Date(),
+        detail: "continued on a mobile device",
+      });
+    }
+    attempt.device.isMobile = true;
+    return { terminate: "Continued the test on a mobile device" };
+  }
+
+  if (browserChanged) return { terminate: "The test moved to a different browser or device" };
+  return null;
+}
+
+/* ───────────────────────── one browser per sitting ────────────────────────── */
+
+/** Header the sitting carries; see `lmQuizAttempt.sessionToken`. */
+const SESSION_HEADER = "X-Quiz-Session";
+
+const mintSessionToken = () => crypto.randomUUID();
+
+/**
+ * Decides whether this request may drive this sitting.
+ *
+ * "One attempt per student" was never "one *screen* per student". A phone signed
+ * into the same account could hold the paper open beside the laptop and read it
+ * at leisure: no tab switch, no blur, no fullscreen exit, nothing to report,
+ * because the laptop never misbehaved. Nothing in the browser-side proctoring
+ * can see a second screen — but the server can see two clients driving one
+ * attempt, and that is the same thing from the only angle we have.
+ *
+ * The rule turns on whether the bound session is *still alive*, which is the
+ * distinction that makes this safe to enforce:
+ *
+ *  - **Bound session still checking in** → the other client is live, so this is
+ *    a genuine second screen. Recorded and refused.
+ *  - **Bound session gone quiet** → a crashed browser, a closed tab, a flat
+ *    battery. Rebinds silently, because resuming a dropped sitting where it left
+ *    off is a promise the module makes elsewhere and must not break here.
+ *
+ * A missing token counts as a different one: once a sitting is bound, a client
+ * that cannot produce the token is not the client that started it.
+ *
+ * @returns {{token: string}|{conflict: true}}
+ */
+function bindSession(attempt, req, now = new Date()) {
+  const presented = String(req.get?.(SESSION_HEADER) || "");
+
+  if (!attempt.sessionToken) {
+    attempt.sessionToken = presented || mintSessionToken();
+    attempt.sessionBoundAt = now;
+    return { token: attempt.sessionToken };
+  }
+
+  if (presented && presented === attempt.sessionToken) return { token: attempt.sessionToken };
+
+  // The later of the two, because a sitting that has only just started has not
+  // heartbeated yet: judging liveness on `lastSeenAt` alone left the first
+  // thirty seconds of every paper open to whoever asked second.
+  const lastSeen = Math.max(
+    attempt.lastSeenAt ? new Date(attempt.lastSeenAt).getTime() : 0,
+    attempt.sessionBoundAt ? new Date(attempt.sessionBoundAt).getTime() : 0,
+  );
+  const boundIsLive = lastSeen > 0 && now.getTime() - lastSeen < HEARTBEAT_GRACE_MS;
+
+  if (boundIsLive) {
+    attempt.violations.push({
+      type: "second_session",
+      at: now,
+      detail: "a second browser tried to open this sitting while the first was live",
+    });
+    return { conflict: true };
+  }
+
+  attempt.violations.push({
+    type: "second_session",
+    at: now,
+    detail: "resumed in a different browser after the first stopped responding",
+  });
+  attempt.sessionToken = presented || mintSessionToken();
+  attempt.sessionBoundAt = now;
+  return { token: attempt.sessionToken };
+}
+
+/** The 409 a losing second screen gets. */
+const sessionConflict = (res) =>
+  res.status(409).json({
+    message:
+      "This test is already open in another browser or on another device. " +
+      "Go back to the one you started on and continue there.",
+    code: "SESSION_CONFLICT",
+  });
+
+/**
+ * Everything a live attempt must be checked for before it is served.
+ *
+ * One place, so a route cannot be added that quietly skips half of it — which is
+ * how `getAttemptPaper` came to hand out a paper without ever noting the device
+ * it was going to.
+ *
+ * @returns {{stop: true}|{token: string}} `stop` means a response was sent
+ */
+async function guardSitting(attempt, quiz, req, res, now = new Date()) {
+  const session = bindSession(attempt, req, now);
+  if (session.conflict) {
+    await attempt.save();
+    sessionConflict(res);
+    return { stop: true };
+  }
+
+  // Before `lastSeenAt` is touched anywhere: the gap has to be measured against
+  // where the silence actually ended. The 5-minute sweep used to be the only
+  // thing that noticed, so any outage shorter than one sweep interval left no
+  // record at all — including a client that had simply been told, in devtools,
+  // to stop reporting.
+  noteHeartbeatLoss(attempt, now);
+
+  const device = noteDevice(attempt, req, quiz);
+  if (device?.terminate) {
+    const finished = await finaliseAttempt(attempt, quiz, { body: { reason: device.terminate } }, "terminated");
+    res.status(403).json({
+      message: `Your test was submitted automatically. ${device.terminate}.`,
+      code: "TERMINATED",
+      attempt: attemptForStudent(finished, quiz, now),
+    });
+    return { stop: true };
+  }
+
+  return { token: session.token };
 }
 
 /**
@@ -866,7 +1240,10 @@ exports.answerAndAdvance = async (req, res) => {
 
   const currentQuestion = questionId ? quiz.questions.id(questionId) : null;
 
-  noteDevice(attempt, req);
+  const guard = await guardSitting(attempt, quiz, req, res);
+  if (guard.stop) return undefined;
+  res.set(SESSION_HEADER, guard.token);
+
   const timing = await enforceDeadline(attempt, quiz, req, currentQuestion);
   if (timing.expiredAttempt) {
     return res.json({
@@ -947,7 +1324,10 @@ exports.saveAttemptDraft = async (req, res) => {
 
   // An autosave after the paper closed is how a tab left open overnight used to
   // keep writing answers.
-  noteDevice(attempt, req);
+  const guard = await guardSitting(attempt, quiz, req, res);
+  if (guard.stop) return undefined;
+  res.set(SESSION_HEADER, guard.token);
+
   const timing = await enforceDeadline(attempt, quiz, req, null);
   if (timing.expiredAttempt) {
     return res.status(400).json({
@@ -1078,6 +1458,12 @@ exports.submitAttempt = async (req, res) => {
   const quiz = await LmQuiz.findById(attempt.quizId);
   if (!quiz) return res.status(404).json({ message: "Quiz not found." });
 
+  // Guarded like the rest, because submitting is the one thing a second screen
+  // could do that hurts the student rather than helping them.
+  const guard = await guardSitting(attempt, quiz, req, res);
+  if (guard.stop) return undefined;
+  res.set(SESSION_HEADER, guard.token);
+
   // Accept a final batch of answers alongside the submit, which is how the
   // all-at-once player and the auto-submit-on-expiry path both behave.
   if (Array.isArray(req.body.answers)) {
@@ -1106,7 +1492,15 @@ exports.submitAttempt = async (req, res) => {
   const reason = attemptExpired ? "expired" : "completed";
   const finished = await finaliseAttempt(attempt, quiz, req, reason);
   const now = new Date();
-  const reveal = engine.resultsVisible(quiz, now);
+  const reveal = engine.resultsReleased(quiz, now);
+
+  // Reading the marks on the last page of the paper *is* reviewing them, so
+  // nothing is left flagged as unread on the class card for a student who has
+  // already seen the number.
+  if (reveal) {
+    finished.resultViewedAt = finished.resultViewedAt || now;
+    await finished.save();
+  }
 
   return res.json({
     attempt: attemptForStudent(finished, quiz, now),
@@ -1176,12 +1570,39 @@ function buildReview(quiz, attempt) {
 const countsAsLeaving = (type) =>
   type === "tab_switch" || type === "blur" || type === "fullscreen_exit";
 
+// Below this, the gap is just network latency and is not worth writing down.
+const REPORT_DELAY_NOTE_SEC = 5;
+
 /** How the auto-submit is written onto the attempt, per departure. */
 const TERMINATION_REASON = {
   tab_switch: "Switched away from the test tab",
   blur: "Switched to another window or application",
   fullscreen_exit: "Left fullscreen during the test",
 };
+
+/**
+ * When a reported event actually happened.
+ *
+ * The client stamps its own clock because a report that could not be sent is
+ * queued and replayed later — the alternative, timing it by arrival, would write
+ * down the moment the student reconnected rather than the moment they left.
+ *
+ * Clamped to the sitting so the timestamp cannot be used for anything except
+ * being honest about a delay: a value before the paper started or after now is
+ * not believed, and anything unparseable falls back to now. It only ever moves a
+ * violation *earlier* within a window the student was already sitting in, so
+ * there is nothing to gain by lying either way — the termination happens
+ * regardless of what this says.
+ */
+function violationTime(raw, attempt, now = new Date()) {
+  if (!raw) return now;
+  const at = new Date(raw);
+  if (Number.isNaN(at.getTime())) return now;
+  if (at > now) return now;
+  const startedAt = new Date(attempt.startedAt);
+  if (at < startedAt) return startedAt;
+  return at;
+}
 
 /**
  * Records a proctoring event, and ends the attempt the moment the student
@@ -1192,6 +1613,11 @@ const TERMINATION_REASON = {
  * that drops fullscreen as it loses focus fires both — but that no longer needs
  * coalescing, because the first one already finished the attempt and the second
  * finds a sitting that is no longer `in_progress`.
+ *
+ * Arriving late changes nothing about the verdict. A student who drops their
+ * connection, leaves fullscreen and comes back is reported the moment anything
+ * reaches us again, and the attempt ends then — the delay is written into the
+ * record, not forgiven.
  */
 exports.recordViolation = async (req, res) => {
   const attempt = await LmQuizAttempt.findOne({
@@ -1208,16 +1634,25 @@ exports.recordViolation = async (req, res) => {
 
   const quiz = await LmQuiz.findById(attempt.quizId);
 
+  const now = new Date();
+  const at = violationTime(req.body.at, attempt, now);
+  // Worth a teacher's eye on its own: a departure that could only be reported a
+  // minute later means the connection was down at the moment it happened, which
+  // is the shape of both a bad campus wifi and a deliberately pulled cable.
+  const delayedBySec = Math.round((now - at) / 1000);
+  const detail = delayedBySec >= REPORT_DELAY_NOTE_SEC ? `reported ${delayedBySec}s late` : "";
+
   const leaving = countsAsLeaving(type);
-  attempt.violations.push({ type, at: new Date() });
+  attempt.violations.push({ type, at, detail });
   if (leaving) attempt.tabSwitches += 1;
   await attempt.save();
 
   if (leaving) {
+    const reason = TERMINATION_REASON[type] || "Left the test";
     const finished = await finaliseAttempt(
       attempt,
       quiz,
-      { body: { reason: TERMINATION_REASON[type] || "Left the test" } },
+      { body: { reason: detail ? `${reason} (${detail})` : reason } },
       "terminated",
     );
     return res.json({
@@ -1251,7 +1686,17 @@ exports.getAttempt = async (req, res) => {
 
   const quiz = await LmQuiz.findById(attempt.quizId).lean();
   const now = new Date();
-  const reveal = req.lmIsTeacher || (engine.resultsVisible(quiz, now) && quiz?.settings?.showAnswersAfterSubmit);
+  const released = engine.resultsReleased(quiz, now);
+  const reveal = req.lmIsTeacher || (released && quiz?.settings?.showAnswersAfterSubmit);
+
+  // The student opening their own released result is what "reviewed" means, so
+  // this is where the announcement stops being unread. A teacher reading the
+  // same attempt must not clear it on their behalf, and neither does a student
+  // arriving before the marks are out — there is nothing to have read yet.
+  if (!req.lmIsTeacher && isOwner && released && attempt.status !== "in_progress" && !attempt.resultViewedAt) {
+    await LmQuizAttempt.updateOne({ _id: attempt._id }, { $set: { resultViewedAt: now } });
+    attempt.resultViewedAt = now;
+  }
 
   return res.json({
     attempt: req.lmIsTeacher ? attempt : attemptForStudent(attempt, quiz, now),
@@ -1424,6 +1869,14 @@ exports.reopenAttempt = async (req, res) => {
     attempt.status = "in_progress";
     attempt.submittedAt = null;
     attempt.terminationReason = "";
+    // Released, not carried over. Staff reopen a sitting precisely when the
+    // machine it was bound to is gone — a dead laptop, a lab they have left —
+    // and a token nobody can produce any more would lock them out of their own
+    // reopened paper until the heartbeat grace expired.
+    attempt.sessionToken = "";
+    attempt.sessionBoundAt = null;
+    attempt.lastSeenAt = null;
+    attempt.heartbeatLostAt = null;
     // The clock on the question in front of them starts again from now — they
     // are being handed the paper back, not caught mid-thought.
     attempt.currentServedAt = now;
@@ -1870,7 +2323,16 @@ exports.getQuizResults = async (req, res) => {
       avgPercent: section.maxScore ? Math.round((section.score / section.maxScore) * 1000) / 10 : null,
     })),
     distribution: bands,
-    resultsVisible: engine.resultsVisible(quiz),
+    resultsVisible: engine.resultsReleased(quiz, now),
+    results: {
+      ...engine.resultState(quiz, now),
+      announcedByName: quiz.resultsAnnouncedByName || "",
+      // How much of the cohort has actually read the marks. The point of
+      // holding the flag until it is read is lost if staff cannot see whether
+      // anybody has.
+      viewed: finished.filter((attempt) => attempt.resultViewedAt).length,
+      awaitingView: finished.filter((attempt) => !attempt.resultViewedAt).length,
+    },
   });
 };
 
@@ -2041,6 +2503,13 @@ function startAttemptReaper({ intervalMs = 5 * 60 * 1000 } = {}) {
     reapExpiredAttempts().catch((error) => {
       console.error("[LearningModule] attempt reaper", error.message);
     });
+    // Rides the same timer rather than starting a second one. Neither sweep is
+    // load-bearing — the marks are already readable the moment the clock passes,
+    // this only tells the class about it — so a few minutes' lag is the right
+    // trade for one interval instead of two.
+    announceDueResults().catch((error) => {
+      console.error("[LearningModule] result announcer", error.message);
+    });
   }, intervalMs);
   timer.unref?.();
   return timer;
@@ -2070,7 +2539,14 @@ exports.heartbeat = async (req, res) => {
   const quiz = await LmQuiz.findById(attempt.quizId);
   if (!quiz) return res.status(404).json({ message: "Quiz not found." });
 
-  noteDevice(attempt, req);
+  // The guard runs here too, and it matters most here: `lastSeenAt` is what
+  // decides who owns the sitting, so only the bound session may refresh it. A
+  // second screen pinging away would otherwise hold the attempt "live" and make
+  // the student's real browser look like the intruder.
+  const guard = await guardSitting(attempt, quiz, req, res);
+  if (guard.stop) return undefined;
+  res.set(SESSION_HEADER, guard.token);
+
   const timing = await enforceDeadline(attempt, quiz, req, null);
   if (timing.expiredAttempt) {
     return res.json({
@@ -2091,8 +2567,15 @@ exports.heartbeat = async (req, res) => {
   return res.json({ status: "in_progress", deadline: timing.deadline, serverTime: now });
 };
 
+exports.announceResults = announceResults;
+exports.announceDueResults = announceDueResults;
 exports.reapExpiredAttempts = reapExpiredAttempts;
 exports.startAttemptReaper = startAttemptReaper;
 exports.noteHeartbeatLoss = noteHeartbeatLoss;
+exports.violationTime = violationTime;
+exports.noteDevice = noteDevice;
+exports.bindSession = bindSession;
+exports.forStudent = forStudent;
+exports.SESSION_HEADER = SESSION_HEADER;
 exports.HEARTBEAT_GRACE_MS = HEARTBEAT_GRACE_MS;
 exports.finaliseAttempt = finaliseAttempt;

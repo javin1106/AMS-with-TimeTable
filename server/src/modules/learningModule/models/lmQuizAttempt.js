@@ -111,11 +111,19 @@ const lmQuizAttemptSchema = new mongoose.Schema({
           //   out and was not counted.
           // device_changed: the User-Agent or IP moved mid-attempt — a second
           //   machine, or somebody driving the API with a copied token.
-          'heartbeat_lost', 'late_answer', 'device_changed',
+          // second_session: a different browser tried to drive this sitting.
+          //   The classic second screen: a phone reading the paper while the
+          //   laptop stays obediently in fullscreen.
+          'heartbeat_lost', 'late_answer', 'device_changed', 'second_session',
         ],
       },
+      // When it happened, not when it was reported — a client that could not
+      // reach us queues the event and replays it, carrying this timestamp.
+      // Clamped to the sitting server-side; see `quizController.violationTime`.
       at: { type: Date, default: Date.now },
-      // Free-text context for the server-raised kinds above; empty for the rest.
+      // Free-text context: the server-raised kinds above always set it, and the
+      // student-raised ones set it when the report arrived measurably later than
+      // the event, which is what a dropped connection looks like.
       detail: { type: String, default: '' },
       _id: false,
     },
@@ -130,8 +138,24 @@ const lmQuizAttemptSchema = new mongoose.Schema({
     ip: { type: String, default: '' },
   },
 
+  /**
+   * The one browser allowed to drive this sitting.
+   *
+   * Minted when the attempt starts and held in the tab's sessionStorage. Without
+   * it, "one attempt per student" was only ever one *attempt*: a second device
+   * signed into the same account could open the paper alongside the first and
+   * read it at leisure, while the laptop sat in fullscreen breaking no rule at
+   * all. Requests carrying a different token are refused while the bound session
+   * is still checking in, and rebind silently once it has gone quiet — which is
+   * what a crashed browser or a closed tab looks like, and must keep working.
+   */
+  sessionToken: { type: String, default: '' },
+  sessionBoundAt: { type: Date, default: null },
+
   // Last time the page checked in. `null` until the first heartbeat, so an
   // attempt started before this field existed is not retroactively suspicious.
+  // Only ever written by the bound session above, so a second browser cannot
+  // hold it fresh and make the real one look like the intruder.
   lastSeenAt: { type: Date, default: null },
   // Set once when a lost heartbeat has been recorded, so a student offline for an
   // hour collects one violation rather than one per sweep.
@@ -165,6 +189,15 @@ const lmQuizAttemptSchema = new mongoose.Schema({
   // querying a changed mark can be told when and by whom it changed.
   regradedAt: { type: Date, default: null },
   regradedByName: { type: String, default: '' },
+
+  // When the student actually read their released result.
+  //
+  // What clears the "results are out" flag from the class card and the quiz
+  // list: an announcement that stays up after it has been read is noise, and
+  // one that clears itself the moment it is *sent* was never seen by the
+  // student who was in a lecture at the time. Null on an attempt whose results
+  // are still withheld — there was nothing to read yet.
+  resultViewedAt: { type: Date, default: null },
 
   startedAt: { type: Date, default: Date.now },
   submittedAt: { type: Date, default: null },

@@ -385,6 +385,33 @@ describe('learningModule examEngine — windows and timing', () => {
     expect(engine.resultsVisible({ settings: {} })).toBe(true);
   });
 
+  /**
+   * The bug this pins: an exam paper carries `showScoreImmediately: false` and
+   * no release date. `resultsVisible` says yes on the clock alone, so the
+   * attempt was reported as "results are out" while the score fields were
+   * dropped from the same payload — which is what printed `undefined` on the
+   * last page of the paper. Releasing is now a decision, not only a clock.
+   */
+  it('holds a withheld score until the teacher announces it', () => {
+    const quiz = { settings: { showScoreImmediately: false } };
+    expect(engine.resultsVisible(quiz)).toBe(true);
+    expect(engine.resultsReleased(quiz)).toBe(false);
+    expect(engine.resultsReleased({ ...quiz, resultsAnnouncedAt: new Date() })).toBe(true);
+  });
+
+  it('reports why results are withheld, so a student can be told', () => {
+    const scheduled = engine.resultState(
+      { settings: { resultReleaseAt: at('2026-01-02T00:00:00Z') } },
+      at('2026-01-01T10:00:00Z'),
+    );
+    expect(scheduled).toMatchObject({ released: false, scheduled: true, awaitingTeacher: false });
+
+    const held = engine.resultState({ settings: { showScoreImmediately: false } });
+    expect(held).toMatchObject({ released: false, scheduled: false, awaitingTeacher: true });
+
+    expect(engine.resultState({ settings: {} })).toMatchObject({ released: true });
+  });
+
   it('takes the earliest of the per-question and whole-paper deadlines', () => {
     const start = at('2026-01-01T10:00:00Z');
     const quiz = { settings: { perQuestionTiming: true, timeLimitMinutes: 30 } };
