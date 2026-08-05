@@ -189,7 +189,6 @@ export default function EditSessionDates() {
   // ── Auth ──────────────────────────────────────────────────────────────────
   const [isAuthorized, setIsAuthorized] = useState(null);
   const [isIamsAdmin, setIsIamsAdmin] = useState(false);
-  const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
 
   // ── Session Setup state ───────────────────────────────────────────────────
   const [sessions, setSessions] = useState([]);
@@ -312,11 +311,8 @@ export default function EditSessionDates() {
       .then((d) => {
         const roles = d?.user?.role || [];
         const hasIamsAdmin = roles.includes('iams-admin');
-        const hasPlatformAdmin = roles.includes('admin');
         setIsIamsAdmin(hasIamsAdmin);
-        setIsPlatformAdmin(hasPlatformAdmin);
-        setIsAuthorized(hasIamsAdmin || hasPlatformAdmin);
-        if (!hasIamsAdmin && hasPlatformAdmin) setActiveTab('otherControls');
+        setIsAuthorized(hasIamsAdmin);
       })
       .catch(() => setIsAuthorized(false));
   }, []);
@@ -777,8 +773,8 @@ export default function EditSessionDates() {
           Access Restrictions Enforced
         </div>
         <div style={{ fontSize: 13, color: T.textMuted }}>
-          Only accounts holding <strong>iams-admin</strong> or platform-admin
-          clearances can access these controls.
+          Only accounts holding <strong>iams-admin</strong> clearance can access
+          these controls.
         </div>
       </div>
     );
@@ -905,7 +901,7 @@ export default function EditSessionDates() {
               </button>
             </>
           )}
-          {isPlatformAdmin && (
+          {isIamsAdmin && (
             <button
               className={`ams-tab${activeTab === 'otherControls' ? ' active' : ''}`}
               onClick={() => setActiveTab('otherControls')}
@@ -1717,7 +1713,7 @@ export default function EditSessionDates() {
           </div>
         )}
         {activeTab === 'frameCleanup' && <FrameCleanupSettingsTab />}
-        {activeTab === 'otherControls' && isPlatformAdmin && <ReportDeletionSettingsTab />}
+        {activeTab === 'otherControls' && isIamsAdmin && <ReportDeletionSettingsTab />}
       </div>
 
       {/* ── Holiday delete confirmation modal ── */}

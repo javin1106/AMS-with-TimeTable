@@ -77,9 +77,9 @@ export default function ReportDeletionSettingsTab() {
             Saved Attendance Report Deletion
           </div>
           <div style={{ fontSize: 12, lineHeight: 1.6, color: T.textMuted }}>
-            Platform admins and iams-admin users can always delete saved reports.
-            Enable this control to also allow iams-dept-admin users to delete
-            reports and linked unknown-face records from their own department.
+            Admin and iams-admin users can always delete saved reports. As an
+            iams-admin, enable this control to also allow iams-dept-admin users
+            to delete reports and linked unknown-face records from their own department.
           </div>
         </div>
 

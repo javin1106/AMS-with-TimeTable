@@ -147,22 +147,22 @@ describe("saved report deletion controls", () => {
     expect(await AttendanceReport.findById(report._id)).toBeNull();
   });
 
-  it("lets only platform admin change the feature flag", async () => {
+  it("lets only iams-admin change the department-admin feature flag", async () => {
     const denied = await request(app)
       .patch(SETTINGS)
       .set("Cookie", authCookie(["iams-dept-admin"]))
       .send({ enabled: true });
     expect(denied.status).toBe(403);
 
-    const iamsDenied = await request(app)
+    const adminDenied = await request(app)
       .patch(SETTINGS)
-      .set("Cookie", authCookie())
+      .set("Cookie", authCookie(["admin"]))
       .send({ enabled: true });
-    expect(iamsDenied.status).toBe(403);
+    expect(adminDenied.status).toBe(403);
 
     const enabled = await request(app)
       .patch(SETTINGS)
-      .set("Cookie", authCookie(["admin"]))
+      .set("Cookie", authCookie())
       .send({ enabled: true });
     expect(enabled.status).toBe(200);
     expect(enabled.body.enabled).toBe(true);
@@ -176,6 +176,11 @@ describe("saved report deletion controls", () => {
       .set("Cookie", await deptAdminCookie("CSE"));
     expect(deptAdminView.status).toBe(200);
     expect(deptAdminView.body.enabled).toBe(true);
+
+    const adminView = await request(app)
+      .get(SETTINGS)
+      .set("Cookie", authCookie(["admin"]));
+    expect(adminView.status).toBe(403);
   });
 
   it("rejects iams-dept-admin by default and preserves the report", async () => {
