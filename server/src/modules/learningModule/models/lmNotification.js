@@ -16,6 +16,10 @@ const lmNotificationSchema = new mongoose.Schema({
       "invite",
       "join_request",
       "quiz",
+      // Marks released for a quiz already sat. Separate from "quiz", which
+      // announces a paper to sit: a student scanning the bell needs to tell
+      // "there is work to do" from "your marks are out" at a glance.
+      "quiz_result",
       "material",
       // Carries no actorName, unlike every other type here — see
       // feedbackController.createFeedback.

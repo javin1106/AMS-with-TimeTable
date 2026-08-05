@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 
 import useProctoring from '../hooks/useProctoring';
@@ -39,7 +39,7 @@ describe('learningModule useProctoring', () => {
     );
 
     expect(rightClick().defaultPrevented).toBe(true);
-    expect(onViolation).toHaveBeenCalledWith('right_click');
+    expect(onViolation).toHaveBeenCalledWith('right_click', expect.any(String));
   });
 
   it('leaves right-click alone when the paper did not ask for it', () => {
@@ -83,7 +83,7 @@ describe('learningModule useProctoring', () => {
     setFullscreen(true);
     rerender({ active: true });
     setFullscreen(false);
-    expect(onViolation).toHaveBeenCalledWith('fullscreen_exit');
+    expect(onViolation).toHaveBeenCalledWith('fullscreen_exit', expect.any(String));
   });
 
   /**
@@ -100,11 +100,103 @@ describe('learningModule useProctoring', () => {
     act(() => {
       document.dispatchEvent(new Event('visibilitychange'));
     });
-    expect(onViolation).toHaveBeenCalledWith('tab_switch');
+    expect(onViolation).toHaveBeenCalledWith('tab_switch', expect.any(String));
 
     act(() => {
       window.dispatchEvent(new Event('blur'));
     });
-    expect(onViolation).toHaveBeenCalledWith('blur');
+    expect(onViolation).toHaveBeenCalledWith('blur', expect.any(String));
+  });
+
+  /**
+   * The hole this closes: a student drops their connection *before* leaving
+   * fullscreen, so the report that would have ended their attempt fails, and
+   * nothing ever retried it. Pulling the network cable was a free pass.
+   */
+  describe('reports that could not be sent', () => {
+    const attemptId = 'attempt-1';
+
+    beforeEach(() => {
+      sessionStorage.clear();
+      setFullscreen(true);
+    });
+
+    it('keeps a failed report and replays it with the time it happened', async () => {
+      const onViolation = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue({});
+      const onHeartbeat = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue({});
+
+      renderHook(() =>
+        useProctoring({ settings: {}, active: true, attemptId, onViolation, onHeartbeat }),
+      );
+      await act(async () => {});
+
+      setFullscreen(false);
+      await act(async () => {});
+
+      // Reported, refused, and not thrown away.
+      expect(onViolation).toHaveBeenCalledTimes(1);
+      const [, firstAt] = onViolation.mock.calls[0];
+      expect(JSON.parse(sessionStorage.getItem(`lmProctorQueue:${attemptId}`))).toEqual([
+        { type: 'fullscreen_exit', at: firstAt },
+      ]);
+
+      // Coming back online drains it, carrying the original timestamp rather
+      // than the moment of reconnection.
+      await act(async () => {
+        window.dispatchEvent(new Event('online'));
+      });
+
+      expect(onViolation).toHaveBeenCalledTimes(2);
+      expect(onViolation).toHaveBeenLastCalledWith('fullscreen_exit', firstAt);
+      expect(sessionStorage.getItem(`lmProctorQueue:${attemptId}`)).toBeNull();
+    });
+
+    it('terminates on the replay, and drops what is left behind it', async () => {
+      const onViolation = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('offline'))
+        .mockRejectedValueOnce(new Error('offline'))
+        .mockResolvedValue({ terminated: true, message: 'Submitted automatically.' });
+      const onTerminated = vi.fn();
+
+      const { result } = renderHook(() =>
+        useProctoring({ settings: {}, active: true, attemptId, onViolation, onTerminated }),
+      );
+
+      setFullscreen(false);
+      await act(async () => {});
+      act(() => {
+        window.dispatchEvent(new Event('blur'));
+      });
+      await act(async () => {});
+      expect(JSON.parse(sessionStorage.getItem(`lmProctorQueue:${attemptId}`))).toHaveLength(2);
+
+      await act(async () => {
+        await result.current.flushViolations();
+      });
+
+      // The first replay ended the attempt, so the second is not sent: it would
+      // be a no-op against a finished sitting, and the queue must not outlive it.
+      expect(onViolation).toHaveBeenCalledTimes(3);
+      expect(onTerminated).toHaveBeenCalledTimes(1);
+      expect(result.current.warning).toBe('Submitted automatically.');
+      expect(sessionStorage.getItem(`lmProctorQueue:${attemptId}`)).toBeNull();
+    });
+
+    it('holds the queue when the connection is still down', async () => {
+      const onViolation = vi.fn().mockRejectedValue(new Error('offline'));
+
+      const { result } = renderHook(() =>
+        useProctoring({ settings: {}, active: true, attemptId, onViolation }),
+      );
+
+      setFullscreen(false);
+      await act(async () => {});
+      await act(async () => {
+        await result.current.flushViolations();
+      });
+
+      expect(JSON.parse(sessionStorage.getItem(`lmProctorQueue:${attemptId}`))).toHaveLength(1);
+    });
   });
 });

@@ -8,9 +8,11 @@ import { SectionCard } from './common';
  *
  * Option indices arrive already remapped into the order this student saw, so a
  * shuffled paper highlights the right row. Shared between the live player (just
- * after submitting) and the attempt-history view.
+ * after submitting), the attempt-history view, and staff reading one student's
+ * paper on the results page — which is why the one second-person phrase here
+ * takes `answerLabel`: "Your answer" is wrong when a teacher is reading it.
  */
-export default function QuizReview({ review, title = 'Question review' }) {
+export default function QuizReview({ review, title = 'Question review', answerLabel = 'Your answer' }) {
   if (!review?.length) return null;
 
   return (
@@ -93,7 +95,7 @@ export default function QuizReview({ review, title = 'Question review' }) {
 
             {entry.type === 'numerical' && (
               <Text fontSize="sm" mt={2} color="gray.600">
-                Your answer: <b>{answer?.text || '—'}</b> · Expected:{' '}
+                {answerLabel}: <b>{answer?.text || '—'}</b> · Expected:{' '}
                 <b>{(entry.correctAnswers || []).join(', ')}</b>
               </Text>
             )}

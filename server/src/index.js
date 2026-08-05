@@ -79,7 +79,10 @@ app.use(
     // X-Short-Guest carries a live Short's guest identity for participants with
     // no account. Omitting it here makes the browser fail the preflight, so an
     // open Short would be unjoinable from any deployed origin.
-    allowedHeaders: "Content-Type, Authorization, X-Short-Guest, X-App-Name",
+    // X-Quiz-Session names the one browser allowed to drive a quiz sitting. Same
+    // rule: leave it out and every deployed origin fails the preflight, which
+    // fails the whole sitting rather than only the proctoring.
+    allowedHeaders: "Content-Type, Authorization, X-Short-Guest, X-Quiz-Session , X-App-Name",
     credentials: true, // Set to true if you need to allow credentials (e.g., cookies)
   })
 );

@@ -126,7 +126,12 @@ const lmQuizSchema = new mongoose.Schema({
     availableFrom: { type: Date, default: null },
     availableTo: { type: Date, default: null },
     // Results stay hidden until this moment even after submitting, so a whole
-    // cohort can be released together.
+    // cohort can be released together. Null means "as soon as the paper is
+    // marked", which is the moment the student submits.
+    //
+    // A teacher can always bring it forward from the results page — see
+    // `quizController.releaseResults`, which writes `now` here — so this is the
+    // plan, not a promise the staff are locked into.
     resultReleaseAt: { type: Date, default: null },
 
     /* ---- marking ---- */
@@ -183,6 +188,13 @@ const lmQuizSchema = new mongoose.Schema({
   // teacher who adjusts the window and saves again is republishing, not adding
   // a second quiz, and the class should not be notified twice for it.
   announcedAt: { type: Date, default: null },
+  // When the class was told the *marks* exist — a separate announcement from
+  // the one above, and the one students are waiting on. Latched, so a release
+  // time that passes while the sweep runs every few minutes, a teacher pressing
+  // "Publish results now", and a teacher pressing it twice all produce exactly
+  // one notification per student.
+  resultsAnnouncedAt: { type: Date, default: null },
+  resultsAnnouncedByName: { type: String, default: '' },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'user', required: true },
   createdByName: { type: String, default: '' },
 

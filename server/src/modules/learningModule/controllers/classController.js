@@ -14,6 +14,7 @@ const LmComment = require("../models/lmComment");
 const LmQuiz = require("../models/lmQuiz");
 const LmQuizAttempt = require("../models/lmQuizAttempt");
 const LmAudioSession = require("../models/lmAudioSession");
+const engine = require("../services/examEngine");
 
 // Ambiguous glyphs (0/O, 1/I/l) are excluded — the code gets read off a
 // projector and typed by 60 students.
@@ -97,6 +98,43 @@ exports.createClass = async (req, res) => {
   return res.status(201).json(publicClass(klass, "teacher"));
 };
 
+/**
+ * Per class, how many released quiz results this student has not opened yet.
+ *
+ * Keyed by class id as strings, and absent rather than zero for a class with
+ * none — the caller defaults, so an empty map costs nothing to read.
+ */
+async function unreadResultsByClass(studentId, classIds) {
+  const counts = new Map();
+  if (!classIds.length) return counts;
+
+  const attempts = await LmQuizAttempt.find({
+    studentId,
+    classId: { $in: classIds },
+    status: { $in: ["submitted", "expired", "terminated"] },
+    resultViewedAt: null,
+  })
+    .select("quizId classId")
+    .lean();
+  if (!attempts.length) return counts;
+
+  const released = await LmQuiz.find({
+    _id: { $in: attempts.map((attempt) => attempt.quizId) },
+    ...engine.releasedResultsFilter(),
+  })
+    .select("_id")
+    .lean();
+  const releasedIds = new Set(released.map((quiz) => String(quiz._id)));
+
+  attempts.forEach((attempt) => {
+    if (!releasedIds.has(String(attempt.quizId))) return;
+    const key = String(attempt.classId);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+
+  return counts;
+}
+
 /** Every class the caller teaches or is enrolled in, plus a light summary. */
 exports.listMyClasses = async (req, res) => {
   const status = req.query.status === "archived" ? "archived" : "active";
@@ -137,6 +175,13 @@ exports.listMyClasses = async (req, res) => {
       .lean(),
   ]);
 
+  // Quizzes whose marks are out and which this student has not opened yet, per
+  // class. Two queries rather than a join: the attempts say which papers this
+  // student sat and has not read back, and the quizzes say whether the marks
+  // have actually been released — a check that is partly a clock and partly a
+  // teacher's decision, so it cannot be answered from the attempt alone.
+  const unreadResults = await unreadResultsByClass(req.lmUser.id, classIds);
+
   const pointsBy = new Map(pointRows.map((row) => [String(row._id), row]));
   const badgesBy = new Map();
   badgeRows.forEach((row) => {
@@ -158,6 +203,9 @@ exports.listMyClasses = async (req, res) => {
       // the rest.
       myBadges: (badgesBy.get(String(klass._id)) || []).slice(0, 3),
       myBadgeCount: (badgesBy.get(String(klass._id)) || []).length,
+      // Drives the "results are out" marker on the class card. It clears itself
+      // as the student reads each one — see quizController.getAttempt.
+      myNewResults: unreadResults.get(String(klass._id)) || 0,
     };
   });
 
