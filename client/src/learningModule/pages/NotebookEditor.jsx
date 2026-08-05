@@ -28,6 +28,7 @@ import lmApi from '../api/lmApi';
 import { DeadlineCountdown, ErrorState, Loading, SectionCard } from '../components/common';
 import HintTooltip from '../components/HintTooltip';
 import NotebookCell from '../components/NotebookCell';
+import ImportQuestionsModal from '../components/ImportQuestionsModal';
 import { toDateTimeInput } from '../format';
 import usePyodide from '../hooks/usePyodide';
 import { MAX_IMPORT_CELLS, cellsFromFile } from '../notebookImport';
@@ -66,6 +67,7 @@ export default function NotebookEditor() {
   // spinner on both of them at once, so a plain Save looked like it was
   // publishing too.
   const [savingAction, setSavingAction] = useState(null);
+  const [importingCells, setImportingCells] = useState(false);
   const [problems, setProblems] = useState([]);
   const [setupDone, setSetupDone] = useState(false);
 
@@ -306,6 +308,7 @@ export default function NotebookEditor() {
       savingRef.current = false;
       setSavingAction(null);
     }
+    return stored;
   };
 
   if (loading) return <Loading label="Loading notebook…" />;
@@ -580,7 +583,32 @@ export default function NotebookEditor() {
             Import .ipynb / .py
           </Button>
         </HintTooltip>
+
+        {/* Save first: the import appends to the stored notebook and this page
+            reloads it afterwards, so unsaved cells would go with the reload. */}
+        <Button
+          size="sm"
+          variant="outline"
+          colorScheme="blue"
+          isDisabled={Boolean(savingAction)}
+          onClick={async () => {
+            if (!(await save())) return;
+            setImportingCells(true);
+          }}
+        >
+          📥 Import cells from another subject
+        </Button>
       </HStack>
+
+      <ImportQuestionsModal
+        isOpen={importingCells}
+        onClose={() => setImportingCells(false)}
+        classId={classId}
+        type="notebook"
+        targetId={notebookId}
+        partLabel="cells"
+        onImported={load}
+      />
 
       <Text fontSize="xs" opacity={0.6}>
         Importing adds cells to the end of this notebook, without their saved outputs. An{' '}

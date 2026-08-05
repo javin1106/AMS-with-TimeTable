@@ -32,6 +32,7 @@ const discussionController = require("../controllers/discussionController");
 const bugReportController = require("../controllers/bugReportController");
 const profileController = require("../controllers/profileController");
 const adminController = require("../controllers/adminController");
+const importController = require("../controllers/importController");
 
 const router = express.Router();
 
@@ -229,6 +230,19 @@ classRouter.delete("/attempts/:attemptId", requireTeacher, asyncRoute(quizContro
 // released to a class is the class staff's call.
 classRouter.patch("/quizzes/:quizId/answer-key", requireTeacher, asyncRoute(quizController.updateAnswerKey));
 classRouter.post("/quizzes/:quizId/regrade", requireTeacher, asyncRoute(quizController.regradeQuiz));
+// Announcing the marks. Teacher-only for the same reason as the two above: it
+// is the moment a cohort's results become public to them, and it notifies every
+// student who sat the paper.
+classRouter.post("/quizzes/:quizId/release-results", requireTeacher, asyncRoute(quizController.releaseResults));
+
+// Reusing questions from another subject. Teacher-only on this class, and the
+// controller separately proves the caller staffs the class being read *from* —
+// one of the two is not enough, since the pair is what the copy crosses.
+classRouter.get("/import/sources", requireTeacher, asyncRoute(importController.listSources));
+classRouter.get("/import/sources/:sourceClassId/items", requireTeacher, asyncRoute(importController.listItems));
+classRouter.get("/import/items/:itemId/parts", requireTeacher, asyncRoute(importController.listParts));
+classRouter.get("/import/targets", requireTeacher, asyncRoute(importController.listTargets));
+classRouter.post("/import", requireTeacher, asyncRoute(importController.importParts));
 
 // quizzes — analytics
 classRouter.get("/quizzes/:quizId/results", requireTeacher, asyncRoute(quizController.getQuizResults));

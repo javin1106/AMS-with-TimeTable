@@ -34,6 +34,7 @@ import {
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import PublishQuizModal from '../components/PublishQuizModal';
+import ImportQuestionsModal from '../components/ImportQuestionsModal';
 import RichTextEditor from '../components/RichTextEditor';
 import { CopyLinkButton, ErrorState, Loading, SectionCard } from '../components/common';
 import { duplicateOptionIndexes, questionsWithDuplicateOptions } from '../questionRules';
@@ -336,6 +337,7 @@ export default function QuizEditor() {
   const [saving, setSaving] = useState(false);
   const [collaboratorEmails, setCollaboratorEmails] = useState('');
   const publishDialog = useDisclosure();
+  const importDialog = useDisclosure();
   const [wentLive, setWentLive] = useState(false);
 
   const load = useCallback(async () => {
@@ -390,6 +392,16 @@ export default function QuizEditor() {
     } finally {
       setSaving(false);
     }
+  };
+
+  /**
+   * Save first, for the same reason publishing does: the import appends to the
+   * stored paper and this page then reloads it, so anything typed and not saved
+   * would be thrown away by the reload that follows.
+   */
+  const openImport = async () => {
+    if (!(await save())) return;
+    importDialog.onOpen();
   };
 
   // Save first — the dialog publishes what is on the server, not what is on
@@ -519,9 +531,17 @@ export default function QuizEditor() {
                 }}
               />
             ))}
-            <Button variant="outline" onClick={addQuestion}>
-              + Add question
-            </Button>
+            <Flex gap={2} wrap="wrap">
+              <Button variant="outline" onClick={addQuestion}>
+                + Add question
+              </Button>
+              {/* Beside "Add question" rather than in the header: importing one
+                  is the same act as writing one, and this is where a teacher is
+                  looking when they decide they have written this before. */}
+              <Button variant="outline" onClick={openImport} isLoading={saving}>
+                📥 Import questions
+              </Button>
+            </Flex>
 
             {/* The same two actions as the header. A long paper puts the header
                 pair a few screens up, and scrolling back to save is exactly the
@@ -764,7 +784,7 @@ export default function QuizEditor() {
                   />
                 </FormControl>
                 <FormControl>
-                  <FormLabel fontSize="xs">Closes at</FormLabel>
+                  <FormLabel fontSize="xs">Test closes at</FormLabel>
                   <Input
                     size="sm"
                     type="datetime-local"
@@ -773,8 +793,8 @@ export default function QuizEditor() {
                   />
                 </FormControl>
                 <FormControl>
-                  <Tooltip label="Scores stay hidden until this moment, so a whole cohort sees them together">
-                    <FormLabel fontSize="xs">Release results at</FormLabel>
+                  <Tooltip label="Scores stay hidden until this moment, so a whole cohort sees them together. You can always announce them sooner from the results page.">
+                    <FormLabel fontSize="xs">Results announced at</FormLabel>
                   </Tooltip>
                   <Input
                     size="sm"
@@ -782,7 +802,9 @@ export default function QuizEditor() {
                     value={toLocalInput(settings.resultReleaseAt)}
                     onChange={(e) => setSetting('resultReleaseAt', e.target.value || null)}
                   />
-                  <FormHelperText fontSize="xs">Leave blank to show results immediately.</FormHelperText>
+                  <FormHelperText fontSize="xs">
+                    Blank shows each student their result as they submit. Confirmed when you publish.
+                  </FormHelperText>
                 </FormControl>
               </SimpleGrid>
             </SectionCard>
@@ -1055,6 +1077,16 @@ export default function QuizEditor() {
           </TabPanel>
         </TabPanels>
       </Tabs>
+
+      <ImportQuestionsModal
+        isOpen={importDialog.isOpen}
+        onClose={importDialog.onClose}
+        classId={classId}
+        type="quiz"
+        targetId={quizId}
+        partLabel="questions"
+        onImported={load}
+      />
 
       <PublishQuizModal
         isOpen={publishDialog.isOpen}

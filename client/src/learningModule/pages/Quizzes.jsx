@@ -374,6 +374,9 @@ function QuizRow({ quiz, classId, isTeacher, onPublish, onUnpublish, onDelete })
   const opensAt = quiz.settings?.availableFrom;
   const entryCloses = quiz.window?.startDeadline;
   const state = liveState(quiz, isTeacher);
+  // A sitting to go back to. Only ever set for a student, and only once they
+  // have submitted one.
+  const reviewable = !isTeacher && Boolean(quiz.lastAttemptId);
   return (
     <Flex
       bg="white"
@@ -463,7 +466,16 @@ function QuizRow({ quiz, classId, isTeacher, onPublish, onUnpublish, onDelete })
         )}
         {!isTeacher && quiz.resultsPending && (
           <Badge colorScheme="orange" mt={1}>
-            Results not released yet
+            {quiz.resultReleaseAt
+              ? `Results announced ${formatDateTime(quiz.resultReleaseAt)}`
+              : 'Results not released yet'}
+          </Badge>
+        )}
+        {/* Stays up until they open it — the same marker the class card
+            carries, and the same thing clears both. */}
+        {!isTeacher && quiz.resultsUnread && (
+          <Badge colorScheme="green" mt={1} ml={1}>
+            🎯 Results announced — not seen yet
           </Badge>
         )}
         {!isTeacher && start.why && (
@@ -506,15 +518,28 @@ function QuizRow({ quiz, classId, isTeacher, onPublish, onUnpublish, onDelete })
         ) : (
           <Button
             as={RouterLink}
-            to={`/learning/class/${classId}/quiz/${quiz._id}`}
+            /* A finished paper goes straight to its own sitting, which is the
+               only screen that carries the marks and the answer-by-answer
+               review; the brief has neither, so "Review" used to lead to the
+               instructions the student had already read. Everything else goes
+               to the brief, which is what refuses to hand out questions. */
+            to={
+              reviewable
+                ? `/learning/class/${classId}/quiz/${quiz._id}/attempt/${quiz.lastAttemptId}`
+                : `/learning/class/${classId}/quiz/${quiz._id}`
+            }
             size="sm"
-            colorScheme="purple"
+            colorScheme={quiz.resultsUnread ? 'green' : 'purple'}
           >
-            {/* The card always opens. A paper that has not opened yet still has
-                instructions, timings and a countdown worth reading beforehand,
-                and a finished one still has a result to read back — the brief
-                page is what refuses to hand out questions, not this link. */}
-            {quiz.attemptsUsed > 0 ? 'Review' : start.can ? `Start ${isExam ? 'exam' : 'quiz'}` : 'View instructions'}
+            {reviewable
+              ? quiz.resultsUnread
+                ? 'See your result'
+                : 'Review'
+              : quiz.attemptsUsed > 0
+                ? 'Review'
+                : start.can
+                  ? `Start ${isExam ? 'exam' : 'quiz'}`
+                  : 'View instructions'}
           </Button>
         )}
       </HStack>
