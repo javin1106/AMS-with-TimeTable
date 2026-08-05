@@ -17,6 +17,39 @@ const DEPARTMENTS = [];
 const currentYear = new Date().getFullYear();
 const YEARS = Array.from({ length: 7 }, (_, i) => String(currentYear - i));
 
+// ── Period / slot identity ──────────────────────────────────────────────────
+// Only the *names* live here. Timings are configured per-period in Acquisition
+// Control and stored in the AcquisitionControl document, so they must always be
+// read from there — four pages used to hard-code their own copy of the times
+// and none of them changed when an admin edited a period.
+const PERIOD_KEYS = [
+    'period1', 'period2', 'period3', 'period4',
+    'period5', 'period6', 'period7', 'period8',
+    'lunch1', 'lunch2',
+];
+
+const SLOT_NAMES = {
+    period1: 'Period 1',
+    period2: 'Period 2',
+    period3: 'Period 3',
+    period4: 'Period 4',
+    period5: 'Period 5',
+    period6: 'Period 6',
+    period7: 'Period 7',
+    period8: 'Period 8',
+    lunch1:  'Lunch Slot 1',
+    lunch2:  'Lunch Slot 2',
+};
+
+// "Period 1 — 08:30–09:20" from the live config; falls back to the bare name
+// while the config is still loading or if the period has no timing set.
+function formatSlotLabel(periodKey, periods) {
+    const name = SLOT_NAMES[periodKey] || periodKey || '';
+    const p = (periods || []).find((x) => x.periodKey === periodKey);
+    if (!p || !p.startTime) return name;
+    return p.endTime ? `${name} — ${p.startTime}–${p.endTime}` : `${name} — ${p.startTime}`;
+}
+
 // ── Light colorful theme ────────────────────────────────────────────────────
 const theme = {
     bg:           '#f5f6fb',
@@ -226,4 +259,8 @@ const cssReset = `
     .ams-table tfoot td { padding: 10px 16px; background: #f0f2f9; font-weight: 700; font-size: 12px; border: none; border-top: 1px solid #e4e8f5; }
 `;
 
-export { API_BASE, TIMETABLE_API, DEGREES, ERP_DEGREES, DEPARTMENTS, YEARS, theme, styles, cssReset };
+export {
+    API_BASE, TIMETABLE_API, DEGREES, ERP_DEGREES, DEPARTMENTS, YEARS,
+    PERIOD_KEYS, SLOT_NAMES, formatSlotLabel,
+    theme, styles, cssReset,
+};

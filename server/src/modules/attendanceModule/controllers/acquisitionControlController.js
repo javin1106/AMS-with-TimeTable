@@ -228,6 +228,7 @@ exports.addExtraClass = async (req, res) => {
       date,
       periodKey,
       room,
+      batch,
       subject,
       faculty,
       semester,
@@ -308,6 +309,10 @@ exports.addExtraClass = async (req, res) => {
       date,
       periodKey,
       room,
+      // A standalone extra class (one with no regular timetable row behind it)
+      // can only be acquired if it names its batch — that's what selects the
+      // embeddings and files the report.
+      batch,
       subject,
       faculty,
       semester,

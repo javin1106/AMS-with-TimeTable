@@ -24,6 +24,20 @@ function nowMinIST() {
   return ((h % 24) * 60 + m) % (24 * 60);
 }
 
+// Today's calendar date in Asia/Kolkata as "YYYY-MM-DD". Server timezone is
+// not assumed: `new Date().toISOString()` is UTC, which names the previous day
+// between 00:00 and 05:30 IST.
+function todayIST() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const get = (t) => parts.find((p) => p.type === t)?.value;
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
 function timeStrToMin(hhmm, fallback) {
   if (!hhmm || typeof hhmm !== "string" || !hhmm.includes(":")) return fallback;
   const [h, m] = hhmm.split(":").map(Number);
@@ -66,6 +80,7 @@ async function checkAttendanceRunAllowed() {
 
 module.exports = {
   nowMinIST,
+  todayIST,
   isWithinWindow,
   checkGroundTruthAllowed,
   checkAttendanceRunAllowed,
