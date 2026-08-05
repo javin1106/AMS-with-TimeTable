@@ -15,6 +15,8 @@ import ProxyModal from './ProxyModal';
 
 const apiUrl = getEnvironment();
 const REPORT_API = `${apiUrl}/attendancemodule/reports`;
+const REPORT_DELETE_SETTINGS_API = `${apiUrl}/attendancemodule/settings/report-deletion`;
+const USER_API = `${apiUrl}/user/getuser`;
 const ML_API = `${apiUrl}/ml`;
 const OTHER_CONTROLS_API = `${apiUrl}/attendancemodule/settings/other-controls`;
 const pct = (a, b) => (b > 0 ? Math.round((a / b) * 100) : 0);
@@ -157,6 +159,8 @@ export default function AttendanceReport() {
   const [filterDate, setFilterDate] = useState('');
   const [availableSems, setAvailableSems] = useState([]);
   const [semsLoading, setSemsLoading] = useState(false);
+  const [canDeleteReports, setCanDeleteReports] = useState(false);
+  const [deletingReportId, setDeletingReportId] = useState(null);
 
   // ── Detail ────────────────────────────────────────────────────
   const [detailReport, setDetailReport] = useState(null);
@@ -324,6 +328,40 @@ export default function AttendanceReport() {
   useEffect(() => {
     if (tab === 'history') fetchReports();
   }, [tab, fetchReports]);
+
+  // Platform admins and iams-admin have deletion access by default. The
+  // platform-admin setting only opts iams-dept-admin into the action; the
+  // backend independently enforces the same role and department rules.
+  useEffect(() => {
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const userResponse = await fetch(USER_API, {
+          credentials: 'include',
+          signal: controller.signal,
+        });
+        if (!userResponse.ok) return;
+        const userData = await userResponse.json();
+        const roles = Array.isArray(userData?.user?.role) ? userData.user.role : [];
+        if (roles.includes('admin') || roles.includes('iams-admin')) {
+          setCanDeleteReports(true);
+          return;
+        }
+        if (!roles.includes('iams-dept-admin')) return;
+
+        const settingsResponse = await fetch(REPORT_DELETE_SETTINGS_API, {
+          credentials: 'include',
+          signal: controller.signal,
+        });
+        if (!settingsResponse.ok) return;
+        const settings = await settingsResponse.json();
+        setCanDeleteReports(settings.enabled === true);
+      } catch (error) {
+        if (error.name !== 'AbortError') setCanDeleteReports(false);
+      }
+    })();
+    return () => controller.abort();
+  }, []);
 
   // ── Auto-poll detail report when session is live ──────────────
   useEffect(() => {
@@ -679,20 +717,24 @@ export default function AttendanceReport() {
   };
 
   const deleteReport = async (id) => {
-    if (!window.confirm('Delete this draft?')) return;
+    if (!window.confirm(
+      'Permanently delete this attendance report and its associated data? This cannot be undone.',
+    )) return;
+    setDeletingReportId(id);
     try {
-      const data = await (
-        await fetch(`${REPORT_API}/${id}`, { method: 'DELETE' })
-      ).json();
-      if (data.error) {
-        showToast(data.error, 'error');
-        return;
-      }
-      showToast('Deleted');
-      setTab('history');
-      fetchReports();
-    } catch {
-      showToast('Delete failed', 'error');
+      const response = await fetch(`${REPORT_API}/${id}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Delete failed');
+      setReports((current) => current.filter((report) => report._id !== id));
+      if (detailReport?._id === id) setDetailReport(null);
+      showToast('Attendance report deleted');
+    } catch (error) {
+      showToast(error.message || 'Delete failed', 'error');
+    } finally {
+      setDeletingReportId(null);
     }
   };
 
@@ -1849,7 +1891,7 @@ export default function AttendanceReport() {
                           'A',
                           '%',
                           'Status',
-                          '',
+                          'Action',
                         ].map((h) => (
                           <th key={h}>{h}</th>
                         ))}
@@ -1930,11 +1972,38 @@ export default function AttendanceReport() {
                           <td
                             style={{
                               padding: '11px 14px',
-                              color: theme.accent,
                               fontSize: '12px',
                             }}
+                            onClick={(event) => event.stopPropagation()}
                           >
-                            View
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <button
+                                type="button"
+                                onClick={() => openDetail(r._id)}
+                                style={{
+                                  ...styles.btnGhost,
+                                  padding: '6px 10px',
+                                  fontSize: 11,
+                                }}
+                              >
+                                View
+                              </button>
+                              {canDeleteReports && (
+                                <button
+                                  type="button"
+                                  onClick={() => deleteReport(r._id)}
+                                  disabled={deletingReportId === r._id}
+                                  style={{
+                                    ...styles.btnDanger,
+                                    padding: '6px 10px',
+                                    fontSize: 11,
+                                    opacity: deletingReportId === r._id ? 0.6 : 1,
+                                  }}
+                                >
+                                  {deletingReportId === r._id ? 'Deleting…' : 'Delete'}
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))}

@@ -17,6 +17,7 @@ const {
   requireAttendanceWriteAccess,
   requireDeptMenu,
 } = require("../middleware/attendanceAccess");
+const { requireReportDeletionAccess } = require('../middleware/reportDeletionAccess');
 
 const ctrl = new AttendanceReportController();
 
@@ -96,8 +97,9 @@ router.patch("/period/:periodId/student/:rollNo", requireAttendanceWriteAccess, 
   }
 });
 
-// Delete a draft report
-router.delete("/:id", ...attendanceRoleAccess, async (req, res) => {
+// Platform admins and iams-admin may always delete. The platform-admin toggle
+// additionally grants iams-dept-admin deletion within their own department.
+router.delete("/:id", ...attendanceRoleAccess, requireReportDeletionAccess, async (req, res) => {
   try {
     await ctrl.deleteReport(req, res);
   } catch (e) {

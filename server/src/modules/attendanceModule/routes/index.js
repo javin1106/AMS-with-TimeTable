@@ -147,6 +147,10 @@ router.use('/settings/other-controls',
     ...attendanceRoleAccess,
     require("./otherControlsSettingsRoutes"));
 router.use(
+    '/settings/report-deletion',
+    require('./reportDeletionSettingsRoutes'),
+);
+router.use(
     '/health',
     ...attendanceRoleAccess,
     require("./healthRoutes"),
