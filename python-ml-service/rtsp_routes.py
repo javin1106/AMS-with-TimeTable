@@ -566,9 +566,10 @@ def extract_rtsp_stream(req: RTSPRequest):
                         for crop_event in crops_to_emit:
                             yield sse(crop_event)
                         for person_id, new_count in updated.items():
-                            done = new_count >= req.targetImgsPerPerson
+                            p_target = 5 if not person_id.startswith("person_") else req.targetImgsPerPerson
+                            done = new_count >= p_target
                             yield sse({"type": "person_update", "person_id": person_id,
-                                       "count": new_count, "target": req.targetImgsPerPerson, "done": done})
+                                       "count": new_count, "target": p_target, "done": done})
                     except Exception as exc:
                         logger.exception("Background clustering failed: %s", exc)
                     cluster_future = None
@@ -610,14 +611,14 @@ def extract_rtsp_stream(req: RTSPRequest):
                 if now - last_progress_t >= PROGRESS_EVERY:
                     last_progress_t = now
                     n_persons = len(person_counts)
-                    n_done = sum(1 for c in person_counts.values() if c >= req.targetImgsPerPerson)
+                    n_done = sum(1 for p, c in person_counts.items() if c >= (5 if not p.startswith("person_") else req.targetImgsPerPerson))
                     yield sse({"type": "progress",
                                "message": f"Frame {frame_count} | {len(all_embeddings)} detections | {n_persons} people | {n_done}/{n_persons} done"})
 
                 secs_since_new = time.time() - _last_new_person_t
                 if (not req.continuous
                         and person_counts
-                        and all((c >= req.targetImgsPerPerson or (req.maxImgsPerRun > 0 and run_counts.get(p, 0) >= req.maxImgsPerRun)) for p, c in person_counts.items())
+                        and all((c >= (5 if not p.startswith("person_") else req.targetImgsPerPerson) or (req.maxImgsPerRun > 0 and run_counts.get(p, 0) >= req.maxImgsPerRun)) for p, c in person_counts.items())
                         and secs_since_new >= NEW_PERSON_TIMEOUT):
                     yield sse({"type": "stage",
                                "message": f"All persons reached target — no new person for {int(secs_since_new)}s, stopping"})
@@ -646,9 +647,10 @@ def extract_rtsp_stream(req: RTSPRequest):
                 for crop_event in crops_to_emit:
                     yield sse(crop_event)
                 for person_id, new_count in updated.items():
+                    p_target = 5 if not person_id.startswith("person_") else req.targetImgsPerPerson
                     yield sse({"type": "person_update", "person_id": person_id,
-                               "count": new_count, "target": req.targetImgsPerPerson,
-                               "done": new_count >= req.targetImgsPerPerson})
+                               "count": new_count, "target": p_target,
+                               "done": new_count >= p_target})
             except Exception as exc:
                 logger.exception("Final clustering pass failed: %s", exc)
 
@@ -2038,12 +2040,16 @@ def _save_clusters(labels, unique_labels, all_embeddings, all_face_images,
             next_serial += 1
             crops_to_emit.append({"type": "mkdir", "folder": folder_name})
 
+        is_existing = not folder_name.startswith("person_")
+        current_target = 5 if is_existing else target_per_person
+        current_top_n  = 5 if is_existing else top_n
+
         ref_embs = existing_mean_embs.setdefault(folder_name, [])
         ref_embs.append(cluster_mean)
         if len(ref_embs) > MAX_REF_EMBS:
             del ref_embs[:-MAX_REF_EMBS]
-        # Always consider up to target_per_person images from the current pass to replace lower quality existing ones.
-        still_need      = target_per_person
+        # Always consider up to current_target images from the current pass to replace lower quality existing ones.
+        still_need      = current_target
         cluster_sorted  = sorted(
             [(all_face_images[i], all_quality[i], all_timestamps[i], i) for i in indices],
             key=lambda x: x[1], reverse=True)[:still_need]
@@ -2075,7 +2081,7 @@ def _save_clusters(labels, unique_labels, all_embeddings, all_face_images,
             continue
 
         _update_info_inmem(folder_name, new_scores, folder_state, crops_to_emit,
-                           top_n, embed_n, new_embs=new_embs)
+                           current_top_n, embed_n, new_embs=new_embs)
         new_count = len(folder_state.get(folder_name, {}).get("scores", {}))
         person_counts[folder_name] = new_count
         updated[folder_name]       = new_count
