@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { cssReset, styles, theme } from './config';
+import { usePeriods } from './usePeriods';
 import getEnvironment from '../getenvironment';
 
 const apiUrl = getEnvironment();
@@ -8,17 +9,6 @@ const ROOMS_API = `${apiUrl}/timetablemodule/lock/rooms`;
 const MASTERROOM_API = `${apiUrl}/timetablemodule/masterroom`;
 const VERIFY_API = `${apiUrl}/attendancemodule/frame-verification`;
 const CLASS_INFO_API = `${apiUrl}/timetablemodule/lock/attendance-lookup`;
-
-const SLOT_LABELS = {
-    period1: 'Period 1 - 08:30',
-    period2: 'Period 2 - 09:30',
-    period3: 'Period 3 - 10:30',
-    period4: 'Period 4 - 11:30',
-    period5: 'Period 5 - 13:30',
-    period6: 'Period 6 - 14:30',
-    period7: 'Period 7 - 15:30',
-    period8: 'Period 8 - 16:30',
-};
 
 const PAGE_CSS = `
     ${cssReset}
@@ -80,6 +70,7 @@ function EmptyState({ title, subtitle }) {
 }
 
 export default function FrameVerification({ fixedDepartment = '' }) {
+    const { slotLabel } = usePeriods();
     // Deep-link support (e.g. from the ERP Overrides page): ?room=&date=&period=
     // pre-fills the selectors so the linked folder loads without manual clicks.
     const [searchParams] = useSearchParams();
@@ -517,7 +508,7 @@ export default function FrameVerification({ fixedDepartment = '' }) {
                                         {!room ? 'Select room first' : availabilityLoading ? 'Loading periods...' : 'Select period'}
                                     </option>
                                     {visiblePeriods.map((item) => (
-                                        <option key={item} value={item}>{SLOT_LABELS[item] || item}</option>
+                                        <option key={item} value={item}>{slotLabel(item)}</option>
                                     ))}
                                 </select>
                             </div>
@@ -571,7 +562,7 @@ export default function FrameVerification({ fixedDepartment = '' }) {
                                 }}>
                                     <div>
                                         <div style={{ fontSize: 16, fontWeight: 700, color: theme.text, marginBottom: 6 }}>
-                                            {room} · {SLOT_LABELS[period] || period} · {date}
+                                            {room} · {slotLabel(period)} · {date}
                                         </div>
                                         <div style={{ fontSize: 13, color: theme.textMuted }}>
                                             {framesLoading ? 'Loading frames...' : 'Open any image to inspect it in the fullscreen viewer.'}

@@ -9,8 +9,6 @@ const axios = require('axios');
 
 const AcquisitionControl = require('../../../models/acquisitionControl');
 const Allotment = require('../../../models/allotment');
-const LockSem = require('../../../models/locksem');
-const TimeTable = require('../../../models/timetable');
 const Camera = require('../../../models/attendanceModule/camera');
 const Subject = require('../../../models/subject');
 const AttendanceReport = require('../../../models/attendanceReport');
@@ -21,6 +19,7 @@ const {
   buildEnrolledEmbeddingsAdafaceTopK,
 } = require('./embeddingSyncHelper');
 const { checkAttendanceRunAllowed } = require('./timeWindowGuard');
+const { resolveClassContext } = require('./classContextResolver');
 
 const ML_URL = process.env.ML_SERVICE_URL || 'http://localhost:8500';
 const EMBEDDINGS_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'embeddings');
@@ -28,11 +27,6 @@ const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data',
 
 function todayStr() {
   return new Date().toISOString().split('T')[0];
-}
-
-function dayOfWeek(dateStr) {
-  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  return days[new Date(dateStr).getDay()];
 }
 
 function safeSubject(raw) {
@@ -82,86 +76,13 @@ function timeStrToMin(t) {
   return (h || 0) * 60 + (m || 0);
 }
 
-// ── Step: resolve slot context for a room (LockSem primary, ExtraClass fallback) ──
+// ── Step: resolve slot context for a room ──────────────────────────────────
+// Shared with the cron scheduler and the developer lookup page — see
+// classContextResolver.js. Returns null when nothing should run; callers that
+// want the "why" can call resolveClassContext directly.
 async function resolveRoomContext(room, slot, date, config) {
-  const day = dayOfWeek(date);
-
-  // Primary: LockSem
-  const records = await LockSem.aggregate([
-    {
-      $match: {
-        slot: { $regex: new RegExp(`^${slot}$`, 'i') },
-        day: { $regex: new RegExp(`^${day}$`, 'i') },
-        'slotData.room': { $regex: new RegExp(`^${room}$`, 'i') },
-      },
-    },
-    {
-      $lookup: {
-        from: 'timetables',
-        localField: 'timetable',
-        foreignField: '_id',
-        as: 'tt',
-      },
-    },
-    { $unwind: { path: '$tt', preserveNullAndEmptyArrays: false } },
-    { $match: { 'tt.currentSession': true } },
-    { $limit: 1 },
-  ]);
-
-  if (records.length) {
-    const rec = records[0];
-    const tt = rec.tt;
-    const slotEntry = rec.slotData.find(
-      (s) => s.room && s.room.toLowerCase() === room.toLowerCase(),
-    );
-    if (slotEntry) {
-      const session = tt.session || currentSession();
-      const sessionStartYear = parseInt(session.split('-')[0]) || new Date().getFullYear();
-      const semNum = parseInt((rec.sem || '').match(/\d+/)?.[0] || '0');
-      const yearOfStudy = semNum > 0 ? Math.ceil(semNum / 2) : 1;
-      const batchYear = String(sessionStartYear - (yearOfStudy - 1));
-      const ttName = (tt.name || '').toUpperCase();
-      let degree = 'BTECH';
-      for (const d of ['MTECH', 'PHD', 'BSC', 'MSC', 'MBA', 'MCA', 'BTECH']) {
-        if (ttName.includes(d)) { degree = d; break; }
-      }
-      const dept = (tt.dept || '').trim().toUpperCase().replace(/\s+/g, '_');
-      const batch = `${degree}_${dept}_${batchYear}`;
-
-      return {
-        source: 'locksem',
-        batch,
-        subject: slotEntry.subject || '',
-        faculty: slotEntry.faculty || '',
-        sem: rec.sem || '',
-        dept,
-        session,
-        locksemId: rec._id.toString(),
-      };
-    }
-  }
-
-  // Fallback: ExtraClass
-  const extra = (config.extraClasses || []).find(
-    (ec) => ec.active
-      && ec.room?.toLowerCase().trim() === room.toLowerCase().trim()
-      && ec.periodKey === slot
-      && ec.date === date,
-  );
-  if (extra) {
-    return {
-      source: 'extraClass',
-      batch: extra.batch,
-      subject: extra.subject || '',
-      faculty: extra.faculty || '',
-      sem: extra.semester || '',
-      dept: '',
-      session: currentSession(),
-      locksemId: null,
-    };
-  }
-
-  return null;
+  const { ctx } = await resolveClassContext(room, slot, date, config);
+  return ctx;
 }
 
 // ── Step: resolve cameras for a room ──────────────────────────────────────
@@ -274,11 +195,14 @@ async function runRoom({ room, roomOverride, slot, date, config }) {
   push('Working day check passed');
 
   // 2. Slot data
-  const ctx = await resolveRoomContext(room, slot, date, config);
+  const { ctx, reason: ctxReason, day } = await resolveClassContext(room, slot, date, config);
   if (!ctx) {
-    return { room, status: 'skipped', reason: 'No Class Scheduled', log };
+    return { room, status: 'skipped', reason: ctxReason || 'No Class Scheduled', log };
   }
-  push(`Class resolved: ${ctx.batch} — ${ctx.subject} (${ctx.source})`);
+  push(`Class resolved (${day}): ${ctx.batch} — ${ctx.subject} (${ctx.source})`);
+  if (ctx.altered) {
+    push(`Alteration applied: was "${ctx.originalSubject}" / ${ctx.originalFaculty}`);
+  }
 
   // 3. Cameras
   const cameras = await resolveCameras(room, roomOverride);

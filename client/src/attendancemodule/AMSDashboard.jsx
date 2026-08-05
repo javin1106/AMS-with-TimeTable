@@ -13,6 +13,7 @@ import ILeed, { ILEED_FULL_FORM } from './BrandName';
 import PendingActionsCard from './PendingActionsCard';
 import DeptOverridesChart from './DeptOverridesChart';
 import { MLDataFolder } from './MLDataFolder';
+import { usePeriods } from './usePeriods';
 import { createPortal } from "react-dom";
 import { useRef } from "react";
 
@@ -21,12 +22,6 @@ const CAM_API         = `${apiUrl}/attendancemodule/cameras`;
 const LIVE_STATUS_API = `${apiUrl}/attendancemodule/scheduler/live-status`;
 const NOTIF_API       = `${apiUrl}/attendancemodule/settings/notifications`;
 
-const SLOT_LABELS = {
-  period1: 'Period 1 — 08:30', period2: 'Period 2 — 09:30',
-  period3: 'Period 3 — 10:30', period4: 'Period 4 — 11:30',
-  period5: 'Period 5 — 13:30', period6: 'Period 6 — 14:30',
-  period7: 'Period 7 — 15:30', period8: 'Period 8 — 16:30',
-};
 const REPORT_API = `${apiUrl}/attendancemodule/reports`;
 const USER_API   = `${apiUrl}/user/getuser`;
 const ML_DATA_API   = `${apiUrl}/attendancemodule/mldatafoldertree`;
@@ -117,6 +112,7 @@ function StatCard({ label, value, color, loading, delay = 0, suffix = '' }) {
 
 /* ── live report panel ── */
 function LivePanel({ rooms, loading, open, acquisitionActive, slot, date, lastUpdated, onRefresh, onViewFull }) {
+  const { slotLabel } = usePeriods();
   return (
     <div style={{
       overflow: 'hidden',
@@ -132,7 +128,7 @@ function LivePanel({ rooms, loading, open, acquisitionActive, slot, date, lastUp
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: `1px solid ${T.border}`, background: T.surfaceAlt, flexWrap: 'wrap', gap: 8 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>
-            {slot && date ? `${SLOT_LABELS[slot] || slot} — ${date}` : <span style={{ color: T.textMuted }}>No active period</span>}
+            {slot && date ? `${slotLabel(slot)} — ${date}` : <span style={{ color: T.textMuted }}>No active period</span>}
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <span style={{ fontSize: 11, color: T.textMuted }}>Updated: {lastUpdated || '—'}</span>

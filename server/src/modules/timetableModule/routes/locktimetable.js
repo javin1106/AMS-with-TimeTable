@@ -7,6 +7,8 @@ const { checkRole } = require("../../checkRole.middleware");
 const deleteAccess = checkRole(['ITTC', 'DTTI']);
 const LockSem = require('../../../models/locksem');
 const TimeTable = require('../../../models/timetable');
+const AcquisitionControl = require('../../../models/acquisitionControl');
+const { resolveClassContext } = require('../../attendanceModule/controllers/classContextResolver');
 
 LockTimeTableRouter.post("/locktt", protectRoute, async (req, res) => {
     try { await locktimetableController.locktt(req, res); }
@@ -60,54 +62,38 @@ LockTimeTableRouter.delete("/deletebycode/:code", deleteAccess, async (req, res)
 });
 
 // ─── Attendance lookup ────────────────────────────────────────────────────────
+// A room+slot alone does not identify a class — the same room hosts a
+// different subject each weekday. `date` (default: today) picks the weekday,
+// and also lets extra classes / alterations for that date apply, so this
+// returns exactly what the automatic scheduler would run.
 LockTimeTableRouter.get('/attendance-lookup', async (req, res) => {
     try {
         const { room, slot } = req.query;
+        const date = req.query.date || new Date().toISOString().split('T')[0];
         if (!room || !slot) return res.status(400).json({ error: 'room and slot are required' });
 
-        let records = await LockSem.aggregate([
-            { $match: { slot: { $regex: new RegExp(`^${slot}$`, 'i') }, 'slotData.room': { $regex: new RegExp(`^${room}$`, 'i') } } },
-            { $lookup: { from: 'timetables', localField: 'timetable', foreignField: '_id', as: 'timetableData' } },
-            { $unwind: { path: '$timetableData', preserveNullAndEmptyArrays: false } },
-            { $match: { 'timetableData.currentSession': true } },
-            { $limit: 1 }
-        ]);
-        if (!records.length) {
-            records = await LockSem.aggregate([
-                { $match: { slot: { $regex: new RegExp(`^${slot}$`, 'i') }, 'slotData.room': { $regex: new RegExp(`^${room}$`, 'i') } } },
-                { $lookup: { from: 'timetables', localField: 'timetable', foreignField: '_id', as: 'timetableData' } },
-                { $unwind: { path: '$timetableData', preserveNullAndEmptyArrays: false } },
-                { $limit: 1 }
-            ]);
-        }
-        if (!records.length) {
-            const allRooms = await LockSem.aggregate([{ $unwind: '$slotData' }, { $group: { _id: '$slotData.room' } }, { $sort: { _id: 1 } }]);
-            console.log('=== ALL ROOMS IN LOCKSEM ===\n' + allRooms.map(r => r._id).join('\n'));
-            return res.status(404).json({ error: 'No timetable entry found', hint: 'Check server console for all available room names' });
-        }
+        const config = await AcquisitionControl.findOne({ profileName: 'default' }).lean();
+        const { ctx, reason, day, ambiguous } = await resolveClassContext(room, slot, date, config || {});
 
-        const rec = records[0];
-        const tt = rec.timetableData;
-        const slotEntry = rec.slotData.find(s => s.room && s.room.toLowerCase() === room.toLowerCase());
-        if (!slotEntry) return res.status(404).json({ error: 'Room not found in slot data' });
-
-        const session = tt.session || '';
-        const sessionStartYear = parseInt(session.split('-')[0]) || new Date().getFullYear();
-        const semNum = parseInt(((rec.sem || '').toString().match(/\d+/) || [0])[0]);
-        const yearOfStudy = semNum > 0 ? Math.ceil(semNum / 2) : 1;
-        const batchYear = String(sessionStartYear - (yearOfStudy - 1));
-        const ttNameUpper = (tt.name || '').toUpperCase();
-        let degree = 'BTECH';
-        for (const d of ['MTECH', 'PHD', 'BSC', 'MSC', 'MBA', 'MCA', 'BTECH']) {
-            if (ttNameUpper.includes(d)) { degree = d; break; }
+        if (!ctx) {
+            return res.status(404).json({ error: reason || 'No timetable entry found', day, date });
         }
-        const dept = (tt.dept || '').trim().toUpperCase().replace(/\s+/g, '_');
 
         return res.json({
-            batch: `${degree}_${dept}_${batchYear}`,
-            subject: slotEntry.subject || '', faculty: slotEntry.faculty || '',
-            sem: rec.sem || '', dept, degree, session, batchYear,
-            locksemId: rec._id.toString(),
+            batch: ctx.batch,
+            subject: ctx.subject,
+            faculty: ctx.faculty,
+            sem: ctx.sem,
+            dept: ctx.dept,
+            session: ctx.session,
+            locksemId: ctx.locksemId,
+            date,
+            day,
+            source: ctx.source,
+            altered: ctx.altered,
+            originalSubject: ctx.originalSubject,
+            originalFaculty: ctx.originalFaculty,
+            ambiguous,
         });
     } catch (err) {
         console.error('[attendance-lookup] error:', err.message);
