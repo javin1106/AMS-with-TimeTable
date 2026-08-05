@@ -808,18 +808,27 @@ if (recDate !== today) return false;
                 </div>
             );
         }
-        const filteredHistory = history.filter(h => {
-            if (
-                h.department !== department ||
-                h.year !== year ||
-                h.selectedRoom !== selectedRoom
-            )
-                return false;
+        const prefix = [degree, department, year, selectedRoom]
+            .filter(Boolean).join('_').toUpperCase().replace(/\s+/g, '_');
 
-            if (!historyDate) return true;
-
-            return h.filename?.includes(historyDate.replaceAll('-', ''));
-        });
+        const filteredHistory = recordings
+            .filter(rec => {
+                if (rec.status !== 'done' || !rec.filename) return false;
+                if (!rec.label?.toUpperCase().startsWith(prefix)) return false;
+                if (!historyDate) return true;
+                return rec.filename.includes(historyDate.replaceAll('-', ''));
+            })
+            .map(rec => {
+                const local = history.find(h => h.filename === rec.filename);
+                return {
+                    label: rec.label,
+                    stoppedAt: local?.stoppedAt || (rec.started ? new Date(rec.started * 1000).toLocaleString() : '—'),
+                    duration: local?.duration || '—',
+                    filename: rec.filename,
+                    format: rec.format || 'video+audio'
+                };
+            })
+            .reverse();
         return (
           <>
           <div style={{ display: 'flex', gap: 8, alignItems: 'end', marginBottom: 16 }}> 
