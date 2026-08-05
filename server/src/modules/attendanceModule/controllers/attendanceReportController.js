@@ -7,6 +7,7 @@ const Subject = require("../../../models/subject");
 const mongoose = require('mongoose');
 const attendanceSessionController = require('./attendanceSessionController');
 const { deleteUnknownFacesForReport } = require('./unknownFaceWriter');
+const { normalizeDepartment } = require('../middleware/attendanceAccess');
 
 function mergeStudentStatus(slotResults) {
   const rollMap = {};
@@ -729,6 +730,15 @@ class AttendanceReportController {
 
       const report = await AttendanceReport.findById(req.params.id);
       if (!report) return res.status(404).json({ error: "Report not found" });
+
+      // The toggle grants dept-admins only their normal department-scoped
+      // access; it must never allow deletion of another department's report.
+      if (
+        !req.attendanceFullAccess
+        && normalizeDepartment(report.department) !== normalizeDepartment(req.attendanceDepartment)
+      ) {
+        return res.status(403).json({ error: "Department access denied." });
+      }
 
       // Stop timers before deleting a live report so no background callback can
       // recreate or update it after the destructive action completes.

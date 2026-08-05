@@ -1,8 +1,7 @@
 const mongoose = require('mongoose');
 
-// Singleton feature flag for destructive saved-report deletion. It is
-// deliberately disabled by default so deploying the route cannot expose the
-// action until an attendance administrator explicitly enables it.
+// Singleton feature flag controlling whether iams-dept-admin may delete saved
+// reports. Platform admins and iams-admin have deletion access by default.
 const reportDeletionSettingsSchema = new mongoose.Schema(
   {
     enabled: { type: Boolean, default: false },

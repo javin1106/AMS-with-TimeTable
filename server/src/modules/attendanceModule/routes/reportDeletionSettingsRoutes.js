@@ -5,9 +5,10 @@ const ReportDeletionSettingsController = require('../controllers/reportDeletionS
 const router = express.Router();
 const controller = new ReportDeletionSettingsController();
 
-// Both roles may read the flag because iams-admin needs it to decide whether
-// to render Delete. Only the platform admin may change it.
-const reportAdminsOnly = checkRole(['iams-admin']);
+// Attendance admins may read the flag so the UI can decide whether a
+// department administrator gets the optional Delete action. Only the platform
+// admin may change it.
+const reportAdminsOnly = checkRole(['iams-admin', 'iams-dept-admin']);
 const platformAdminsOnly = checkRole(['admin']);
 
 router.get('/', reportAdminsOnly, (req, res) => controller.getSettings(req, res));

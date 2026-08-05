@@ -137,14 +137,14 @@ describe("POST /reports/:id/finalize", () => {
 describe("saved report deletion controls", () => {
   const SETTINGS = "/api/v1/attendancemodule/settings/report-deletion";
 
-  it("is disabled by default and preserves the report", async () => {
+  it("allows iams-admin by default without enabling the department-admin toggle", async () => {
     const report = await AttendanceReport.create(baseReport());
     const res = await request(app)
       .delete(`${BASE}/${report._id}`)
       .set("Cookie", authCookie());
 
-    expect(res.status).toBe(403);
-    expect(await AttendanceReport.findById(report._id)).not.toBeNull();
+    expect(res.status).toBe(200);
+    expect(await AttendanceReport.findById(report._id)).toBeNull();
   });
 
   it("lets only platform admin change the feature flag", async () => {
@@ -170,21 +170,50 @@ describe("saved report deletion controls", () => {
     const fetched = await request(app).get(SETTINGS).set("Cookie", authCookie());
     expect(fetched.status).toBe(200);
     expect(fetched.body.enabled).toBe(true);
+
+    const deptAdminView = await request(app)
+      .get(SETTINGS)
+      .set("Cookie", await deptAdminCookie("CSE"));
+    expect(deptAdminView.status).toBe(200);
+    expect(deptAdminView.body.enabled).toBe(true);
   });
 
-  it("still rejects iams-dept-admin when the feature is enabled", async () => {
+  it("rejects iams-dept-admin by default and preserves the report", async () => {
+    const report = await AttendanceReport.create(baseReport());
+    const res = await request(app)
+      .delete(`${BASE}/${report._id}`)
+      .set("Cookie", await deptAdminCookie("CSE"));
+
+    expect(res.status).toBe(403);
+    expect(await AttendanceReport.findById(report._id)).not.toBeNull();
+  });
+
+  it("allows iams-dept-admin to delete an own-department report when enabled", async () => {
     await ReportDeletionSettings.create({ enabled: true });
     const report = await AttendanceReport.create(baseReport());
     const res = await request(app)
       .delete(`${BASE}/${report._id}`)
-      .set("Cookie", authCookie(["iams-dept-admin"]));
+      .set("Cookie", await deptAdminCookie("CSE"));
+
+    expect(res.status).toBe(200);
+    expect(await AttendanceReport.findById(report._id)).toBeNull();
+  });
+
+  it("keeps iams-dept-admin scoped to their department when enabled", async () => {
+    await ReportDeletionSettings.create({ enabled: true });
+    const report = await AttendanceReport.create(baseReport({
+      batch: "BTECH_ECE_2027",
+      department: "ECE",
+    }));
+    const res = await request(app)
+      .delete(`${BASE}/${report._id}`)
+      .set("Cookie", await deptAdminCookie("CSE"));
 
     expect(res.status).toBe(403);
     expect(await AttendanceReport.findById(report._id)).not.toBeNull();
   });
 
   it("deletes finalized reports and refreshes proxy links for iams-admin", async () => {
-    await ReportDeletionSettings.create({ enabled: true });
     const report = await AttendanceReport.create(baseReport({ status: "finalized" }));
     const linked = await AttendanceReport.create(baseReport({
       batch: "BTECH_ECE_2027",
@@ -210,7 +239,6 @@ describe("saved report deletion controls", () => {
   });
 
   it("allows the platform admin role at the protected route", async () => {
-    await ReportDeletionSettings.create({ enabled: true });
     const report = await AttendanceReport.create(baseReport());
     const res = await request(app)
       .delete(`${BASE}/${report._id}`)

@@ -267,9 +267,9 @@ export default function AttendanceReport() {
     if (tab === 'history') fetchReports();
   }, [tab, fetchReports]);
 
-  // The destructive control is intentionally narrower than report viewing:
-  // only iams-admin sees it, and only while the administrator's feature flag
-  // is enabled. The backend independently enforces both checks.
+  // Platform admins and iams-admin have deletion access by default. The
+  // platform-admin setting only opts iams-dept-admin into the action; the
+  // backend independently enforces the same role and department rules.
   useEffect(() => {
     const controller = new AbortController();
     (async () => {
@@ -281,7 +281,11 @@ export default function AttendanceReport() {
         if (!userResponse.ok) return;
         const userData = await userResponse.json();
         const roles = Array.isArray(userData?.user?.role) ? userData.user.role : [];
-        if (!roles.includes('iams-admin')) return;
+        if (roles.includes('admin') || roles.includes('iams-admin')) {
+          setCanDeleteReports(true);
+          return;
+        }
+        if (!roles.includes('iams-dept-admin')) return;
 
         const settingsResponse = await fetch(REPORT_DELETE_SETTINGS_API, {
           credentials: 'include',

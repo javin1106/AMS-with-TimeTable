@@ -9,8 +9,7 @@ const {
   requireAttendanceWriteAccess,
   requireDeptMenu,
 } = require("../middleware/attendanceAccess");
-const { checkRole } = require('../../checkRole.middleware');
-const { requireReportDeletionEnabled } = require('../middleware/reportDeletionAccess');
+const { requireReportDeletionAccess } = require('../middleware/reportDeletionAccess');
 
 const ctrl = new AttendanceReportController();
 
@@ -90,10 +89,9 @@ router.patch("/period/:periodId/student/:rollNo", requireAttendanceWriteAccess, 
   }
 });
 
-// Delete a saved report only when an admin has enabled the feature. checkRole
-// permits iams-admin and its built-in platform-admin bypass, while excluding
-// iams-dept-admin even though that role can read department-scoped reports.
-router.delete("/:id", checkRole(['iams-admin']), requireReportDeletionEnabled, async (req, res) => {
+// Platform admins and iams-admin may always delete. The platform-admin toggle
+// additionally grants iams-dept-admin deletion within their own department.
+router.delete("/:id", ...attendanceRoleAccess, requireReportDeletionAccess, async (req, res) => {
   try {
     await ctrl.deleteReport(req, res);
   } catch (e) {

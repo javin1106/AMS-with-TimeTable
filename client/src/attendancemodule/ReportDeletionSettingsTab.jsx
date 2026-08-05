@@ -47,8 +47,8 @@ export default function ReportDeletionSettingsTab() {
       setMessage({
         type: 'success',
         text: nextEnabled
-          ? 'Saved-report deletion is now available to iams-admin users.'
-          : 'Saved-report deletion has been disabled.',
+          ? 'Saved-report deletion is now available to department administrators.'
+          : 'Saved-report deletion is no longer available to department administrators.',
       });
     } catch (error) {
       setMessage({ type: 'error', text: error.message });
@@ -77,9 +77,9 @@ export default function ReportDeletionSettingsTab() {
             Saved Attendance Report Deletion
           </div>
           <div style={{ fontSize: 12, lineHeight: 1.6, color: T.textMuted }}>
-            When enabled, iams-admin users can permanently delete saved reports
-            and their linked unknown-face records. Keep this disabled unless
-            report cleanup is required.
+            Platform admins and iams-admin users can always delete saved reports.
+            Enable this control to also allow iams-dept-admin users to delete
+            reports and linked unknown-face records from their own department.
           </div>
         </div>
 
