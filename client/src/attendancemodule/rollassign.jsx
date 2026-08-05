@@ -629,6 +629,39 @@ export default function RollAssign({ fixedDepartment = '' }) {
         finally { setApprovingPhoto(prev => { const n = { ...prev }; delete n[allKey]; return n; }); }
     }, [batchName]);
 
+    const deleteUnapprovedPhoto = useCallback(async (rollNo, filename) => {
+        if (!window.confirm(`Delete photo ${filename}?`)) return;
+        const key = `${rollNo}::${filename}`;
+        setApprovingPhoto(prev => ({ ...prev, [key]: true }));
+        try {
+            const res = await fetch(`${GT_BASE}/photo/${encodeURIComponent(batchName)}/${encodeURIComponent(rollNo)}/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+            if (!res.ok) throw new Error('Delete failed');
+            showToast(`Deleted ${filename}`);
+            setUnapprovedMap(prev => {
+                const u = { ...(prev[rollNo] ? { [rollNo]: prev[rollNo].filter(f => f.filename !== filename) } : {}) };
+                if (u[rollNo]?.length === 0) delete u[rollNo];
+                return { ...prev, ...u };
+            });
+        } catch (err) { showToast(err.message, 'error'); }
+        finally { setApprovingPhoto(prev => { const n = { ...prev }; delete n[key]; return n; }); }
+    }, [batchName]);
+
+    const deleteAllUnapprovedPhotos = useCallback(async (rollNo, files) => {
+        if (!files?.length) return;
+        if (!window.confirm(`Delete all ${files.length} pending photos for ${rollNo}?`)) return;
+        const allKey = `${rollNo}::all`;
+        setApprovingPhoto(prev => ({ ...prev, [allKey]: true }));
+        try {
+            for (const f of files) {
+                const res = await fetch(`${GT_BASE}/photo/${encodeURIComponent(batchName)}/${encodeURIComponent(rollNo)}/${encodeURIComponent(f.filename)}`, { method: 'DELETE' });
+                if (!res.ok) throw new Error('Delete failed');
+            }
+            showToast(`Deleted ${files.length} photo(s)`);
+            setUnapprovedMap(prev => { const n = { ...prev }; delete n[rollNo]; return n; });
+        } catch (err) { showToast(err.message, 'error'); }
+        finally { setApprovingPhoto(prev => { const n = { ...prev }; delete n[allKey]; return n; }); }
+    }, [batchName]);
+
     // CHANGE 2: delete all images for an assigned roll no
     const handleDeleteAllImages = async (item) => {
         if (!window.confirm(`Delete cluster "${item.rollNo}" permanently?\n\nThis removes all photos from disk and the assignment record from DB. Cannot be undone.`)) return;
@@ -935,7 +968,8 @@ export default function RollAssign({ fixedDepartment = '' }) {
                         <Section title="New Photos — Pending Approval" count={Object.values(unapprovedMap).reduce((s, a) => s + a.length, 0)} accentColor={theme.warning}>
                             {Object.entries(unapprovedMap).map(([rollNo, photos]) => (
                                 <UnapprovedPhotoCard key={rollNo} rollNo={rollNo} photos={photos} stats={approvedStats[rollNo]}
-                                    busy={approvingPhoto} onApprove={approvePhoto} onApproveAll={() => approveAllPhotos(rollNo, photos)} />
+                                    busy={approvingPhoto} onApprove={approvePhoto} onApproveAll={() => approveAllPhotos(rollNo, photos)}
+                                    onDelete={deleteUnapprovedPhoto} onDeleteAll={() => deleteAllUnapprovedPhotos(rollNo, photos)} />
                             ))}
                         </Section>
                     )}
@@ -1538,7 +1572,7 @@ function FlagResolveModal({ item, batchName, flagPhotoUrl, flagErpPhotoUrl, roll
     );
 }
 
-function UnapprovedPhotoCard({ rollNo, photos, stats, busy, onApprove, onApproveAll }) {
+function UnapprovedPhotoCard({ rollNo, photos, stats, busy, onApprove, onApproveAll, onDelete, onDeleteAll }) {
     const allKey  = `${rollNo}::all`;
     const allBusy = !!busy[allKey];
     const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : null;
@@ -1547,6 +1581,9 @@ function UnapprovedPhotoCard({ rollNo, photos, stats, busy, onApprove, onApprove
             <div style={{ padding: '10px 14px', borderBottom: `1px solid ${theme.border}`, display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ fontFamily: theme.fontMono, fontSize: '13px', fontWeight: 700, flex: 1 }}>{rollNo}</span>
                 {stats && <span style={{ fontSize: '10px', color: theme.textMuted }}>{stats.embeddingCount}E · {stats.backupCount}B · {stats.approvedCount}✓</span>}
+                <button onClick={onDeleteAll} disabled={allBusy} style={{ padding: '4px 10px', borderRadius: 6, border: `1px solid ${theme.danger}`, background: 'transparent', color: theme.danger, fontSize: '11px', fontWeight: 700, cursor: allBusy ? 'not-allowed' : 'pointer', opacity: allBusy ? 0.5 : 1 }}>
+                    {allBusy ? '…' : `Delete All`}
+                </button>
                 <button onClick={onApproveAll} disabled={allBusy} style={{ padding: '4px 10px', borderRadius: 6, border: 'none', background: theme.success, color: '#000', fontSize: '11px', fontWeight: 700, cursor: allBusy ? 'not-allowed' : 'pointer', opacity: allBusy ? 0.5 : 1 }}>
                     {allBusy ? '…' : `Approve All (${photos.length})`}
                 </button>
@@ -1559,7 +1596,10 @@ function UnapprovedPhotoCard({ rollNo, photos, stats, busy, onApprove, onApprove
                         <div key={photo.filename} style={{ position: 'relative', borderRadius: 6, overflow: 'hidden', border: `1.5px solid ${theme.warning}55`, opacity: photoBusy ? 0.4 : 1, transition: 'opacity 0.15s' }}>
                             <img src={photo.url} alt={photo.filename} style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', display: 'block' }} onError={e => { e.target.style.opacity = '0.15'; }} />
                             {photo.addedAt && <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, background: 'rgba(0,0,0,0.65)', padding: '2px 4px', fontSize: '8px', color: '#ccc', textAlign: 'center' }}>{fmtDate(photo.addedAt)}</div>}
-                            <button onClick={() => onApprove(rollNo, photo.filename)} disabled={photoBusy} title="Approve & add to embedding" style={{ position: 'absolute', top: 4, right: 4, width: 22, height: 22, borderRadius: '50%', background: theme.success, border: 'none', color: '#000', cursor: photoBusy ? 'not-allowed' : 'pointer', fontSize: '12px', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}>✓</button>
+                            <div style={{ position: 'absolute', top: 4, right: 4, display: 'flex', gap: 4 }}>
+                                <button onClick={() => onDelete(rollNo, photo.filename)} disabled={photoBusy} title="Delete photo" style={{ width: 22, height: 22, borderRadius: '50%', background: theme.surface, border: `1px solid ${theme.danger}`, color: theme.danger, cursor: photoBusy ? 'not-allowed' : 'pointer', fontSize: '10px', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}>✕</button>
+                                <button onClick={() => onApprove(rollNo, photo.filename)} disabled={photoBusy} title="Approve & add to embedding" style={{ width: 22, height: 22, borderRadius: '50%', background: theme.success, border: 'none', color: '#000', cursor: photoBusy ? 'not-allowed' : 'pointer', fontSize: '12px', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}>✓</button>
+                            </div>
                         </div>
                     );
                 })}
@@ -1702,6 +1742,11 @@ function GTModal({ rollNo, batchName, onClose, showToast, onMoved }) {
     const [student,    setStudent]    = useState(null);
     const [busy,       setBusy]       = useState(null);
     const [doneSaving, setDoneSaving] = useState(false);
+    const [selectedPhotos, setSelectedPhotos] = useState({});
+
+    const togglePhotoSelection = (filename) => {
+        setSelectedPhotos(prev => ({ ...prev, [filename]: !prev[filename] }));
+    };
 
     const fetchStudent = async () => {
         setLoading(true);
@@ -1752,10 +1797,90 @@ function GTModal({ rollNo, batchName, onClose, showToast, onMoved }) {
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || 'Delete failed');
             showToast(`Deleted ${filename}`);
-            await fetchStudent();
+            setStudent(prev => {
+                if (!prev) return prev;
+                return {
+                    ...prev,
+                    embeddingFiles: (prev.embeddingFiles || []).filter(f => f.filename !== filename),
+                    backupFiles: (prev.backupFiles || []).filter(f => f.filename !== filename),
+                    untrackedFiles: (prev.untrackedFiles || []).filter(f => f.filename !== filename)
+                };
+            });
         } catch (err) { showToast(err.message, 'error'); }
         finally { setBusy(null); }
     };
+
+    const deleteAllBackups = async () => {
+        const backupFiles = student?.backupFiles || [];
+        if (backupFiles.length === 0) return;
+        if (!window.confirm(`Delete all ${backupFiles.length} backup images from ${rollNo}?\nThis will remove them from disk and DB.`)) return;
+        
+        let deletedCount = 0;
+        let errors = 0;
+        setDoneSaving(true);
+        for (const file of backupFiles) {
+            const key = `${rollNo}::${file.filename}`;
+            setBusy(key);
+            try {
+                const res = await fetch(`${GT_BASE}/photo/${encodeURIComponent(batchName)}/${encodeURIComponent(rollNo)}/${encodeURIComponent(file.filename)}`, { method: 'DELETE' });
+                if (res.ok) {
+                    deletedCount++;
+                } else {
+                    errors++;
+                }
+            } catch (err) {
+                errors++;
+            } finally {
+                setBusy(null);
+            }
+        }
+        
+        showToast(`Deleted ${deletedCount} backup images${errors > 0 ? ` with ${errors} errors` : ''}`);
+        setSelectedPhotos({});
+        setStudent(prev => {
+            if (!prev) return prev;
+            return { ...prev, backupFiles: [] };
+        });
+        setDoneSaving(false);
+    };
+
+    const deleteSelectedBackups = async () => {
+        const filesToDelete = Object.keys(selectedPhotos).filter(k => selectedPhotos[k]);
+        if (filesToDelete.length === 0) return;
+        if (!window.confirm(`Delete ${filesToDelete.length} selected backup images from ${rollNo}?\nThis will remove them from disk and DB.`)) return;
+        
+        let deletedCount = 0;
+        let errors = 0;
+        setDoneSaving(true);
+        for (const filename of filesToDelete) {
+            const key = `${rollNo}::${filename}`;
+            setBusy(key);
+            try {
+                const res = await fetch(`${GT_BASE}/photo/${encodeURIComponent(batchName)}/${encodeURIComponent(rollNo)}/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+                if (res.ok) {
+                    deletedCount++;
+                } else {
+                    errors++;
+                }
+            } catch (err) {
+                errors++;
+            } finally {
+                setBusy(null);
+            }
+        }
+        
+        showToast(`Deleted ${deletedCount} selected images${errors > 0 ? ` with ${errors} errors` : ''}`);
+        setSelectedPhotos({});
+        setStudent(prev => {
+            if (!prev) return prev;
+            return {
+                ...prev,
+                backupFiles: (prev.backupFiles || []).filter(f => !filesToDelete.includes(f.filename))
+            };
+        });
+        setDoneSaving(false);
+    };
+
     const handleDone = async () => {
         if (!student) return;
         const currentEmbedding = (student.embeddingFiles || []).map(f => f.filename);
@@ -1790,11 +1915,19 @@ function GTModal({ rollNo, batchName, onClose, showToast, onMoved }) {
         const isEmbed = type === 'embedding';
         const isOther = type === 'other';
         const borderC = isEmbed ? theme.success : isOther ? theme.border : theme.warning;
+        
+        const isSelected = selectedPhotos[photo.filename] || false;
+        
         return (
-            <div style={{ background: theme.bg, border: `1.5px solid ${borderC}33`, borderRadius: 8, overflow: 'hidden', display: 'flex', flexDirection: 'column', opacity: isBusy ? 0.45 : 1, transition: 'opacity 0.15s' }}>
-                <div style={{ position: 'relative', aspectRatio: '1', overflow: 'hidden' }}>
+            <div style={{ background: isSelected ? theme.danger + '11' : theme.bg, border: `1.5px solid ${isSelected ? theme.danger : borderC}33`, borderRadius: 8, overflow: 'hidden', display: 'flex', flexDirection: 'column', opacity: isBusy ? 0.45 : 1, transition: 'opacity 0.15s' }}>
+                <div style={{ position: 'relative', aspectRatio: '1', overflow: 'hidden', cursor: type === 'backup' ? 'pointer' : 'default' }} onClick={() => type === 'backup' && togglePhotoSelection(photo.filename)}>
                     <img src={photoUrl(photo.filename)} alt={photo.filename} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} onError={e => { e.target.style.opacity = '0.15'; }} />
-                    <button onClick={() => deletePhoto(photo.filename)} disabled={isBusy} title="Delete photo"
+                    {type === 'backup' && (
+                        <div style={{ position: 'absolute', top: 6, left: 6 }} onClick={e => e.stopPropagation()}>
+                            <input type="checkbox" checked={isSelected} onChange={(e) => { togglePhotoSelection(photo.filename); }} style={{ width: 16, height: 16, accentColor: theme.danger, cursor: 'pointer' }} />
+                        </div>
+                    )}
+                    <button onClick={(e) => { e.stopPropagation(); deletePhoto(photo.filename); }} disabled={isBusy} title="Delete photo"
                         style={{ position: 'absolute', top: 4, right: 4, width: 22, height: 22, borderRadius: 5, background: '#ffffff', border: `1.5px solid ${theme.danger}`, color: theme.danger, cursor: isBusy ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}>
                         <svg width="11" height="12" viewBox="0 0 11 12" fill="none" xmlns="http://www.w3.org/2000/svg">
                             <path d="M1 3h9M4 3V2h3v1M2 3l.6 7.5a.5.5 0 00.5.5h4.8a.5.5 0 00.5-.5L9 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
@@ -1803,10 +1936,10 @@ function GTModal({ rollNo, batchName, onClose, showToast, onMoved }) {
                         </svg>
                     </button>
                 </div>
-                <div style={{ padding: '4px 6px', display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <div style={{ padding: '4px 6px', display: 'flex', flexDirection: 'column', gap: 2 }} onClick={(e) => { if (type === 'backup') e.stopPropagation(); }}>
                     <div style={{ fontSize: '9px', fontFamily: theme.fontMono, color: theme.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{photo.filename}</div>
                     {photo.score != null && <span style={{ fontSize: '9px', color: theme.accent, background: theme.accentDim, padding: '1px 4px', borderRadius: 3, alignSelf: 'flex-start' }}>{photo.score.toFixed(2)}</span>}
-                    <button onClick={() => movePhoto(photo.filename, type)} disabled={isBusy}
+                    <button onClick={(e) => { e.stopPropagation(); movePhoto(photo.filename, type); }} disabled={isBusy}
                         style={{ padding: '3px 0', fontSize: '9px', fontWeight: 700, background: isEmbed ? theme.warningDim : theme.successDim, color: isEmbed ? theme.warning : theme.success, border: `1px solid ${isEmbed ? theme.warning + '44' : theme.success + '44'}`, borderRadius: 4, cursor: isBusy ? 'not-allowed' : 'pointer', width: '100%' }}>
                         {isEmbed ? '→ Backup' : '↑ Embedding'}
                     </button>
@@ -1815,20 +1948,37 @@ function GTModal({ rollNo, batchName, onClose, showToast, onMoved }) {
         );
     };
 
-    const SectionRow = ({ label, color, bg, photos, type, empty }) => (
-        <div style={{ marginBottom: 20 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, paddingBottom: 8, borderBottom: `1px solid ${color}33` }}>
-                <span style={{ fontSize: '12px', fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{label}</span>
-                <span style={{ fontSize: '11px', padding: '1px 8px', borderRadius: 99, background: bg, color, fontWeight: 700 }}>{photos.length}</span>
+    const SectionRow = ({ label, color, bg, photos, type, empty, onDeleteAll }) => {
+        const selectedCount = type === 'backup' ? Object.keys(selectedPhotos).filter(k => selectedPhotos[k]).length : 0;
+        return (
+            <div style={{ marginBottom: 20 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, paddingBottom: 8, borderBottom: `1px solid ${color}33` }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontSize: '12px', fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{label}</span>
+                        <span style={{ fontSize: '11px', padding: '1px 8px', borderRadius: 99, background: bg, color, fontWeight: 700 }}>{photos.length}</span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                        {selectedCount > 0 && (
+                            <button onClick={deleteSelectedBackups} disabled={doneSaving} style={{ fontSize: '11px', padding: '2px 8px', borderRadius: 6, border: `1px solid ${theme.danger}`, background: theme.danger, color: '#fff', cursor: doneSaving ? 'not-allowed' : 'pointer', opacity: doneSaving ? 0.5 : 1 }}>
+                                Delete Selected ({selectedCount})
+                            </button>
+                        )}
+                        {onDeleteAll && photos.length > 0 && (
+                            <button onClick={onDeleteAll} disabled={doneSaving} style={{ fontSize: '11px', padding: '2px 8px', borderRadius: 6, border: `1px solid ${theme.danger}`, background: 'transparent', color: theme.danger, cursor: doneSaving ? 'not-allowed' : 'pointer', opacity: doneSaving ? 0.5 : 1 }}>
+                                Delete All
+                            </button>
+                        )}
+                    </div>
+                </div>
+                {photos.length === 0
+                    ? <div style={{ fontSize: '12px', color: theme.textMuted, padding: '10px 0' }}>{empty}</div>
+                    : <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: 10 }}>
+                        {photos.map(p => <PhotoCard key={p.filename} photo={p} type={type} />)}
+                      </div>
+                }
             </div>
-            {photos.length === 0
-                ? <div style={{ fontSize: '12px', color: theme.textMuted, padding: '10px 0' }}>{empty}</div>
-                : <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: 10 }}>
-                    {photos.map(p => <PhotoCard key={p.filename} photo={p} type={type} />)}
-                  </div>
-            }
-        </div>
-    );
+        );
+    };
 
     return (
         <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.80)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, paddingTop: 72 }}
@@ -1865,7 +2015,7 @@ function GTModal({ rollNo, batchName, onClose, showToast, onMoved }) {
                                 empty="No embedding images — move some from Backup" />
                             <SectionRow label="Backup" color={theme.warning} bg={theme.warningDim}
                                 photos={student.backupFiles || []} type="backup"
-                                empty="No backup images" />
+                                empty="No backup images" onDeleteAll={deleteAllBackups} />
                             {othCount > 0 && (
                                 <SectionRow label="Other" color={theme.textMuted} bg={theme.border}
                                     photos={student.untrackedFiles || []} type="other"

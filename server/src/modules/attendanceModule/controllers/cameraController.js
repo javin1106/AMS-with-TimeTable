@@ -454,11 +454,11 @@ class CameraController {
             
             const fmt = format && ['video+audio', 'video', 'audio'].includes(format) ? format : 'video+audio';
             if (fmt === 'video+audio') {
-                args.push('-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart');
+                args.push('-c:v', 'copy', '-c:a', 'libmp3lame', '-ar', '44100', '-ac', '2', '-b:a', '128k', '-movflags', '+faststart');
             } else if (fmt === 'video') {
                 args.push('-c:v', 'copy', '-an', '-movflags', '+faststart');
             } else { // audio
-                args.push('-vn', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart');
+                args.push('-vn', '-c:a', 'libmp3lame', '-ar', '44100', '-ac', '2', '-b:a', '128k', '-movflags', '+faststart');
             }
             args.push(filepath);
 
