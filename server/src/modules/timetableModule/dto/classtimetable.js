@@ -12,11 +12,9 @@ class ClassTimeTabledto {
           if (timetable) {
             return timetable._id;
           } else {
-            console.log('No TimeTable found with the specified code.');
             return null;
           }
         } catch (err) {
-          console.error('An error occurred while searching for the TimeTable:', err);
           throw err; // Re-throw the error to propagate it to the calling function
         }
       }
@@ -51,7 +49,6 @@ async findFacultyDataWithSession(session, faculty) {
       
           return result;
         } catch (err) {
-          console.error('An error occurred while searching for faculty data:', err);
           throw err;
         }
       }
@@ -84,7 +81,6 @@ async findRoomDataWithSession(session, room) {
       // console.log('room result', result)
           return result;
         } catch (err) {
-          console.error('An error occurred while searching for faculty data:', err);
           throw err;
         }
       }
@@ -95,15 +91,12 @@ async findRoomDataWithSession(session, room) {
           for (const record of facultySlots) {
             if (record.day === targetDay && record.slot === targetSlot  && record.sem !== sem) {
                 // The day and slot combination is found in the data
-                console.log('faculty slot not available')
                 return false;
             }
         }
         // The day and slot combination is not found in the data
-        console.log('faculty slot available')
         return true;  // Slot is already occupied by the faculty
         } catch (error) {
-          console.error(error);
           return false; // An error occurred while checking availability
         }
       }
@@ -114,15 +107,12 @@ async findRoomDataWithSession(session, room) {
           for (const record of roomSlots) {
             if (record.day === targetDay && record.slot === targetSlot && record.sem !== sem) {
                 // The day and slot combination is found in the data
-                console.log('room slot not available')
                 return false;
             }
         }
         // The day and slot combination is not found in the data
-        console.log('room slot available')
         return true;  // Slot is already occupied by the faculty
         } catch (error) {
-          console.error(error);
           return false; // An error occurred while checking availability
         }
       }
@@ -139,7 +129,7 @@ async findRoomDataWithSession(session, room) {
           
         return latestUpdatedTimeIST;  // Slot is already occupied by the faculty
         } catch (error) {
-          console.error(error);// An error occurred while checking availability
+          // An error occurred while checking availability
         }
       }
   

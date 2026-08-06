@@ -31,7 +31,6 @@ class InstituteLoadController {
           res.json(createdLoad)
           return;
         } catch (error) {
-          console.error(error); 
           res.status(500).json({ error: "Internal server error" });
         }
       }
@@ -44,7 +43,6 @@ class InstituteLoadController {
           res.json(loads)
           // return;
         } catch (error) {
-          console.error(error); 
           res.status(500).json({ error: "Internal server error" });
         }
       }
@@ -58,8 +56,6 @@ class InstituteLoadController {
         try {         
           const currentSession = req.params.session; 
           const allcodes = await TimeTableDto.getAllCodesOfSession(currentSession);
-          console.log('All Codes:', allcodes);
-          console.log('user name:',req.user);
           await instituteLoad.deleteMany({ session: currentSession });
           res.write(`data: {"message": "Deleted previous load and started calculation for new!", "progress": 0}\n\n`);
           let progress = 0;
@@ -70,7 +66,6 @@ class InstituteLoadController {
               progress += 1;
               res.write(`data: {"message": "Processing code ${code}", "progress": ${progress}}\n\n`);
   
-              console.log('Processing sem:',data.sem );
 
               const subDetails = await Subject.find({ subName: data.subName });
               const facultyDetails = await Faculty.find({ name: data.faculty });
@@ -114,7 +109,6 @@ class InstituteLoadController {
             const codeData = await LockSem.find({ code });
             
             for (const data of codeData) {
-              console.log('Processing sem:',data.sem );
       
               if (data.slotData.length > 0 && data.slotData[0] !== '') {
                 const semDetails = await MasterSem.find({ sem: data.sem });
@@ -170,7 +164,6 @@ class InstituteLoadController {
           res.end();
           // res.status(200).json({loads, message: "Institute load calculation completed successfully" });
         } catch (error) {
-          console.error(error); 
           res.status(500).json({ error: "Internal server error" });
         }
       }

@@ -15,7 +15,6 @@ class LogsController {
       const total = await TimetableChangeLog.countDocuments();
       res.json({ logs, totalLogs: total });
     } catch (error) {
-      console.error('Error in getLogs:', error);
       res.status(500).json({ error: "Internal Server Error" });
     }
   }
@@ -25,7 +24,6 @@ class LogsController {
       const total = await TimetableChangeLog.countDocuments();
       res.json({ totalLogs: total });
     } catch (error) {
-      console.error('Error in getTotalLogs:', error);
       res.status(500).json({ error: "Internal Server Error" });
     }
   }
@@ -37,7 +35,6 @@ class LogsController {
       const result = await TimetableChangeLog.deleteMany({ session });
       res.json({ deletedCount: result.deletedCount });
     } catch (error) {
-      console.error('Error deleting logs by session:', error);
       res.status(500).json({ error: 'Internal Server Error' });
     }
   }
@@ -60,7 +57,6 @@ class LogsController {
       const total = await TimetableChangeLog.countDocuments(query);
       res.json({ logs, totalLogs: total });
     } catch (error) {
-      console.error('Error fetching dept logs:', error);
       res.status(500).json({ error: 'Internal Server Error' });
     }
   }
@@ -81,7 +77,6 @@ class LogsController {
       const total = await TimetableChangeLog.countDocuments(query);
       res.json({ logs, totalLogs: total });
     } catch (error) {
-      console.error('Error fetching session logs:', error);
       res.status(500).json({ error: 'Internal Server Error' });
     }
   }

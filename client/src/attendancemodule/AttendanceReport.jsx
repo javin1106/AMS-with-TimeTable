@@ -485,6 +485,11 @@ export default function AttendanceReport() {
           faculty: derivedCtx?.faculty || '',
           semester: derivedCtx?.sem || '',
           locksemId: derivedCtx?.locksemId || '',
+          // Roll numbers enrolled in THIS subject. Without them the ML service
+          // matches against every student in the batch's embedding store, so an
+          // elective's report lists the whole year and its present/absent
+          // counts move with the embedding store rather than the class.
+          enrolledRollNos: derivedCtx?.enrolledRollNos || [],
         }),
       });
 
@@ -632,6 +637,9 @@ export default function AttendanceReport() {
           faculty: derivedCtx?.faculty || '',
           semester: derivedCtx?.sem || '',
           locksemId: derivedCtx?.locksemId || '',
+          // Same roster as the one-shot run above; startSession falls back to
+          // resolving it server-side when this is empty.
+          enrolledRollNos: derivedCtx?.enrolledRollNos || [],
         }),
       });
       const data = await res.json();
@@ -2485,6 +2493,25 @@ function MultiRunTable({ report, readOnly, onOverride, theme, styles }) {
                   }}
                 >
                   {rollNo}
+                  {/* Recognised, but not on this subject's roll list — kept
+                      visible (wrong room? proxy?) and excluded from the
+                      present/absent counts. */}
+                  {final?.inList === false && (
+                    <span
+                      title="Not enrolled in this subject — excluded from the counts"
+                      style={{
+                        marginLeft: 6,
+                        padding: '1px 5px',
+                        borderRadius: 4,
+                        fontSize: 10,
+                        fontWeight: 700,
+                        background: theme.warningDim,
+                        color: theme.textMuted,
+                      }}
+                    >
+                      not enrolled
+                    </span>
+                  )}
                 </td>
                 {runs.map((_, ri) => {
                   const s = runLookup[rollNo][ri];

@@ -21,7 +21,6 @@ class MasterclasstableController {
 
       // If no data exists in the class table, handle gracefully
       if (!classTableData || classTableData.length === 0) {
-        console.warn(`No class table data found for code: ${code}`);
         return { success: false, message: `No class table data found for code: ${code}` };
       }
 
@@ -64,11 +63,9 @@ class MasterclasstableController {
       }
 
       // Return success
-      console.log(`✅ Master table created successfully for code: ${code}`);
       return { success: true, message: 'Data replaced successfully!' };
       
     } catch (error) {
-      console.error('Error in createMasterTable:', error);
       throw error; // Re-throw to be caught by caller
     }
   }
@@ -79,7 +76,6 @@ class MasterclasstableController {
       res.json(semesterList);
       return;
     } catch (error) {
-      console.error(error);
       res.status(500).json({ error: "Internal server error" });
     }
   }
