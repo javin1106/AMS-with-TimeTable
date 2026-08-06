@@ -9,11 +9,9 @@ class AdminClashController {
   async getAllClashes(req, res) {
     try {
       const session = req.params.session;
-      console.log('Getting clashes for session:', session);
 
       const mongoose = require('mongoose');
       if (mongoose.connection.readyState !== 1) {
-        console.error('Database connection state:', mongoose.connection.readyState);
         return res.status(500).json({ 
           error: "Database connection is not established",
           message: "Please wait for the database to reconnect and try again."
@@ -21,7 +19,6 @@ class AdminClashController {
       }
 
       const codes = await TimeTableDto.getAllCodesOfSession(session);
-      console.log('Found department codes:', codes);
 
       if (!codes || codes.length === 0) {
         return res.status(200).json({
@@ -39,7 +36,6 @@ class AdminClashController {
         code: { $in: codes } 
       }).lean();
       
-      console.log(`Fetched ${allRecords.length} locked records for ${codes.length} departments`);
 
       const roomMap = this.buildRoomMap(allRecords);
       const facultyMap = this.buildFacultyMap(allRecords);
@@ -48,7 +44,6 @@ class AdminClashController {
 
       const deptDetailsPromises = codes.map(code => 
         TimeTableDto.getTTdetailsByCode(code).catch(err => {
-          console.error(`Error fetching details for ${code}:`, err);
           return null;
         })
       );
@@ -78,7 +73,6 @@ class AdminClashController {
         if (departmentClashes.length > 0) {
           const departmentName = deptDetailsMap[code]?.name || code;
           
-          console.log(`Department ${code}: name="${departmentName}"`);
           
           allClashes[code] = {
             department: departmentName,
@@ -100,8 +94,6 @@ class AdminClashController {
         }
       }
 
-      console.log(`Total departments with clashes: ${Object.keys(allClashes).length}`);
-      console.log(`Total departments needing attention: ${Object.keys(allNeedsAttention).length}`);
 
       res.status(200).json({
         session,
@@ -112,7 +104,6 @@ class AdminClashController {
         needsAttention: allNeedsAttention,
       });
     } catch (error) {
-      console.error("Error getting all clashes:", error);
       
       if (error.name === 'MongoNetworkError' || error.message.includes('ETIMEDOUT')) {
         return res.status(503).json({ 
@@ -478,7 +469,6 @@ class AdminClashController {
       
       const deptDetailsPromises = codes.map(c => 
         TimeTableDto.getTTdetailsByCode(c).catch(err => {
-          console.error(`Error fetching details for ${c}:`, err);
           return null;
         })
       );
@@ -513,7 +503,6 @@ class AdminClashController {
         needsAttention,
       });
     } catch (error) {
-      console.error("Error getting department clashes:", error);
       res.status(500).json({ error: "Internal server error", message: error.message });
     }
   }
@@ -562,7 +551,6 @@ class AdminClashController {
 
       return clashes;
     } catch (error) {
-      console.error(`Error finding clashes for department ${code}:`, error);
       throw error;
     }
   }
@@ -586,7 +574,6 @@ class AdminClashController {
 
       return conflicts.length > 0 ? conflicts : null;
     } catch (error) {
-      console.error("Error checking room clash:", error);
       return null;
     }
   }
@@ -610,7 +597,6 @@ class AdminClashController {
 
       return conflicts.length > 0 ? conflicts : null;
     } catch (error) {
-      console.error("Error checking faculty clash:", error);
       return null;
     }
   }
@@ -631,7 +617,6 @@ class AdminClashController {
 
       const deptDetailsPromises = codes.map(code => 
         TimeTableDto.getTTdetailsByCode(code).catch(err => {
-          console.error(`Error fetching details for ${code}:`, err);
           return null;
         })
       );
@@ -690,7 +675,6 @@ class AdminClashController {
 
       res.status(200).json(summary);
     } catch (error) {
-      console.error("Error getting clash summary:", error);
       res.status(500).json({ error: "Internal server error", message: error.message });
     }
   }

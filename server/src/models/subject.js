@@ -46,6 +46,18 @@ const subjectSchema = new mongoose.Schema({
     required: false,
   },
   // ── Attendance / Embedding fields ──────────────────────────────────────────
+  // THE roster: the single place a subject's roll numbers are stored, and the
+  // only place attendance reads them from. Everything that establishes a
+  // roster writes here — the .xlsx upload, the ERP roster sync, and embedding
+  // generation when the caller supplied the roll list (see
+  // attendanceModule/controllers/embeddingController.js). Read it through
+  // attendanceModule/controllers/subjectRoster.js, never by querying directly,
+  // so normalisation and the subject lookup stay in one place.
+  //
+  // StudentEmbedding.rollNos is NOT a second copy of this — it records which
+  // roll numbers a particular .pkl was built from, which is a different
+  // question and legitimately differs (students with no ground-truth photos
+  // are on the roster but not in the file).
   enrolledRollNos: {
     type: [String],
     default: [],

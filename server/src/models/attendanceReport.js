@@ -20,6 +20,13 @@ const studentAttendanceSchema = new Schema({
     detectedAge:     { type: Number, default: null },
     detectedGender:  { type: String, enum: ['M', 'F', null], default: null },
     genderMismatch:  { type: Boolean, default: false },  // true if detectedGender != Student.gender
+    // Roster membership — is this roll number on Subject.enrolledRollNos for
+    // the subject taught in this period? Only inList students are counted in
+    // `summary` below. A flagged entry is someone the model recognised from
+    // the batch's embedding store who does not take this subject; kept for
+    // review (wrong room, proxy) but never part of present/absent.
+    inList:          { type: Boolean, default: true },
+    flagged:         { type: Boolean, default: false },
     // logic merge: if multiple time slots
     finalStatus:     { type: String, enum: ['P', 'A', 'R'], default: 'A' },
     // ERP override: set to true when the ERP system records an override for

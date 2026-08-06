@@ -424,7 +424,21 @@ function GenerateTab({ departments, deptLoading, deptError, prefill, onPrefillCo
             const res = await fetch(`${EMB_BASE}/generate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sem: sem.trim(), subject: subject.trim(), dept: dept.trim(), subjectCode: subjectCode.trim(), rollNos }),
+                body: JSON.stringify({
+                    sem: sem.trim(),
+                    subject: subject.trim(),
+                    dept: dept.trim(),
+                    subjectCode: subjectCode.trim(),
+                    rollNos,
+                    // Names the Subject document so the roll numbers in the box
+                    // are saved as that subject's roster (Subject.enrolledRollNos
+                    // — the one place attendance reads them from) alongside the
+                    // embedding file. Without it the list would live only inside
+                    // this run's record and attendance would fall back to the
+                    // whole batch. Omitted when the subject has no Subject doc,
+                    // where the dropdown puts the subject NAME in _id.
+                    subjectId: /^[0-9a-fA-F]{24}$/.test(subjectId) ? subjectId : undefined,
+                }),
             });
 
             if (!res.ok) {

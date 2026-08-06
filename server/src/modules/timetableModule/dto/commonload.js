@@ -15,7 +15,6 @@ class CommonLoaddto {
             return false;
           }
         } catch (err) {
-          console.error('An error occurred while searching for the TimeTable:', err);
           throw err; // Re-throw the error to propagate it to the calling function
         }
       }

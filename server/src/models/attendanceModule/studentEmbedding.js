@@ -17,6 +17,16 @@ const studentEmbeddingSchema = new mongoose.Schema({
     // model is loaded and generation produces AdaFace data for at least one
     // student. Never affects embeddingFile (InsightFace) above.
     adafaceEmbeddingFile: { type: String, default: null },
+    // Manifest of one build: which roll numbers this .pkl was generated from.
+    // NOT a roster — do not read it to answer "who is enrolled in this
+    // subject?". Subject.enrolledRollNos is the single roster of record, and
+    // attendanceModule/controllers/subjectRoster.js is the only way to read it.
+    // The two legitimately differ: a student on the roster with no ground-truth
+    // photos never makes it into the .pkl (that's `missedRollNos`), and a .pkl
+    // is a point-in-time artifact while the roster keeps changing.
+    // The consumers that want this — rebuildSubjectPklsForStudent() and
+    // /ml/enrolled-students — are asking about file contents, which is exactly
+    // what this records.
     rollNos:         { type: [String], default: [] },
     missedRollNos: [{
         rollNo:  { type: String },

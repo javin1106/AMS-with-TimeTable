@@ -66,6 +66,110 @@ function StatusBadge({ label, color }) {
   );
 }
 
+// ── Preflight checklist ──────────────────────────────────────────────────────
+// The five conditions the scheduler evaluates before it calls the ML service,
+// in the order it evaluates them. The list stops at the first failure — that
+// line is the reason attendance is not starting, and its detail names the
+// field to fix. Everything after it was never reached, so it is not shown.
+function PreflightList({ checks }) {
+  if (!checks || checks.length === 0) return null;
+  const firstFailIdx = checks.findIndex(c => !c.ok);
+
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', gap: 4,
+      background: theme.bg, borderRadius: 8, padding: '9px 10px',
+    }}>
+      {checks.map((c, i) => {
+        const isBlocker = i === firstFailIdx;
+        const color = c.ok ? '#10b981' : isBlocker ? '#ef4444' : theme.textMuted;
+        return (
+          <div key={c.key} style={{ display: 'flex', gap: 7, alignItems: 'flex-start' }}>
+            <span style={{
+              fontSize: 11, lineHeight: '15px', color, fontWeight: 800,
+              flexShrink: 0, width: 11, textAlign: 'center',
+            }}>{c.ok ? '✓' : '✕'}</span>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{
+                fontSize: 11, lineHeight: '15px', color: c.ok ? theme.text : color,
+                fontWeight: isBlocker ? 700 : 600,
+              }}>{c.label}</div>
+              {c.detail && (
+                <div style={{
+                  fontSize: 10, lineHeight: '14px', color: isBlocker ? color : theme.textMuted,
+                  wordBreak: 'break-word',
+                }}>{c.detail}</div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Period window ────────────────────────────────────────────────────────────
+// Start and end come from the server in campus (IST) minutes, so this agrees
+// with the scheduler even when the browser is in another timezone.
+function PeriodTiming({ timing }) {
+  if (!timing) return null;
+  const { state, startTime, endTime, minsToStart, minsToEnd, wouldFireNow, tooLateToStart, runDurationMin } = timing;
+
+  const cfg = {
+    upcoming: { color: '#f59e0b', text: `Starts in ${minsToStart} min` },
+    live:     { color: '#6366f1', text: `Ends in ${minsToEnd} min` },
+    over:     { color: theme.textMuted, text: 'Period over' },
+  }[state];
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+      background: theme.bg, borderRadius: 8, padding: '8px 12px',
+      border: `1px solid ${cfg.color}25`,
+    }}>
+      <Dot color={cfg.color} blink={state === 'live'} />
+      <span style={{ fontSize: 12, fontWeight: 700, color: theme.text, fontFamily: "'IBM Plex Mono',monospace" }}>
+        {startTime} – {endTime} IST
+      </span>
+      <span style={{ fontSize: 11, fontWeight: 700, color: cfg.color }}>{cfg.text}</span>
+      {state !== 'over' && (
+        <span style={{ fontSize: 10, color: theme.textMuted, marginLeft: 'auto' }}>
+          {wouldFireNow
+            ? 'Scheduler would fire a run now'
+            : tooLateToStart
+              ? `Under ${runDurationMin} min left — too late to start a run`
+              : 'Waiting for the period to begin'}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ── Global gates ─────────────────────────────────────────────────────────────
+// When one of these fails, every room is waiting for the same reason, so it is
+// shown once above the grid rather than repeated on each card.
+function GateBar({ gates }) {
+  const failing = (gates || []).filter(g => !g.ok);
+  if (failing.length === 0) return null;
+  return (
+    <div style={{
+      background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.25)',
+      borderRadius: 10, padding: '10px 14px', marginBottom: 14,
+      display: 'flex', flexDirection: 'column', gap: 5,
+    }}>
+      <div style={{ fontSize: 11, fontWeight: 800, color: '#ef4444', textTransform: 'uppercase', letterSpacing: '.06em' }}>
+        No room can run — {failing.length} blocking condition{failing.length > 1 ? 's' : ''}
+      </div>
+      {failing.map(g => (
+        <div key={g.key} style={{ fontSize: 12, color: theme.text }}>
+          <strong style={{ fontWeight: 700 }}>{g.label}:</strong>{' '}
+          <span style={{ color: theme.textMuted }}>{g.detail}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function RunProgress({ completed, target }) {
   const pct = target > 0 ? Math.min(100, (completed / target) * 100) : 0;
   const isDone = completed >= target && target > 0;
@@ -190,12 +294,17 @@ function RoomCard({ r, onClickReport, pastPeriod }) {
 
       {/* Skip reason */}
       {isSkipped && (
-        <div style={{
-          fontSize: 12, color: theme.danger, fontWeight: 600,
-          background: 'rgba(239,68,68,0.07)', padding: '6px 10px', borderRadius: 6,
-        }}>
-          {r.reason || 'Skipped'}
-        </div>
+        <>
+          <div style={{
+            fontSize: 12, color: theme.danger, fontWeight: 600,
+            background: 'rgba(239,68,68,0.07)', padding: '6px 10px', borderRadius: 6,
+          }}>
+            {r.reason || 'Skipped'}
+          </div>
+          {/* "No Class Scheduled" alone doesn't say whether it's a free
+              period or a lookup that missed — the checklist does. */}
+          <PreflightList checks={r.preflight} />
+        </>
       )}
 
       {/* Class info + run data */}
@@ -226,6 +335,21 @@ function RoomCard({ r, onClickReport, pastPeriod }) {
             </div>
           ) : (
             <RunProgress completed={r.runsCompleted} target={r.targetRuns} />
+          )}
+
+          {/* Why it has or hasn't started — always available, expanded by
+              default while pending since that is when it is being asked. */}
+          {r.preflight?.length > 0 && (
+            <details open={isPending}>
+              <summary style={{
+                fontSize: 10, color: theme.textMuted, cursor: 'pointer',
+                textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 700,
+                marginBottom: 6, userSelect: 'none',
+              }}>
+                Preflight checks
+              </summary>
+              <PreflightList checks={r.preflight} />
+            </details>
           )}
 
           <AttendanceCounts record={r.lastRecord} />
@@ -417,6 +541,16 @@ export default function LiveReportPage() {
           </div>
         </div>
       )}
+
+      {/* ── When this period starts and ends, on the campus clock ── */}
+      {data?.timing && (
+        <div style={{ marginBottom: 14 }}>
+          <PeriodTiming timing={data.timing} />
+        </div>
+      )}
+
+      {/* ── Conditions that block every room at once ── */}
+      <GateBar gates={data?.gates} />
 
       {/* ── Summary chips ── */}
       {rooms.length > 0 && (

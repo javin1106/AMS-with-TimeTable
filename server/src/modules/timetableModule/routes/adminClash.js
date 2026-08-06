@@ -9,10 +9,8 @@ const adminClashController = new AdminClashController();
  */
 router.get("/:session", async (req, res) => {
   try {
-    console.log('Route hit: GET /adminclash/:session', req.params.session);
     await adminClashController.getAllClashes(req, res);
   } catch (e) {
-    console.error("Error in getAllClashes route:", e);
     res
       .status(e?.status || 500)
       .json({ error: e?.message || "Internal Server Error" });
@@ -25,10 +23,8 @@ router.get("/:session", async (req, res) => {
  */
 router.get("/:session/summary", async (req, res) => {
   try {
-    console.log('Route hit: GET /adminclash/:session/summary', req.params.session);
     await adminClashController.getClashSummary(req, res);
   } catch (e) {
-    console.error("Error in getClashSummary route:", e);
     res
       .status(e?.status || 500)
       .json({ error: e?.message || "Internal Server Error" });
@@ -41,10 +37,8 @@ router.get("/:session/summary", async (req, res) => {
  */
 router.get("/department/:code", async (req, res) => {
   try {
-    console.log('Route hit: GET /adminclash/department/:code', req.params.code);
     await adminClashController.getDepartmentClashes(req, res);
   } catch (e) {
-    console.error("Error in getDepartmentClashes route:", e);
     res
       .status(e?.status || 500)
       .json({ error: e?.message || "Internal Server Error" });

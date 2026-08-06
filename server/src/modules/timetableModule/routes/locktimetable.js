@@ -9,6 +9,7 @@ const LockSem = require('../../../models/locksem');
 const TimeTable = require('../../../models/timetable');
 const AcquisitionControl = require('../../../models/acquisitionControl');
 const { resolveClassContext } = require('../../attendanceModule/controllers/classContextResolver');
+const { resolveSubjectRoster } = require('../../attendanceModule/controllers/subjectRoster');
 
 LockTimeTableRouter.post("/locktt", protectRoute, async (req, res) => {
     try { await locktimetableController.locktt(req, res); }
@@ -79,6 +80,15 @@ LockTimeTableRouter.get('/attendance-lookup', async (req, res) => {
             return res.status(404).json({ error: reason || 'No timetable entry found', day, date });
         }
 
+        // The subject's own roll numbers travel with the context so a one-shot
+        // run can scope matching to this class instead of the whole batch's
+        // embedding store — see attendanceModule/controllers/subjectRoster.js.
+        const { rollNos } = await resolveSubjectRoster({
+            subject: ctx.subject,
+            sem: ctx.sem,
+            dept: ctx.dept,
+        });
+
         return res.json({
             batch: ctx.batch,
             subject: ctx.subject,
@@ -87,6 +97,7 @@ LockTimeTableRouter.get('/attendance-lookup', async (req, res) => {
             dept: ctx.dept,
             session: ctx.session,
             locksemId: ctx.locksemId,
+            enrolledRollNos: rollNos,
             date,
             day,
             source: ctx.source,
@@ -96,7 +107,6 @@ LockTimeTableRouter.get('/attendance-lookup', async (req, res) => {
             ambiguous,
         });
     } catch (err) {
-        console.error('[attendance-lookup] error:', err.message);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -107,26 +117,17 @@ LockTimeTableRouter.get('/sems-by-dept', async (req, res) => {
     // DEBUG: print raw LockSem + timetable data to understand what's in DB
     try {
         const rawLockSem = await LockSem.find({}).limit(3).lean();
-        console.log('=== DEBUG: Sample LockSem records (first 3) ===');
-        console.log(JSON.stringify(rawLockSem, null, 2));
 
         const allTimetables = await TimeTable.find({}, 'dept name code currentSession').lean();
-        console.log('=== DEBUG: All Timetables ===');
-        console.log(JSON.stringify(allTimetables, null, 2));
 
         const lockSemWithRef = await LockSem.countDocuments({ timetable: { $exists: true, $ne: null } });
         const lockSemTotal = await LockSem.countDocuments();
-        console.log(`=== DEBUG: LockSem total=${lockSemTotal}, with timetable ref=${lockSemWithRef} ===`);
 
         const uniqueSems = await LockSem.distinct('sem');
-        console.log('=== DEBUG: Unique sems in LockSem ===', uniqueSems);
 
         const uniqueCodes = await LockSem.distinct('code');
-        console.log('=== DEBUG: Unique codes in LockSem ===', uniqueCodes);
 
-        console.log('=== DEBUG: dept query param received ===', req.query.dept);
     } catch (debugErr) {
-        console.error('DEBUG error:', debugErr.message);
     }
     // END DEBUG
     try {
@@ -175,10 +176,8 @@ LockTimeTableRouter.get('/sems-by-dept', async (req, res) => {
             const na = parseInt(a), nb = parseInt(b);
             return (!isNaN(na) && !isNaN(nb)) ? na - nb : String(a).localeCompare(String(b));
         });
-        console.log(`[sems-by-dept] dept=${dept} → ${sems.length} sems:`, sems);
         return res.json({ sems });
     } catch (err) {
-        console.error('[sems-by-dept] error:', err.message);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -231,10 +230,8 @@ LockTimeTableRouter.get('/subjects-by-dept-sem', async (req, res) => {
         ]);
 
         const subjects = records.map(r => r._id).filter(Boolean);
-        console.log(`[subjects-by-dept-sem] dept=${dept} sem=${sem} → ${subjects.length} subjects`);
         return res.json({ subjects });
     } catch (err) {
-        console.error('[subjects-by-dept-sem] error:', err.message);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -270,7 +267,6 @@ LockTimeTableRouter.get('/rooms', async (req, res) => {
         ]);
         res.json({ rooms: rooms.map(r => r._id).filter(Boolean) });
     } catch (err) {
-        console.error('[rooms] error:', err.message);
         res.status(500).json({ error: 'Internal server error' });
     }
 });

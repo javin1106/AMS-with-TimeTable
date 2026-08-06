@@ -12,7 +12,6 @@ class FacultyController {
           res.json(createdFaculty)
           return;
         } catch (error) {
-          console.error(error); 
           res.status(500).json({ error: "Internal server error" });
         }
       }
@@ -33,7 +32,6 @@ class FacultyController {
           res.json(facultyList);
           return;
         } catch (error) {
-          console.error(error);
           res.status(500).json({ error: "Internal server error" });
         }
       }

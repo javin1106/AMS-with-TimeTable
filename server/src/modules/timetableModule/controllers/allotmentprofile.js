@@ -50,7 +50,6 @@ class AllotmentController {
         res.json(updatedAllotment);
       }
     } catch (error) {
-      console.error(error);
       res.status(500).json({ error: "Internal server error" });
     }
   }
@@ -74,12 +73,10 @@ class AllotmentController {
         const list = await AddAllotment.find({ session});
         return res.status(200).json(list);
       } catch (error) {
-        console.error('Error fetching allotment:', error);
         res.status(500).json({ error: 'Internal server error' });
       }
       
     } catch (error) {
-      console.error(error); 
       res.status(500).json({ error: "Internal server error" });
     }
   }
@@ -126,8 +123,6 @@ class AllotmentController {
         { upsert: true, new: true }
       );
       
-      console.log(' Current session marker updated:', result);
-      console.log(' Set current session to:', session);
       
       // Also update TimeTable for backwards compatibility (if entries exist)
       await TimeTable.updateMany({}, { $set: { currentSession: false } });
@@ -139,7 +134,6 @@ class AllotmentController {
 
       res.status(200).json({ message: `Session ${session} is now current.` });
     } catch (error) {
-      console.error(' Error setting current session:', error);
       res.status(500).json({ error: error.message });
     }
   }
@@ -152,20 +146,15 @@ class AllotmentController {
         { currentSessionValue: 1 }
       );
       
-      console.log(' Fetched current session marker:', currentSessionMarker);
       
       if (currentSessionMarker && currentSessionMarker.currentSessionValue) {
-        console.log(' Returning current session:', currentSessionMarker.currentSessionValue);
         return res.status(200).json({ currentSession: currentSessionMarker.currentSessionValue });
       }
       
-      console.log(' No marker found, checking TimeTable...');
       // Fallback to TimeTable for backwards compatibility
       const currentEntry = await TimeTable.findOne({ currentSession: true }, { session: 1 });
-      console.log(' TimeTable current entry:', currentEntry);
       res.status(200).json({ currentSession: currentEntry ? currentEntry.session : null });
     } catch (error) {
-      console.error(' Error getting current status:', error);
       res.status(500).json({ error: error.message });
     }
   }
