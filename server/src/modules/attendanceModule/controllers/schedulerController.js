@@ -20,10 +20,12 @@ const {
   buildEnrolledEmbeddingsAdafaceTopK,
 } = require('./embeddingSyncHelper');
 const { checkAttendanceRunAllowed, nowMinIST, todayIST } = require('./timeWindowGuard');
-const { resolveClassContext } = require('./classContextResolver');
+const { resolveClassContext, escapeRegex } = require('./classContextResolver');
+const { resolveEmbeddingFile } = require('./embeddingPathResolver');
 
 const ML_URL = process.env.ML_SERVICE_URL || 'http://localhost:8500';
-const EMBEDDINGS_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'embeddings');
+// Embedding .pkl paths come from embeddingPathResolver — see that file for why
+// the dept folder cannot be joined naively.
 const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'ground_truth');
 
 // Campus wall-clock date (IST), not UTC. `toISOString()` names the previous
@@ -33,10 +35,6 @@ const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data',
 // had already run.
 function todayStr() {
   return todayIST();
-}
-
-function safeSubject(raw) {
-  return (raw || '').trim().replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/, '');
 }
 
 function currentSession() {
@@ -140,29 +138,46 @@ async function getEnabledRooms(config) {
 // authoritative pointer. We read it directly rather than fuzzy-guessing a
 // filename, and never touch ground_truth/ or roll numbers from here at all.
 async function resolveSubjectAndPkl(subjectText, sem, dept, session) {
+  // See autoAttendanceScheduler.resolveSubjectAndPkl — the subject name must be
+  // escaped before it becomes a $regex, or names like "FPGA(DE/GE)" never match
+  // themselves.
   const subj = await Subject.findOne({
-    subjectFullName: { $regex: (subjectText || '').trim(), $options: 'i' },
+    subjectFullName: { $regex: escapeRegex((subjectText || '').trim()), $options: 'i' },
     sem,
   }).lean();
 
-  const subjectMeta = subj ? {
+  if (!subj) {
+    return {
+      subjectMeta: null,
+      pkl: null,
+      pklMissingReason:
+        `No Subject matches subjectFullName "${subjectText}" with sem "${sem}" — ` +
+        `check the Subject exists and its sem matches the timetable exactly`,
+    };
+  }
+
+  const subjectMeta = {
     subName: subj.subName || '',
     subCode: subj.subCode || '',
     subjectFullName: subj.subjectFullName || '',
     credits: subj.credits ?? null,
-  } : null;
+  };
 
-  if (!subj || !subj.embeddingFile) {
-    return { subjectMeta, pkl: null };
+  if (!subj.embeddingFile) {
+    return {
+      subjectMeta,
+      pkl: null,
+      pklMissingReason: `Subject "${subj.subjectFullName}" has no embeddingFile — generate embeddings for it`,
+    };
   }
 
-  const fs = require('fs');
-  const deptSafe = safeSubject(dept || subj.dept || 'UNKNOWN');
-  const sessionToUse = session || currentSession();
-  const fullPath = path.join(EMBEDDINGS_DIR, sessionToUse, deptSafe, subj.embeddingFile);
-
-  if (!fs.existsSync(fullPath)) {
-    return { subjectMeta, pkl: null, pklMissingReason: `Subject.embeddingFile (${subj.embeddingFile}) not found on disk at expected path` };
+  const { path: fullPath, reason } = resolveEmbeddingFile({
+    session: session || currentSession(),
+    dept: dept || subj.dept,
+    filename: subj.embeddingFile,
+  });
+  if (!fullPath) {
+    return { subjectMeta, pkl: null, pklMissingReason: reason };
   }
 
   let pklData;
@@ -209,14 +224,15 @@ async function buildPreflight({ room, slot, date, config, cameraInfo, runsComple
   // 2. Subject — matched on name AND semester. A sem mismatch between the
   //    timetable row and the Subject document is the most common silent skip,
   //    so both values are named when it fails.
+  const subjectPattern = escapeRegex((ctx.subject || '').trim());
   const subj = await Subject.findOne({
-    subjectFullName: { $regex: (ctx.subject || '').trim(), $options: 'i' },
+    subjectFullName: { $regex: subjectPattern, $options: 'i' },
     sem: ctx.sem,
   }).lean();
 
   if (!subj) {
     const byNameOnly = await Subject.findOne({
-      subjectFullName: { $regex: (ctx.subject || '').trim(), $options: 'i' },
+      subjectFullName: { $regex: subjectPattern, $options: 'i' },
     }).lean();
     add(
       'subject',
@@ -249,16 +265,17 @@ async function buildPreflight({ room, slot, date, config, cameraInfo, runsComple
       'Subject.embeddingFile is not set — generate embeddings for this subject');
     return { ctx, checks };
   }
-  const pklPath = path.join(
-    EMBEDDINGS_DIR,
-    ctx.session || currentSession(),
-    safeSubject(ctx.dept || subj.dept || 'UNKNOWN'),
-    subj.embeddingFile,
-  );
+  const { path: pklPath, reason: pklReason } = resolveEmbeddingFile({
+    session: ctx.session || currentSession(),
+    dept: ctx.dept || subj.dept,
+    filename: subj.embeddingFile,
+  });
   let stat = null;
-  try { stat = fs.statSync(pklPath); } catch { /* missing — reported below */ }
+  if (pklPath) {
+    try { stat = fs.statSync(pklPath); } catch { /* raced away — reported below */ }
+  }
   if (!stat) {
-    add('embeddings', 'Embedding file found', false, `${subj.embeddingFile} not on disk at ${pklPath}`);
+    add('embeddings', 'Embedding file found', false, pklReason || `${subj.embeddingFile} not readable`);
     return { ctx, checks };
   }
   add('embeddings', 'Embedding file found', true,
@@ -582,11 +599,15 @@ exports.preview = async (req, res) => {
         const ctx = await resolveRoomContext(room, slot, date, config);
         if (!ctx) return { room, status: 'skipped', reason: 'No Class Scheduled' };
         const cameras = await resolveCameras(room, roomOverride);
-        const pkl = resolveEmbeddingPkl(ctx.dept, ctx.subject, ctx.session);
+        // Was resolveEmbeddingPkl(), which does not exist anywhere in the
+        // codebase — this endpoint threw a ReferenceError on every call.
+        const { pkl, pklMissingReason } = await resolveSubjectAndPkl(
+          ctx.subject, ctx.sem, ctx.dept, ctx.session,
+        );
         return {
           room,
           status: pkl ? 'would-run' : 'skipped',
-          reason: pkl ? null : 'No Embeddings for Subject',
+          reason: pkl ? null : (pklMissingReason || 'No Embeddings for Subject'),
           ctx,
           cameras: { hasCam1: !!cameras.cam1, hasCam2: !!cameras.cam2 },
           pkl: pkl ? pkl.filename : null,

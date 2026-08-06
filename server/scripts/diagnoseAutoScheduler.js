@@ -30,7 +30,11 @@ const Camera = require("../src/models/attendanceModule/camera");
 const Subject = require("../src/models/subject");
 const {
   resolveClassContext,
+  escapeRegex,
 } = require("../src/modules/attendanceModule/controllers/classContextResolver");
+const {
+  resolveEmbeddingFile,
+} = require("../src/modules/attendanceModule/controllers/embeddingPathResolver");
 const {
   rosterFromSubject,
 } = require("../src/modules/attendanceModule/controllers/subjectRoster");
@@ -41,7 +45,6 @@ const {
 } = require("../src/modules/attendanceModule/controllers/timeWindowGuard");
 
 const ML_URL = process.env.ML_SERVICE_URL || "http://localhost:8500";
-const EMBEDDINGS_DIR = path.join(__dirname, "..", "ml-data", "embeddings");
 
 const arg = (name) => {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -68,9 +71,6 @@ function timeStrToMin(hhmm) {
 const hhmm = (min) =>
   `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
 
-function safeSubject(raw) {
-  return (raw || "").trim().replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_|_$/, "");
-}
 function currentSession() {
   const now = new Date();
   const year = now.getFullYear();
@@ -230,7 +230,7 @@ async function main() {
 
       // Step 4 — subject document, roster, PKL
       const subj = await Subject.findOne({
-        subjectFullName: { $regex: (ctx.subject || "").trim(), $options: "i" },
+        subjectFullName: { $regex: escapeRegex((ctx.subject || "").trim()), $options: "i" },
         sem: ctx.sem,
       }).lean();
       if (!subj) {
@@ -254,14 +254,13 @@ async function main() {
         fail("Subject.embeddingFile is not set — the scheduler skips this room+slot");
         continue;
       }
-      const pklPath = path.join(
-        EMBEDDINGS_DIR,
-        ctx.session || currentSession(),
-        safeSubject(ctx.dept || subj.dept || "UNKNOWN"),
-        subj.embeddingFile,
-      );
-      if (!fs.existsSync(pklPath)) {
-        fail(`embeddings PKL missing on disk: ${pklPath}`);
+      const { path: pklPath, reason: pklReason } = resolveEmbeddingFile({
+        session: ctx.session || currentSession(),
+        dept: ctx.dept || subj.dept,
+        filename: subj.embeddingFile,
+      });
+      if (!pklPath) {
+        fail(`embeddings PKL missing on disk — ${pklReason}`);
         continue;
       }
       ok(`embeddings PKL present: ${pklPath} (${(fs.statSync(pklPath).size / 1024).toFixed(0)} KB)`);

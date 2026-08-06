@@ -30,7 +30,8 @@ const {
   nowMinIST,
   todayIST,
 } = require("./timeWindowGuard");
-const { resolveClassContext } = require("./classContextResolver");
+const { resolveClassContext, escapeRegex } = require("./classContextResolver");
+const { resolveEmbeddingFile } = require("./embeddingPathResolver");
 const {
   rosterFromSubject,
   reconcileFinalReport,
@@ -39,15 +40,8 @@ const {
 } = require("./subjectRoster");
 
 const ML_URL = process.env.ML_SERVICE_URL || "http://localhost:8500";
-const EMBEDDINGS_DIR = path.join(
-  __dirname,
-  "..",
-  "..",
-  "..",
-  "..",
-  "ml-data",
-  "embeddings",
-);
+// Embedding .pkl paths are resolved by embeddingPathResolver — see that file
+// for why the dept folder cannot be joined naively.
 const GROUND_TRUTH_DIR = path.join(
   __dirname,
   "..",
@@ -135,53 +129,59 @@ async function resolveContext(room, slot, date, config = {}) {
 // read from the same Subject document — see subjectRoster.js for why the
 // roster has to travel with the request.
 async function resolveSubjectAndPkl(subjectText, sem, dept, session) {
+  // escapeRegex is not optional here: a subject like "FPGA(DE/GE)" used raw as
+  // a $regex reads "(DE/GE)" as a capture group, so the pattern matches
+  // "FPGADE/GE" and never the subject's own name. That returned null and the
+  // room was skipped as "No Subject.embeddingFile set" — blaming the embedding
+  // file for a lookup that never found the subject at all.
   const subj = await Subject.findOne({
-    subjectFullName: { $regex: (subjectText || "").trim(), $options: "i" },
+    subjectFullName: { $regex: escapeRegex((subjectText || "").trim()), $options: "i" },
     sem,
   }).lean();
 
-  const subjectMeta = subj
-    ? {
-        subName: subj.subName || "",
-        subCode: subj.subCode || "",
-        subjectFullName: subj.subjectFullName || "",
-        credits: subj.credits ?? null,
-      }
-    : null;
+  if (!subj) {
+    return {
+      subjectMeta: null,
+      roster: [],
+      pkl: null,
+      pklMissingReason:
+        `No Subject matches subjectFullName "${subjectText}" with sem "${sem}" — ` +
+        `check the Subject exists and its sem matches the timetable exactly`,
+    };
+  }
+
+  const subjectMeta = {
+    subName: subj.subName || "",
+    subCode: subj.subCode || "",
+    subjectFullName: subj.subjectFullName || "",
+    credits: subj.credits ?? null,
+  };
 
   const roster = rosterFromSubject(subj);
-  if (subj && roster.length === 0) {
+  if (roster.length === 0) {
     console.warn(
       `[AutoScheduler] Subject "${subj.subjectFullName || subjectText}" (sem ${sem}) has no enrolledRollNos — ` +
         `falling back to every student in the batch's embedding store; present/absent will cover the whole batch.`,
     );
   }
 
-  if (!subj || !subj.embeddingFile) {
+  if (!subj.embeddingFile) {
     return {
       subjectMeta,
       roster,
       pkl: null,
-      pklMissingReason: "No Subject.embeddingFile set for this subject",
+      pklMissingReason:
+        `Subject "${subj.subjectFullName}" has no embeddingFile — generate embeddings for it`,
     };
   }
 
-  const deptSafe = safeSubject(dept || subj.dept || "UNKNOWN");
-  const sessionToUse = session || currentSession();
-  const fullPath = path.join(
-    EMBEDDINGS_DIR,
-    sessionToUse,
-    deptSafe,
-    subj.embeddingFile,
-  );
-
-  if (!fs.existsSync(fullPath)) {
-    return {
-      subjectMeta,
-      roster,
-      pkl: null,
-      pklMissingReason: `embeddingFile (${subj.embeddingFile}) not found on disk`,
-    };
+  const { path: fullPath, reason } = resolveEmbeddingFile({
+    session: session || currentSession(),
+    dept: dept || subj.dept,
+    filename: subj.embeddingFile,
+  });
+  if (!fullPath) {
+    return { subjectMeta, roster, pkl: null, pklMissingReason: reason };
   }
 
   try {
@@ -863,9 +863,14 @@ function startAutoScheduler() {
           `[AutoScheduler] Period ${period.periodKey} starting — firing ${enabledRooms.length} room(s) in parallel`,
         );
 
-        // Step 5: acquire — all enabled rooms in parallel
+        // Step 5: acquire — all enabled rooms in parallel.
+        // allSettled never rejects, so the old .catch() here could not fire and
+        // every per-room throw was discarded unlogged — with the period already
+        // marked as fired, that looked exactly like a scheduler that never ran.
+        // Report each rejection instead.
+        const roomsToRun = enabledRooms.map(({ room }) => room);
         Promise.allSettled(
-          enabledRooms.map(({ room }) =>
+          roomsToRun.map((room) =>
             runSlotAttendance({
               room,
               roomOverride: overrideMap[room.toUpperCase()],
@@ -875,9 +880,16 @@ function startAutoScheduler() {
               config,
             }),
           ),
-        ).catch((err) =>
-          console.error("[AutoScheduler] Parallel run error:", err.message),
-        );
+        ).then((results) => {
+          results.forEach((r, i) => {
+            if (r.status === "rejected") {
+              console.error(
+                `[AutoScheduler] Room ${roomsToRun[i]} threw during ${period.periodKey}:`,
+                r.reason?.stack || r.reason?.message || r.reason,
+              );
+            }
+          });
+        });
       } else if (curMin > endMin) {
         notes.push(`${period.periodKey}: over (ended ${period.endTime})`);
       } else if (curMin > startMin) {
