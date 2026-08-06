@@ -251,7 +251,8 @@ exports.login = async (req, res) => {
 
     captchaGate.noteSuccess(email);
 
-    const maxAge = 3 * 60 * 60; // 3 hours in seconds
+    const isXceedLearning = req.headers['x-app-name'] === 'xceed-learning';
+    const maxAge = isXceedLearning ? 6 * 30 * 24 * 60 * 60 : 3 * 60 * 60; // 6 months vs 3 hours
     const token = jwt.sign({ id: user._id, email, role: user.role }, jwtSecret, {
       expiresIn: maxAge,
     });
