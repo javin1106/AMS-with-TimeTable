@@ -33,11 +33,24 @@ const dailySummaryConfigSchema = new mongoose.Schema({
   threshold: { type: Number, default: 75 }, // percent; only used when mode === "threshold"
 }, { _id: false });
 
+// End-of-class attendance summary mailed to the faculty who taught the period.
+// Unlike every alertType above, the recipient is not a configured role — it is
+// the faculty named on the timetable, resolved to their Faculty.email. So there
+// is no per-role opt-in for it, just this on/off switch (plus the global
+// `enabled` flag, which still gates it like everything else).
+const facultySummaryConfigSchema = new mongoose.Schema({
+  enabled: { type: Boolean, default: false },
+  // Blind-copy every faculty summary to these addresses (HOD / office).
+  // Empty by default — the faculty alone receives it.
+  bccEmails: { type: [String], default: [] },
+}, { _id: false });
+
 const notificationSettingsSchema = new mongoose.Schema({
-  enabled:            { type: Boolean, default: false },
-  roles:              { type: [roleSettingsSchema], default: [] },
-  recipients:         { type: [recipientSchema], default: [] },
-  dailySummaryConfig: { type: dailySummaryConfigSchema, default: () => ({}) },
+  enabled:              { type: Boolean, default: false },
+  roles:                { type: [roleSettingsSchema], default: [] },
+  recipients:           { type: [recipientSchema], default: [] },
+  dailySummaryConfig:   { type: dailySummaryConfigSchema, default: () => ({}) },
+  facultySummaryConfig: { type: facultySummaryConfigSchema, default: () => ({}) },
 }, { timestamps: true });
 
 const DEFAULT_ALERT_TYPES = { serverDown: false, erpDown: false, lowConfidence: false, noReportSaved: false, classBunk: false, duplicateAttendance: false, dailySummary: false, embeddingProgress: false, scheduleCheck: false };
@@ -62,6 +75,12 @@ notificationSettingsSchema.statics.getSettings = async function () {
   // Migration safety for docs created before dailySummaryConfig existed
   if (!settings.dailySummaryConfig) {
     settings.dailySummaryConfig = { enabled: false, frequency: "daily", mode: "all", threshold: 75 };
+  }
+  // Same, for docs created before facultySummaryConfig existed. Defaults to
+  // OFF: turning it on starts mailing people outside the recipients list, so
+  // it must be an explicit choice, never something a deploy switches on.
+  if (!settings.facultySummaryConfig) {
+    settings.facultySummaryConfig = { enabled: false, bccEmails: [] };
   }
   return settings;
 };

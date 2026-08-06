@@ -75,7 +75,10 @@ export default function Navbar() {
 
   const publicPaths = [
     '/',
-    '/guide',
+    // '/guide' is deliberately not public: it is internal developer
+    // documentation (full backend route map, ml-data layout, config shape) and
+    // the API now serves it to administrators only. Unauthenticated visitors
+    // get the login redirect like any other private page.
     '/privacy',
     '/forgot-password',
     '/nirf',

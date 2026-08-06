@@ -139,15 +139,45 @@ function ReportForm({ classes, pointsPerReport, onSent }) {
 /** The admin queue. Only rendered when the API let this account read it. */
 function AdminQueue({ reports, counts, onReviewed }) {
   const [note, setNote] = useState({});
+  const [sendingNote, setSendingNote] = useState(null);
   const toast = useToast();
 
   const decide = async (report, status) => {
     try {
-      await lmApi.reviewBug(report._id, { status, adminNote: note[report._id] || '' });
+      // Only send the note when this admin actually typed one. Sending the
+      // untouched field would post an empty string and wipe whatever note the
+      // report already carried.
+      const edited = note[report._id];
+      await lmApi.reviewBug(report._id, {
+        status,
+        ...(edited === undefined ? {} : { adminNote: edited }),
+      });
       toast({ status: 'success', title: `Marked ${status}` });
       onReviewed();
     } catch (err) {
       toast({ status: 'error', title: err.message });
+    }
+  };
+
+  // A reply without a verdict — "what were you doing when it happened?" on a
+  // ticket that has to stay open until they answer.
+  const sendNote = async (report) => {
+    const text = (note[report._id] ?? report.adminNote ?? '').trim();
+    if (!text) return;
+    setSendingNote(report._id);
+    try {
+      await lmApi.reviewBug(report._id, { adminNote: text });
+      toast({ status: 'success', title: 'Note sent to the reporter' });
+      setNote((current) => {
+        const next = { ...current };
+        delete next[report._id];
+        return next;
+      });
+      onReviewed();
+    } catch (err) {
+      toast({ status: 'error', title: err.message });
+    } finally {
+      setSendingNote(null);
     }
   };
 
@@ -196,13 +226,30 @@ function AdminQueue({ reports, counts, onReviewed }) {
               </Badge>
             )}
 
-            <Input
-              size="sm"
-              placeholder="Note back to the reporter (optional)"
-              value={note[report._id] ?? report.adminNote ?? ''}
-              onChange={(event) => setNote((current) => ({ ...current, [report._id]: event.target.value }))}
-              mb={2}
-            />
+            <HStack spacing={2} mb={2} align="center">
+              <Input
+                size="sm"
+                placeholder="Note back to the reporter (optional)"
+                value={note[report._id] ?? report.adminNote ?? ''}
+                onChange={(event) =>
+                  setNote((current) => ({ ...current, [report._id]: event.target.value }))
+                }
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') sendNote(report);
+                }}
+              />
+              <Button
+                size="sm"
+                colorScheme="purple"
+                variant="outline"
+                flexShrink={0}
+                isLoading={sendingNote === report._id}
+                isDisabled={!(note[report._id] ?? report.adminNote ?? '').trim()}
+                onClick={() => sendNote(report)}
+              >
+                Send note
+              </Button>
+            </HStack>
             <HStack spacing={2} wrap="wrap">
               {/* Only "approve" pays, and only the first time — the server will
                   not pay twice however often this is pressed. */}
