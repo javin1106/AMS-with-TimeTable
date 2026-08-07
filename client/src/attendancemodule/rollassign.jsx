@@ -337,6 +337,12 @@ export default function RollAssign({ fixedDepartment = '' }) {
 
     const reviewQueue = [...pendingReview, ...mergedItems, ...flaggedItems];
 
+    // Every still-unassigned cluster keeps its person_N folder name, and
+    // /auto-match re-scans the whole batch directory — so unmatched and
+    // cross-dept clusters get reprocessed too, not just `unprocessed`.
+    const rematchable = [...unprocessed, ...unmatchedItems, ...crossDeptItems]
+        .filter(r => /^person_\d+$/i.test(r.currentFolder || r.folderName || ''));
+
     const openModal = (item, queue) => {
         if (matching) return;
         setModal({ item, match: item, queue: queue || reviewQueue }); setOverrideRoll(item.rollNo || '');
@@ -884,9 +890,9 @@ export default function RollAssign({ fixedDepartment = '' }) {
                                 : batchYears.map(y => <option key={y} value={y}>{y}</option>)}
                         </select>
                     </div>
-                    <button onClick={runAutoMatch} disabled={matching || !batchName || unprocessed.length === 0 || (!erpStatus.loading && erpStatus.available === false)}
-                        style={{ ...styles.btnPrimary, padding: '9px 20px', fontSize: '13px', opacity: (matching || !batchName || unprocessed.length === 0 || (!erpStatus.loading && erpStatus.available === false)) ? 0.5 : 1 }}>
-                        {matching ? '🔄 Matching…' : `🔍 Match with ERP Photos${unprocessed.length > 0 ? ` (${unprocessed.length})` : ''}`}
+                    <button onClick={runAutoMatch} disabled={matching || !batchName || rematchable.length === 0 || (!erpStatus.loading && erpStatus.available === false)}
+                        style={{ ...styles.btnPrimary, padding: '9px 20px', fontSize: '13px', opacity: (matching || !batchName || rematchable.length === 0 || (!erpStatus.loading && erpStatus.available === false)) ? 0.5 : 1 }}>
+                        {matching ? '🔄 Matching…' : `🔍 Match with ERP Photos${rematchable.length > 0 ? ` (${rematchable.length})` : ''}`}
                     </button>
                 </div>
 
@@ -945,9 +951,13 @@ export default function RollAssign({ fixedDepartment = '' }) {
                         <span style={{ color: theme.textMuted, fontSize: '12px' }}>{pendingReview.length} pending review · click any card to verify and approve</span>
                     </div>
                 )}
-                {!matching && unprocessed.length > 0 && (
+                {!matching && rematchable.length > 0 && (
                     <div style={{ marginTop: 14, padding: '10px 14px', borderRadius: 7, background: theme.accentDim, border: `1px solid ${theme.accent}44`, fontSize: '12px', color: theme.textMuted }}>
-                        <strong style={{ color: theme.accent }}>{unprocessed.length} unprocessed clusters</strong> — click <strong>Match with ERP Photos</strong> to auto-assign them
+                        <strong style={{ color: theme.accent }}>{rematchable.length} clusters awaiting assignment</strong>
+                        {unprocessed.length !== rematchable.length && (
+                            <span> ({unprocessed.length} unprocessed, {rematchable.length - unprocessed.length} previously unmatched)</span>
+                        )}
+                        {' '}— click <strong>Match with ERP Photos</strong> to (re)process them
                     </div>
                 )}
             </div>

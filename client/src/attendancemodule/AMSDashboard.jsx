@@ -575,6 +575,17 @@ export default function AMSDashboard() {
                     <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
                   </svg>
                 </IconNavButton>
+                {/* Scheduler Ledger — the per-period record of what the cron
+                    actually did, including the pre-flight checks behind every
+                    skip. Sits next to Acquisition Control because it is the
+                    answer to "I configured that period, why did nothing run?" */}
+                <IconNavButton title="Scheduler Ledger" onClick={() => navigate('/attendance/scheduler-ledger')}>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={T.textMuted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" />
+                    <rect x="9" y="3" width="6" height="4" rx="1" />
+                    <path d="M9 12h6" /><path d="M9 16h4" />
+                  </svg>
+                </IconNavButton>
                 <IconNavButton title="ML Fine Tuning" onClick={() => navigate('/attendance/ml-fine-tuning')}>
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={T.textMuted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <line x1="4" y1="21" x2="4" y2="14" /><line x1="4" y1="10" x2="4" y2="3" />

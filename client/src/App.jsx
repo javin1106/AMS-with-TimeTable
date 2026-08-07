@@ -162,6 +162,7 @@ import CameraPreview from './attendancemodule/cameraPreview';
 import FrameVerification from './attendancemodule/FrameVerification';
 import UnknownFaces from './attendancemodule/UnknownFaces';
 import SchedulerPage from './attendancemodule/SchedulerPage';
+import SchedulerLedgerPage from './attendancemodule/SchedulerLedgerPage';
 import { ExtraClassPage, AlterClassPage } from './attendancemodule/extraAlterClasses';
 import LiveReportPage from './attendancemodule/LiveReportPage';
 import RecordStream from './attendancemodule/RecordStream';
@@ -519,6 +520,7 @@ function App() {
           <Route path="client-console" element={<ReactConsole />} />
           <Route path="dept-menu-config" element={<DeptMenuConfig />} />
           <Route path="scheduler" element={<SchedulerPage />} />
+          <Route path="scheduler-ledger" element={<SchedulerLedgerPage />} />
           <Route path="live-report" element={<LiveReportPage />} />
           <Route path="view-mldata" element={<MLDataFolder />} />
         </Route>
