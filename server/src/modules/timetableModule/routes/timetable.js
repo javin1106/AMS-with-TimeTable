@@ -78,10 +78,8 @@ TableRouter.delete("/:id", deleteAccess, async (req, res) => {
 //newcode
 TableRouter.get("/alldetails/:code", async (req, res) => {
   try {
-    console.log("Fetching timetable details for code:", req.params.code);
 
     const code = req.params.code;
-    console.log("Code from request params:", code);
     if (!code) {
       return res.status(400).json({ error: "Code is required" });
     }
@@ -90,7 +88,6 @@ TableRouter.get("/alldetails/:code", async (req, res) => {
 
     return res.status(200).json(TTdetails);
   } catch (e) {
-    console.error("Error in GET /alldetails/:code:", e);
     return res
       .status(e?.status || 500)
       .json({ error: e?.message || "Internal Server Error" });

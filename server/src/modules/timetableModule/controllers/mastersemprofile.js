@@ -9,7 +9,6 @@ class MastersemController {
       res.json(createdSemester);
       return;
     } catch (error) {
-      console.error(error);
       res.status(500).json({ error: "Internal server error" });
     }
   }
@@ -20,7 +19,6 @@ class MastersemController {
       res.json(semesterList);
       return;
     } catch (error) {
-      console.error(error);
       res.status(500).json({ error: "Internal server error" });
     }
   }

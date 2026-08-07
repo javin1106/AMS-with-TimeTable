@@ -10,7 +10,6 @@ class AddSemController {
           res.json(createdsem)
           return;
         } catch (error) {
-          console.error(error); 
           res.status(500).json({ error: "Internal server error" });
         }
       }
@@ -31,7 +30,6 @@ class AddSemController {
           res.json(semList)
           return;
         } catch (error) {
-          console.error(error); 
           res.status(500).json({ error: "Internal server error" });
         }
       }

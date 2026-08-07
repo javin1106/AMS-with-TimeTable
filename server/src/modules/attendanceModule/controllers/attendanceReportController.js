@@ -10,8 +10,14 @@ const { deleteUnknownFacesForReport } = require('./unknownFaceWriter');
 const { normalizeDepartment } = require('../middleware/attendanceAccess');
 const ErpCommunicationLog = require("../../../models/attendanceModule/erpCommunicationLog");
 const { recordErpPeriodAttendance } = require("./erpAttendanceStore");
+const {
+  rosterFromSubject,
+  reconcileFinalReport,
+  rosterMembers,
+  membership,
+} = require("./subjectRoster");
 
-function mergeStudentStatus(slotResults) {
+function mergeStudentStatus(slotResults, roster = []) {
   const rollMap = {};
 
   for (const slot of slotResults) {
@@ -91,15 +97,20 @@ function mergeStudentStatus(slotResults) {
     });
   }
 
-  return finalReport;
+  // Pin the merged result to the subject's roster: roster students the model
+  // never saw become Absent, and anyone else it recognised is kept but flagged
+  // out of the counts. See subjectRoster.js.
+  return reconcileFinalReport(finalReport, roster);
 }
 
-// Build summary counts
+// Build summary counts — over the subject's roster only, never over faces the
+// model happened to recognise from elsewhere in the batch.
 function buildSummary(finalReport) {
-  const total = finalReport.length;
-  const present = finalReport.filter((s) => s.finalStatus === "P").length;
-  const absent = finalReport.filter((s) => s.finalStatus === "A").length;
-  const review = finalReport.filter((s) => s.finalStatus === "R").length;
+  const members = rosterMembers(finalReport);
+  const total = members.length;
+  const present = members.filter((s) => s.finalStatus === "P").length;
+  const absent = members.filter((s) => s.finalStatus === "A").length;
+  const review = members.filter((s) => s.finalStatus === "R").length;
   return {
     totalStudents: total,
     present,
@@ -181,6 +192,9 @@ async function detectAndUpdateProxies(date, timeSlot) {
   for (const report of reports) {
     for (const student of report.finalReport) {
       if (student.finalStatus !== "P") continue;
+      // A flagged face isn't enrolled in this class, so "present in two rooms"
+      // doesn't apply to it — it's already surfaced as a flag on the report.
+      if (student.inList === false) continue;
       if (!studentMap.has(student.rollNo)) {
         studentMap.set(student.rollNo, []);
       }
@@ -266,6 +280,43 @@ class AttendanceReportController {
       const students = [];
       const attendance = mlResult.attendance || {};
 
+      // Resolve subject metadata (abbreviation/code/full name) from the
+      // timetable module's Subject collection — this is the data ERP needs
+      // (the free-text `subject` field above is just the timetable's slot
+      // text). Resolved server-side rather than trusted from the client,
+      // since Subject is the timetable module's source of truth. A client-
+      // supplied subjectMeta (if any) is used only as a fallback.
+      //
+      // The same document carries enrolledRollNos — the roll numbers this
+      // report is actually about. The ML result can name students who merely
+      // have embeddings in this batch, so it is not a roster (subjectRoster.js).
+      let resolvedSubjectMeta = subjectMeta || undefined;
+      let roster = [];
+      if (subject) {
+        const subjectDoc = await Subject.findOne({
+          subName: subject,
+          ...(department ? { dept: department } : {}),
+          ...(semester ? { sem: semester } : {}),
+        }).lean();
+        if (subjectDoc) {
+          resolvedSubjectMeta = {
+            subName: subjectDoc.subName || "",
+            subCode: subjectDoc.subCode || "",
+            subjectFullName: subjectDoc.subjectFullName || "",
+            credits: subjectDoc.credits ?? null,
+            subAbbreviation: subjectDoc.subAbbreviation || "",
+          };
+        }
+        roster = rosterFromSubject(subjectDoc);
+        if (roster.length === 0) {
+          console.warn(
+            `[AttendanceReport] No enrolledRollNos for subject "${subject}" (sem ${semester || "?"}) — ` +
+              `report will cover every roll number the ML result returned.`,
+          );
+        }
+      }
+      const rosterSet = new Set(roster);
+
       // Bulk-fetch enrolled students' recorded gender for cross-checking
       // against what InsightFace detected during this session — avoids one
       // DB round-trip per student.
@@ -306,6 +357,7 @@ class AttendanceReportController {
           genderMismatch,
           finalStatus:
             status === "present" ? "P" : status === "review" ? "R" : "A",
+          ...membership(rollNo, data, rosterSet),
         });
       }
 
@@ -322,30 +374,6 @@ class AttendanceReportController {
           processingTimeSec: mlResult.summary?.processing_time || 0,
         },
       };
-
-      // Resolve subject metadata (abbreviation/code/full name) from the
-      // timetable module's Subject collection — this is the data ERP needs
-      // (the free-text `subject` field above is just the timetable's slot
-      // text). Resolved server-side rather than trusted from the client,
-      // since Subject is the timetable module's source of truth. A client-
-      // supplied subjectMeta (if any) is used only as a fallback.
-      let resolvedSubjectMeta = subjectMeta || undefined;
-      if (subject) {
-        const subjectDoc = await Subject.findOne({
-          subName: subject,
-          ...(department ? { dept: department } : {}),
-          ...(semester ? { sem: semester } : {}),
-        }).lean();
-        if (subjectDoc) {
-          resolvedSubjectMeta = {
-            subName: subjectDoc.subName || "",
-            subCode: subjectDoc.subCode || "",
-            subjectFullName: subjectDoc.subjectFullName || "",
-            credits: subjectDoc.credits ?? null,
-            subAbbreviation: subjectDoc.subAbbreviation || "",
-          };
-        }
-      }
 
       // Upsert: ONE report per batch+date+timeSlot ──
       const slotKey = timeSlot || "";
@@ -382,8 +410,8 @@ class AttendanceReportController {
         });
       }
 
-      // Always recompute merged final from ALL runs
-      report.finalReport = mergeStudentStatus(report.slotResults);
+      // Always recompute merged final from ALL runs, scoped to the roster
+      report.finalReport = mergeStudentStatus(report.slotResults, roster);
       report.summary = buildSummary(report.finalReport);
 
       // If report was live (session), keep it live
@@ -1156,7 +1184,9 @@ class AttendanceReportController {
       for (const report of reports) {
         const dateStr = report.date;
         dateSet.add(dateStr);
-        for (const student of report.finalReport) {
+        // Roster students only — an export of a subject's attendance must not
+        // grow rows for faces recognised from elsewhere in the batch.
+        for (const student of rosterMembers(report.finalReport)) {
           if (!studentMap[student.rollNo]) {
             studentMap[student.rollNo] = {};
           }

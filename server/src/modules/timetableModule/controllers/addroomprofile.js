@@ -11,7 +11,6 @@ class addRoomController {
           res.json(createdroom)
           return;
         } catch (error) {
-          console.error(error); 
           res.status(500).json({ error: "Internal server error" });
         }
       }
@@ -31,7 +30,6 @@ class addRoomController {
           res.json(roomList)
           return;
         } catch (error) {
-          console.error(error); 
           res.status(500).json({ error: "Internal server error" });
         }
       }

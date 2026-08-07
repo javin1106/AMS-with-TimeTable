@@ -5,7 +5,6 @@ const findtt = async (code) => {
     const oldtt = await TimeTable.findOne({ code:code });
     return oldtt;
   } catch (error) {
-    console.error(error);
     throw error;
   }
 };

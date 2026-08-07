@@ -30,18 +30,18 @@ const {
   nowMinIST,
   todayIST,
 } = require("./timeWindowGuard");
-const { resolveClassContext } = require("./classContextResolver");
+const { resolveClassContext, escapeRegex } = require("./classContextResolver");
+const { resolveEmbeddingFile } = require("./embeddingPathResolver");
+const {
+  rosterFromSubject,
+  reconcileFinalReport,
+  rosterMembers,
+  membership,
+} = require("./subjectRoster");
 
 const ML_URL = process.env.ML_SERVICE_URL || "http://localhost:8500";
-const EMBEDDINGS_DIR = path.join(
-  __dirname,
-  "..",
-  "..",
-  "..",
-  "..",
-  "ml-data",
-  "embeddings",
-);
+// Embedding .pkl paths are resolved by embeddingPathResolver — see that file
+// for why the dept folder cannot be joined naively.
 const GROUND_TRUTH_DIR = path.join(
   __dirname,
   "..",
@@ -123,53 +123,74 @@ async function resolveContext(room, slot, date, config = {}) {
   return ctx;
 }
 
-// ── Step 4: embeddings — read Subject.embeddingFile directly, no roll numbers ──
+// ── Step 4: embeddings + roster for the subject ──────────────────────────────
+// The PKL is the batch's embedding store; the roster (Subject.enrolledRollNos)
+// is what says which of those students actually sit in this period. Both are
+// read from the same Subject document — see subjectRoster.js for why the
+// roster has to travel with the request.
 async function resolveSubjectAndPkl(subjectText, sem, dept, session) {
+  // escapeRegex is not optional here: a subject like "FPGA(DE/GE)" used raw as
+  // a $regex reads "(DE/GE)" as a capture group, so the pattern matches
+  // "FPGADE/GE" and never the subject's own name. That returned null and the
+  // room was skipped as "No Subject.embeddingFile set" — blaming the embedding
+  // file for a lookup that never found the subject at all.
   const subj = await Subject.findOne({
-    subjectFullName: { $regex: (subjectText || "").trim(), $options: "i" },
+    subjectFullName: { $regex: escapeRegex((subjectText || "").trim()), $options: "i" },
     sem,
   }).lean();
 
-  const subjectMeta = subj
-    ? {
-        subName: subj.subName || "",
-        subCode: subj.subCode || "",
-        subjectFullName: subj.subjectFullName || "",
-        credits: subj.credits ?? null,
-      }
-    : null;
-
-  if (!subj || !subj.embeddingFile) {
+  if (!subj) {
     return {
-      subjectMeta,
+      subjectMeta: null,
+      roster: [],
       pkl: null,
-      pklMissingReason: "No Subject.embeddingFile set for this subject",
+      pklMissingReason:
+        `No Subject matches subjectFullName "${subjectText}" with sem "${sem}" — ` +
+        `check the Subject exists and its sem matches the timetable exactly`,
     };
   }
 
-  const deptSafe = safeSubject(dept || subj.dept || "UNKNOWN");
-  const sessionToUse = session || currentSession();
-  const fullPath = path.join(
-    EMBEDDINGS_DIR,
-    sessionToUse,
-    deptSafe,
-    subj.embeddingFile,
-  );
+  const subjectMeta = {
+    subName: subj.subName || "",
+    subCode: subj.subCode || "",
+    subjectFullName: subj.subjectFullName || "",
+    credits: subj.credits ?? null,
+  };
 
-  if (!fs.existsSync(fullPath)) {
+  const roster = rosterFromSubject(subj);
+  if (roster.length === 0) {
+    console.warn(
+      `[AutoScheduler] Subject "${subj.subjectFullName || subjectText}" (sem ${sem}) has no enrolledRollNos — ` +
+        `falling back to every student in the batch's embedding store; present/absent will cover the whole batch.`,
+    );
+  }
+
+  if (!subj.embeddingFile) {
     return {
       subjectMeta,
+      roster,
       pkl: null,
-      pklMissingReason: `embeddingFile (${subj.embeddingFile}) not found on disk`,
+      pklMissingReason:
+        `Subject "${subj.subjectFullName}" has no embeddingFile — generate embeddings for it`,
     };
+  }
+
+  const { path: fullPath, reason } = resolveEmbeddingFile({
+    session: session || currentSession(),
+    dept: dept || subj.dept,
+    filename: subj.embeddingFile,
+  });
+  if (!fullPath) {
+    return { subjectMeta, roster, pkl: null, pklMissingReason: reason };
   }
 
   try {
     const pklData = fs.readFileSync(fullPath).toString("base64");
-    return { subjectMeta, pkl: { filename: subj.embeddingFile, pklData } };
+    return { subjectMeta, roster, pkl: { filename: subj.embeddingFile, pklData } };
   } catch (err) {
     return {
       subjectMeta,
+      roster,
       pkl: null,
       pklMissingReason: `Failed to read PKL: ${err.message}`,
     };
@@ -224,11 +245,15 @@ function mergeStudentStatus(slotResults, minRunsPresent = 1) {
   });
 }
 
+// Counts cover the subject's roster only. A student the model recognised who
+// is not enrolled in this subject stays in finalReport (flagged) but must not
+// move present/absent — that is exactly what made these numbers drift.
 function buildSummary(finalReport) {
-  const total = finalReport.length;
-  const present = finalReport.filter((s) => s.finalStatus === "P").length;
-  const absent = finalReport.filter((s) => s.finalStatus === "A").length;
-  const review = finalReport.filter((s) => s.finalStatus === "R").length;
+  const members = rosterMembers(finalReport);
+  const total = members.length;
+  const present = members.filter((s) => s.finalStatus === "P").length;
+  const absent = members.filter((s) => s.finalStatus === "A").length;
+  const review = members.filter((s) => s.finalStatus === "R").length;
   return {
     totalStudents: total,
     present,
@@ -243,6 +268,7 @@ function buildSummary(finalReport) {
 async function saveCheckResult({
   ctx,
   subjectMeta,
+  roster = [],
   date,
   slot,
   checkIndex,
@@ -261,6 +287,7 @@ async function saveCheckResult({
   }
 
   const attendance = mlResult.attendance || {};
+  const rosterSet = new Set(roster);
   const students = Object.entries(attendance).map(([rollNo, data]) => ({
     rollNo,
     status: data.status || "absent",
@@ -270,6 +297,7 @@ async function saveCheckResult({
     clusterFolder: null,
     finalStatus:
       data.status === "present" ? "P" : data.status === "review" ? "R" : "A",
+    ...membership(rollNo, data, rosterSet),
   }));
 
   const slotResult = {
@@ -318,9 +346,15 @@ async function saveCheckResult({
   }
   if (subjectMeta) report.subjectMeta = subjectMeta;
 
-  report.finalReport = mergeStudentStatus(report.slotResults, minRunsPresent);
+  // Merge across runs, then pin the result to the subject's roster: roster
+  // students the model never saw become Absent, and anyone else it recognised
+  // is kept but flagged out of the counts.
+  report.finalReport = reconcileFinalReport(
+    mergeStudentStatus(report.slotResults, minRunsPresent),
+    roster,
+  );
 
-  for (const s of report.finalReport) {
+  for (const s of rosterMembers(report.finalReport)) {
     if (
       s.confidenceZone === "low" ||
       (s.avgConfidence || 0) < alertConfidence
@@ -338,7 +372,7 @@ async function saveCheckResult({
     }
   }
 
-  const presentRolls = report.finalReport
+  const presentRolls = rosterMembers(report.finalReport)
     .filter((s) => s.finalStatus === "P")
     .map((s) => s.rollNo);
   if (presentRolls.length > 0) {
@@ -434,6 +468,7 @@ async function runOneCheck({
   date,
   ctx,
   subjectMeta,
+  roster = [],
   cameras,
   pkl,
   runConfig,
@@ -452,6 +487,10 @@ async function runOneCheck({
       faculty: ctx.faculty,
       semester: ctx.sem,
       locksemId: ctx.locksemId,
+      // The subject's own roll numbers. Without this the ML service scopes
+      // the run to whoever is in the batch's embedding store — every student
+      // in the year, not this class (see subjectRoster.js).
+      enrolledRollNos: roster,
       embeddingsPklData: pkl.pklData, // stateless — see resolveSubjectAndPkl; decoded
       // Python-side as a fallback enrollment source
       // when enrolledEmbeddings is empty (see rtsp_routes.py)
@@ -492,6 +531,7 @@ async function runOneCheck({
     await saveCheckResult({
       ctx,
       subjectMeta,
+      roster,
       date,
       slot,
       checkIndex,
@@ -530,7 +570,7 @@ async function runSlotAttendance({
   }
 
   // Step 4: embeddings for the subject
-  const { subjectMeta, pkl, pklMissingReason } = await resolveSubjectAndPkl(
+  const { subjectMeta, roster, pkl, pklMissingReason } = await resolveSubjectAndPkl(
     ctx.subject,
     ctx.sem,
     ctx.dept,
@@ -592,6 +632,7 @@ async function runSlotAttendance({
       date,
       ctx,
       subjectMeta,
+      roster,
       cameras,
       pkl,
       runConfig,
@@ -674,6 +715,23 @@ function startAutoScheduler() {
   let triggeredToday = new Set();
   let triggeredForDate = null;
 
+  // Every tick that decides "nothing to do" used to return silently, so a
+  // scheduler that was switched off, holidayed out, or looking at periods that
+  // had all already fired was indistinguishable from one that had crashed —
+  // the log was empty either way. Log the reason, but only when it changes, so
+  // a whole idle day costs one line per distinct cause rather than 1440.
+  let lastSkip = null;
+  const skip = (reason) => {
+    if (lastSkip !== reason) {
+      lastSkip = reason;
+      console.log(`[AutoScheduler] Idle — ${reason}`);
+    }
+  };
+  const active = (msg) => {
+    lastSkip = null;
+    if (msg) console.log(`[AutoScheduler] ${msg}`);
+  };
+
   cron.schedule("* * * * *", async () => {
     const date = todayStr();
     const curMin = nowMin();
@@ -698,17 +756,26 @@ function startAutoScheduler() {
       );
       return;
     }
-    if (!config) return;
+    if (!config) {
+      skip('no AcquisitionControl profile named "default" exists');
+      return;
+    }
 
     // Step 2: working day check (global on/off + stopped days + allotment non-working days)
-    if (!config.active) return;
-    if ((config.stoppedDays || []).includes(date)) return;
+    if (!config.active) {
+      skip("AcquisitionControl.active is false (acquisition switched off)");
+      return;
+    }
+    if ((config.stoppedDays || []).includes(date)) {
+      skip(`${date} is in AcquisitionControl.stoppedDays`);
+      return;
+    }
 
     // Optional 08:30–17:30 IST restriction (admin toggle, default off). Only
     // bites when the toggle is ON; when OFF, runs fire at any time as before.
     const runGate = await checkAttendanceRunAllowed();
     if (!runGate.allowed) {
-      console.log(`[AutoScheduler] Skipping ${date} — ${runGate.reason}`);
+      skip(runGate.reason);
       return;
     }
     const allotmentEntry = await Allotment.findOne({
@@ -718,17 +785,35 @@ function startAutoScheduler() {
       .catch(() => null);
     if (allotmentEntry) {
       const nwd = allotmentEntry.nonWorkingDays.find((d) => d.date === date);
-      console.log(
-        `[AutoScheduler] Skipping ${date} — non-working day: ${nwd?.remark || "Holiday"}`,
+      skip(
+        `${date} is a non-working day in Allotment: ${nwd?.remark || "Holiday"}`,
       );
       return;
     }
 
-    for (const period of config.periods || []) {
+    const periods = config.periods || [];
+    if (periods.length === 0) {
+      skip("AcquisitionControl.periods is empty — no period times configured");
+      return;
+    }
+    if (!periods.some((p) => p.enabled)) {
+      skip(`all ${periods.length} configured period(s) have enabled=false`);
+      return;
+    }
+
+    // Why this minute produced no run, when a period exists but none matched.
+    const notes = [];
+
+    for (const period of periods) {
       if (!period.enabled) continue;
       const startMin = timeStrToMin(period.startTime);
       const endMin = timeStrToMin(period.endTime);
-      if (startMin == null || endMin == null) continue;
+      if (startMin == null || endMin == null) {
+        notes.push(
+          `${period.periodKey}: unparseable startTime/endTime ("${period.startTime}"–"${period.endTime}")`,
+        );
+        continue;
+      }
 
       // Fire once per period. Normally that's at the period's start minute,
       // but we also catch up if we are already inside the period and have not
@@ -742,8 +827,26 @@ function startAutoScheduler() {
 
       if ((curMin >= startMin && curMin <= startMin + 1) || insideWithTimeLeft) {
         const key = `${date}_${period.periodKey}`;
-        if (triggeredToday.has(key)) continue;
+        if (triggeredToday.has(key)) {
+          notes.push(`${period.periodKey}: already fired today`);
+          continue;
+        }
+
+        // Step 1: rooms from DB — resolved *before* the period is marked as
+        // fired. With no enabled room there is nothing to run, and marking it
+        // would burn the period for the rest of the day, so a camera enabled
+        // mid-class could never be picked up.
+        const enabledRooms = await getEnabledRooms(config);
+        if (enabledRooms.length === 0) {
+          skip(
+            `${period.periodKey} is live but no enabled room resolved — ` +
+              `Camera registry has no active camera, or every room is disabled in AcquisitionControl.includedRooms`,
+          );
+          continue;
+        }
+
         triggeredToday.add(key);
+        active();
 
         if (curMin > startMin + 1) {
           console.log(
@@ -751,8 +854,6 @@ function startAutoScheduler() {
           );
         }
 
-        // Step 1: rooms from DB
-        const enabledRooms = await getEnabledRooms(config);
         const overrideMap = {};
         (config.includedRooms || []).forEach((r) => {
           if (r.room) overrideMap[r.room.toUpperCase()] = r;
@@ -762,9 +863,14 @@ function startAutoScheduler() {
           `[AutoScheduler] Period ${period.periodKey} starting — firing ${enabledRooms.length} room(s) in parallel`,
         );
 
-        // Step 5: acquire — all enabled rooms in parallel
+        // Step 5: acquire — all enabled rooms in parallel.
+        // allSettled never rejects, so the old .catch() here could not fire and
+        // every per-room throw was discarded unlogged — with the period already
+        // marked as fired, that looked exactly like a scheduler that never ran.
+        // Report each rejection instead.
+        const roomsToRun = enabledRooms.map(({ room }) => room);
         Promise.allSettled(
-          enabledRooms.map(({ room }) =>
+          roomsToRun.map((room) =>
             runSlotAttendance({
               room,
               roomOverride: overrideMap[room.toUpperCase()],
@@ -774,9 +880,24 @@ function startAutoScheduler() {
               config,
             }),
           ),
-        ).catch((err) =>
-          console.error("[AutoScheduler] Parallel run error:", err.message),
+        ).then((results) => {
+          results.forEach((r, i) => {
+            if (r.status === "rejected") {
+              console.error(
+                `[AutoScheduler] Room ${roomsToRun[i]} threw during ${period.periodKey}:`,
+                r.reason?.stack || r.reason?.message || r.reason,
+              );
+            }
+          });
+        });
+      } else if (curMin > endMin) {
+        notes.push(`${period.periodKey}: over (ended ${period.endTime})`);
+      } else if (curMin > startMin) {
+        notes.push(
+          `${period.periodKey}: in progress but under ${runDurationMin} min left — too late to start a run`,
         );
+      } else {
+        notes.push(`${period.periodKey}: not started (starts ${period.startTime})`);
       }
 
       // Missed-class check ~5 min after period ends
@@ -785,6 +906,13 @@ function startAutoScheduler() {
           console.error(`[ClassBunkCheck] Error: ${err.message}`),
         );
       }
+    }
+
+    // Nothing fired this minute and every enabled period said why. The notes
+    // are deliberately free of the current time so the state only prints when
+    // it actually changes, not once a minute.
+    if (notes.length === periods.filter((p) => p.enabled).length) {
+      skip(notes.join("; "));
     }
   });
 }

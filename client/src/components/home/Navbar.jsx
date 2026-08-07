@@ -76,6 +76,7 @@ export default function Navbar() {
   const publicPaths = [
     '/',
     '/guide',
+    '/privacy',
     '/forgot-password',
     '/nirf',
     '/ams-manual',

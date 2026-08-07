@@ -36,7 +36,6 @@ async findFacultyDataWithSession(session, faculty) {
       
           return result;
         } catch (err) {
-          console.error('An error occurred while searching for faculty data:', err);
           throw err;
         }
       }
@@ -70,7 +69,6 @@ async findRoomDataWithSession(session, room) {
       // console.log('room result', result)
           return result;
         } catch (err) {
-          console.error('An error occurred while searching for faculty data:', err);
           throw err;
         }
       }

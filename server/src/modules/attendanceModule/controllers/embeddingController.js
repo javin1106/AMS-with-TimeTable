@@ -3,6 +3,7 @@ const path       = require('path');
 const fs         = require('fs');
 const fsPromises = require('fs').promises;
 const axios      = require('axios');
+const mongoose   = require('mongoose');
 
 const StudentEmbedding = require('../../../models/attendanceModule/studentEmbedding');
 const Student          = require('../../../models/student');
@@ -461,6 +462,12 @@ uploadPkl() {
             return res.status(400).json({ error: 'sem is required' });
         }
 
+        // Did the CALLER name this subject's roll numbers, or are we about to
+        // invent a list below? Only a supplied list is a roster, and only a
+        // roster may be written back to Subject.enrolledRollNos — see the
+        // Subject bookkeeping block at the end of this handler.
+        const rosterSupplied = Array.isArray(rollNos) && rollNos.length > 0;
+
         // ── Auto-fetch roll nos if not supplied ───────────────────────────────
         if (!Array.isArray(rollNos) || rollNos.length === 0) {
             const filter = { sem: Number(sem) || sem };
@@ -666,19 +673,51 @@ try {
         record.lastUpdatedAt   = new Date();
         await record.save();
 
-        // ERP Sync page bookkeeping: when the caller names the Subject doc,
-        // keep its embedding status truthful without a second request.
-        if (subjectId) {
+        // ── Subject bookkeeping ──────────────────────────────────────────────
+        // Subject is the single roster of record: enrolledRollNos is the one
+        // place a subject's roll numbers live, and the only place attendance
+        // reads them from (see attendanceModule/controllers/subjectRoster.js).
+        // Generating embeddings from a supplied roll list IS establishing that
+        // roster, so it is written here — otherwise the roster would exist
+        // only inside this run's StudentEmbedding record, where attendance
+        // cannot see it, and the report would fall back to the whole batch.
+        //
+        // A list this handler auto-fetched (every student in the sem/dept) is
+        // deliberately NOT written back: it is not a roster, and persisting it
+        // would make every elective look like it enrols the whole semester.
+        //
+        // The subject dropdown falls back to using the subject NAME as _id
+        // when no Subject document exists, so validate before casting.
+        if (subjectId && mongoose.isValidObjectId(subjectId)) {
             try {
                 const Subject = require('../../../models/subject');
                 await Subject.findByIdAndUpdate(subjectId, {
                     embeddingFile,
                     embeddingUpdatedAt: new Date(),
                     missedGroundTruth: missedRollNos.map(m => m.rollNo),
+                    ...(rosterSupplied
+                        ? { enrolledRollNos: rollNos.map(r => String(r).trim().toUpperCase()).filter(Boolean) }
+                        : {}),
                 });
+                if (!rosterSupplied) {
+                    sse({
+                        type: 'warning',
+                        message:
+                            'Roll numbers were auto-fetched for the whole semester, so the subject roster '
+                            + 'was left unchanged. Attendance for this subject will cover the whole batch '
+                            + 'until a roster is uploaded or fetched from the ERP.',
+                    });
+                }
             } catch (subjErr) {
                 sse({ type: 'warning', message: `Subject record update failed: ${subjErr.message}` });
             }
+        } else if (subjectId) {
+            sse({
+                type: 'warning',
+                message:
+                    'This subject has no record in the Subject collection, so its roster and embedding '
+                    + 'file could not be saved. The .pkl was still written.',
+            });
         }
 
         sse({

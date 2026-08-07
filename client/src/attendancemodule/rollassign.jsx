@@ -969,7 +969,8 @@ export default function RollAssign({ fixedDepartment = '' }) {
                             {Object.entries(unapprovedMap).map(([rollNo, photos]) => (
                                 <UnapprovedPhotoCard key={rollNo} rollNo={rollNo} photos={photos} stats={approvedStats[rollNo]}
                                     busy={approvingPhoto} onApprove={approvePhoto} onApproveAll={() => approveAllPhotos(rollNo, photos)}
-                                    onDelete={deleteUnapprovedPhoto} onDeleteAll={() => deleteAllUnapprovedPhotos(rollNo, photos)} />
+                                    onDelete={deleteUnapprovedPhoto} onDeleteAll={() => deleteAllUnapprovedPhotos(rollNo, photos)}
+                                    onClick={() => openGtModal(rollNo)} />
                             ))}
                         </Section>
                     )}
@@ -1572,19 +1573,24 @@ function FlagResolveModal({ item, batchName, flagPhotoUrl, flagErpPhotoUrl, roll
     );
 }
 
-function UnapprovedPhotoCard({ rollNo, photos, stats, busy, onApprove, onApproveAll, onDelete, onDeleteAll }) {
+function UnapprovedPhotoCard({ rollNo, photos, stats, busy, onApprove, onApproveAll, onDelete, onDeleteAll, onClick }) {
     const allKey  = `${rollNo}::all`;
     const allBusy = !!busy[allKey];
     const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : null;
     return (
-        <div style={{ background: theme.surface, border: `1px solid ${theme.warning}55`, borderRadius: 10, overflow: 'hidden' }}>
+        <div 
+            onClick={onClick}
+            style={{ background: theme.surface, border: `1px solid ${theme.warning}55`, borderRadius: 10, overflow: 'hidden', cursor: onClick ? 'pointer' : 'default', transition: 'border-color 0.15s' }}
+            onMouseEnter={e => { if (onClick) e.currentTarget.style.borderColor = theme.warning; }}
+            onMouseLeave={e => { if (onClick) e.currentTarget.style.borderColor = theme.warning + '55'; }}
+        >
             <div style={{ padding: '10px 14px', borderBottom: `1px solid ${theme.border}`, display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ fontFamily: theme.fontMono, fontSize: '13px', fontWeight: 700, flex: 1 }}>{rollNo}</span>
                 {stats && <span style={{ fontSize: '10px', color: theme.textMuted }}>{stats.embeddingCount}E · {stats.backupCount}B · {stats.approvedCount}✓</span>}
-                <button onClick={onDeleteAll} disabled={allBusy} style={{ padding: '4px 10px', borderRadius: 6, border: `1px solid ${theme.danger}`, background: 'transparent', color: theme.danger, fontSize: '11px', fontWeight: 700, cursor: allBusy ? 'not-allowed' : 'pointer', opacity: allBusy ? 0.5 : 1 }}>
+                <button onClick={(e) => { e.stopPropagation(); onDeleteAll(); }} disabled={allBusy} style={{ padding: '4px 10px', borderRadius: 6, border: `1px solid ${theme.danger}`, background: 'transparent', color: theme.danger, fontSize: '11px', fontWeight: 700, cursor: allBusy ? 'not-allowed' : 'pointer', opacity: allBusy ? 0.5 : 1 }}>
                     {allBusy ? '…' : `Delete All`}
                 </button>
-                <button onClick={onApproveAll} disabled={allBusy} style={{ padding: '4px 10px', borderRadius: 6, border: 'none', background: theme.success, color: '#000', fontSize: '11px', fontWeight: 700, cursor: allBusy ? 'not-allowed' : 'pointer', opacity: allBusy ? 0.5 : 1 }}>
+                <button onClick={(e) => { e.stopPropagation(); onApproveAll(); }} disabled={allBusy} style={{ padding: '4px 10px', borderRadius: 6, border: 'none', background: theme.success, color: '#000', fontSize: '11px', fontWeight: 700, cursor: allBusy ? 'not-allowed' : 'pointer', opacity: allBusy ? 0.5 : 1 }}>
                     {allBusy ? '…' : `Approve All (${photos.length})`}
                 </button>
             </div>
@@ -1597,8 +1603,8 @@ function UnapprovedPhotoCard({ rollNo, photos, stats, busy, onApprove, onApprove
                             <img src={photo.url} alt={photo.filename} style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', display: 'block' }} onError={e => { e.target.style.opacity = '0.15'; }} />
                             {photo.addedAt && <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, background: 'rgba(0,0,0,0.65)', padding: '2px 4px', fontSize: '8px', color: '#ccc', textAlign: 'center' }}>{fmtDate(photo.addedAt)}</div>}
                             <div style={{ position: 'absolute', top: 4, right: 4, display: 'flex', gap: 4 }}>
-                                <button onClick={() => onDelete(rollNo, photo.filename)} disabled={photoBusy} title="Delete photo" style={{ width: 22, height: 22, borderRadius: '50%', background: theme.surface, border: `1px solid ${theme.danger}`, color: theme.danger, cursor: photoBusy ? 'not-allowed' : 'pointer', fontSize: '10px', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}>✕</button>
-                                <button onClick={() => onApprove(rollNo, photo.filename)} disabled={photoBusy} title="Approve & add to embedding" style={{ width: 22, height: 22, borderRadius: '50%', background: theme.success, border: 'none', color: '#000', cursor: photoBusy ? 'not-allowed' : 'pointer', fontSize: '12px', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}>✓</button>
+                                <button onClick={(e) => { e.stopPropagation(); onDelete(rollNo, photo.filename); }} disabled={photoBusy} title="Delete photo" style={{ width: 22, height: 22, borderRadius: '50%', background: theme.surface, border: `1px solid ${theme.danger}`, color: theme.danger, cursor: photoBusy ? 'not-allowed' : 'pointer', fontSize: '10px', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}>✕</button>
+                                <button onClick={(e) => { e.stopPropagation(); onApprove(rollNo, photo.filename); }} disabled={photoBusy} title="Approve & add to embedding" style={{ width: 22, height: 22, borderRadius: '50%', background: theme.success, border: 'none', color: '#000', cursor: photoBusy ? 'not-allowed' : 'pointer', fontSize: '12px', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}>✓</button>
                             </div>
                         </div>
                     );

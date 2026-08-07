@@ -28,7 +28,6 @@ class NoteController {
       }
       return;
     } catch (error) {
-      console.error(error);
       res.status(500).json({ error: "Internal server error" });
     }
   }
@@ -39,7 +38,6 @@ class NoteController {
       res.json(noteList);
       return;
     } catch (error) {
-      console.error(error);
       res.status(500).json({ error: "Internal server error" });
     }
   }

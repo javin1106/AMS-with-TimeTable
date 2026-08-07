@@ -78,7 +78,6 @@ async savett(req, res) {
 
     res.status(200).json({ message: "Previous data deleted, new data inserted successfully (duplicates removed)." });
   } catch (error) {
-    console.error("Error saving timetable:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 }
@@ -126,7 +125,6 @@ async buildDepartmentMappings(session) {
     
     return { subjectToDeptMap, facultyToDeptMap };
   } catch (error) {
-    console.error("Error building department mappings:", error);
     return { subjectToDeptMap: {}, facultyToDeptMap: {} };
   }
 }
@@ -151,7 +149,6 @@ isFalsePositiveRoomConflict(conflictRecord, currentCode, currentSubject, current
           const subjectOwnerDept = subjectToDeptMap[normalizedSubject];
           
           if (subjectOwnerDept === currentCode) {
-            console.log(`✓ Room conflict is FALSE POSITIVE: Subject "${slotItem.subject}" belongs to current dept`);
             return true; // Subject belongs to current dept - NOT a real clash
           }
         }
@@ -162,7 +159,6 @@ isFalsePositiveRoomConflict(conflictRecord, currentCode, currentSubject, current
           const facultyDepts = facultyToDeptMap[normalizedFaculty];
           
           if (facultyDepts && facultyDepts.has(currentCode)) {
-            console.log(`✓ Room conflict is FALSE POSITIVE: Faculty "${slotItem.faculty}" belongs to current dept`);
             return true; // Faculty belongs to current dept - NOT a real clash
           }
         }
@@ -171,7 +167,6 @@ isFalsePositiveRoomConflict(conflictRecord, currentCode, currentSubject, current
     
     return false; // Real conflict
   } catch (error) {
-    console.error("Error checking false positive:", error);
     return false;
   }
 }
@@ -208,7 +203,6 @@ isFalsePositiveFacultyConflict(conflictRecord, currentCode, currentSubject, curr
               
               // If same subject belongs to current dept, it's just different sections
               if (subjectOwnerDept === currentCode) {
-                console.log(`✓ Faculty conflict is FALSE POSITIVE: Same subject "${slotItem.subject}" taught in different sections of current dept`);
                 return true;
               }
             }
@@ -216,7 +210,6 @@ isFalsePositiveFacultyConflict(conflictRecord, currentCode, currentSubject, curr
             // Check 2: Does the SUBJECT belong to current department?
             const conflictSubjectOwner = subjectToDeptMap[normalizedConflictSubject];
             if (conflictSubjectOwner === currentCode) {
-              console.log(`✓ Faculty conflict is FALSE POSITIVE: Subject "${slotItem.subject}" belongs to current dept`);
               return true;
             }
           }
@@ -224,7 +217,6 @@ isFalsePositiveFacultyConflict(conflictRecord, currentCode, currentSubject, curr
           // Check 3: Does the FACULTY primarily belong to current department?
           const facultyDepts = facultyToDeptMap[normalizedCurrentFaculty];
           if (facultyDepts && facultyDepts.has(currentCode)) {
-            console.log(`✓ Faculty conflict is FALSE POSITIVE: Faculty "${currentFaculty}" belongs to current dept`);
             return true;
           }
         }
@@ -233,7 +225,6 @@ isFalsePositiveFacultyConflict(conflictRecord, currentCode, currentSubject, curr
     
     return false; // Real conflict
   } catch (error) {
-    console.error("Error checking false positive faculty:", error);
     return false;
   }
 }
@@ -329,7 +320,6 @@ async saveslot(req, res) {
       });
     }
   } catch (error) {
-    console.error(error);
     res.status(500).json({ error: "Internal server error" });
   }
 }
@@ -377,7 +367,6 @@ async savelunchslot(req, res) {
     const lunchrecords = await ClassTable.find({ slot: 'lunch', code, 'slotData.0': { $exists: true } });
     res.status(200).json({ lunchrecords });
   } catch (error) {
-    console.error(error);
     res.status(500).json({ error: "Internal server error" });
   }
 }
@@ -389,7 +378,6 @@ async getlunchslot(req, res) {
     // console.log(lunchrecords)
     res.status(200).json({lunchrecords})
   } catch (error) {
-    console.error(error);
     res.status(500).json({ error: "Internal server error" });
   }
 }
@@ -456,7 +444,6 @@ async deletelunchslot(req, res) {
   
       res.status(200).json(timetableData);
     } catch (error) {
-      console.error(error);
       throw new Error('Error fetching and formatting data from the database');
     }
   }
@@ -508,7 +495,6 @@ async deletelunchslot(req, res) {
       // console.log(timetableData)
       res.status(200).json({timetableData, updatedTime});
     } catch (error) {
-      console.error(error);
       res.status(500).json({ error: "Internal server error" });
     }
   }
@@ -546,7 +532,6 @@ async deletelunchslot(req, res) {
       // console.log('rooom data',timetableData)
       res.status(200).json({timetableData,updatedTime});
     } catch (error) {
-      console.error(error);
       res.status(500).json({ error: "Internal server error" });
     }
   }

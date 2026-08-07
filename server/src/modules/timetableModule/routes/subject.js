@@ -107,7 +107,6 @@ subjectRouter.post("/",protectRoute, async (req, res) => {
       const subject = await subjectController.getSubjectByCode(code);
       res.status(200).json(subject);
     } catch (error) {
-      console.error("Error:", error);
       res.status(500).json({ error: 'Internal Server Error' });
     }
   });

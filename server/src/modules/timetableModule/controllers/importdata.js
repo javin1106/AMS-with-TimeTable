@@ -38,7 +38,6 @@ class ImportController {
       }
     } 
       catch (error) {
-      console.error(error);
       res.status(500).json({ error: "Internal server error" });
     }
   }
@@ -113,7 +112,6 @@ await ClassTable.insertMany(newTTData);
       return res.status(200).json({ message: 'Timetable data imported successfully.' });
   
     } catch (error) {
-      console.error(error);
       return res.status(500).json({ error: "Internal server error" });
     }
   }

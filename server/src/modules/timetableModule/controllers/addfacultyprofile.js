@@ -35,7 +35,6 @@ class addFacultyController {
         res.json({ message: 'Faculty added to the existing semester successfully' });
       }
     } catch (error) {
-      console.error(error);
       res.status(500).json({ error: 'Internal server error' });
     }
   }
@@ -54,7 +53,6 @@ class addFacultyController {
           });
           return allFaculty;
         } catch (error) {
-          console.error(error); 
           res.status(500).json({ error: "Internal server error" });
         }
       }
@@ -99,7 +97,6 @@ class addFacultyController {
       async getFilteredFaculty(code, sem){
         try {
           const faculty = await addFaculty.find({ code, sem });
-          console.log(faculty)
            return faculty;
         } catch (e) {
           throw new HttpException(500, e.message || "Internal Server Error");
