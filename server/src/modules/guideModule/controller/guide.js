@@ -20,7 +20,7 @@ const TAB_SETUP = `<h2>Server Startup Guide</h2>
 <pre><code>AMS-with-TimeTable/server/.env</code></pre>
 <p>Required variables:</p>
 <pre><code>MONGO_URL='mongodb+srv://&lt;user&gt;:&lt;password&gt;@cluster.mongodb.net/'
-MAIL_USER=noreplytestxceed@gmail.com
+MAIL_USER=&lt;your-noreply-mailbox&gt;
 MAIL_PASS=&lt;your-gmail-app-password&gt;
 MAIL_HOST='smtp.gmail.com'
 MAIL_PORT=587

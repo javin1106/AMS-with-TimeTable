@@ -241,6 +241,17 @@ const attendanceReportSchema = new Schema({
         flags:         { type: [Schema.Types.Mixed], default: [] },
         idempotencyKey:{ type: String, default: null }, // hash of reportId + finalReport content
     },
+
+    // End-of-class summary mailed to the faculty who taught this period — see
+    // attendanceModule/controllers/facultyAttendanceMailer.js. A period is
+    // reachable from two paths that both "end" it (a live session being
+    // stopped, and the cron finishing its runs), so this is what stops the
+    // faculty getting the same class twice.
+    facultyEmail: {
+        sentAt:    { type: Date,   default: null },   // set only on a successful send
+        toAddress: { type: String, default: null },   // the address actually used
+        lastError: { type: String, default: null },   // why the last attempt failed
+    },
 });
 
 // periodId / xceedTimestamp are set once, on first save, and never

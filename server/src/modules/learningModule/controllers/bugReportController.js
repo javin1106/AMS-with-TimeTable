@@ -144,22 +144,30 @@ exports.listAllBugReports = async (req, res) => {
  * Only `acknowledged` pays, and only the first time — `awardedAt` records that,
  * and the ledger refuses a second row for the same report regardless. So an
  * admin moving a ticket acknowledged → fixed → acknowledged cannot pay twice.
+ *
+ * `status` is optional: a PATCH carrying only `adminNote` writes back to the
+ * reporter without moving the ticket, which is the common case of "we read it,
+ * here is what we need from you" on a report that is still open.
  */
 exports.reviewBugReport = async (req, res) => {
   if (!req.lmUser.isAdmin) return res.status(403).json({ message: "Forbidden" });
 
-  const status = String(req.body.status || "");
+  const report = await LmBugReport.findById(req.params.reportId);
+  if (!report) return res.status(404).json({ message: "Report not found." });
+
+  const status = req.body.status === undefined ? report.status : String(req.body.status);
   if (!STATUSES.includes(status)) {
     return res.status(400).json({ message: "Unknown status." });
   }
 
-  const report = await LmBugReport.findById(req.params.reportId);
-  if (!report) return res.status(404).json({ message: "Report not found." });
-
   const firstAcknowledgement = status === "acknowledged" && !report.awardedAt;
 
+  const previousNote = report.adminNote || "";
   report.status = status;
   if (req.body.adminNote !== undefined) report.adminNote = String(req.body.adminNote).slice(0, 2000);
+  // A note the reporter has already seen is not news; only a changed, non-empty
+  // one is worth a notification.
+  const noteChanged = Boolean(report.adminNote) && report.adminNote !== previousNote;
   report.reviewedBy = req.lmUser.id;
   report.reviewedByName = req.lmUser.name;
   report.reviewedAt = new Date();
@@ -180,6 +188,19 @@ exports.reviewBugReport = async (req, res) => {
       body: suggestion
         ? `Thanks — we are taking that one up. ${game.POINTS.bugReport} points added.`
         : `Thanks — that was a real one. ${game.POINTS.bugReport} points added.`,
+      link: "/learning/bugs",
+      actorName: report.reviewedByName,
+    });
+  } else if (noteChanged) {
+    // The acknowledgement notification above already carries the good news, so
+    // this is only for the replies that are not it: a question on an open
+    // ticket, or the reason a report was turned down.
+    await notifyUser({
+      userId: report.reporterId,
+      klass: report.classId ? { _id: report.classId, name: report.className } : null,
+      type: "bug",
+      title: `Reply on your report: ${report.title}`,
+      body: report.adminNote,
       link: "/learning/bugs",
       actorName: report.reviewedByName,
     });

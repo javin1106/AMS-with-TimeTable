@@ -18,6 +18,7 @@ const {
     buildEnrolledEmbeddingsAdafaceTopK,
 } = require('./embeddingSyncHelper');
 const { pklPath } = require('./erpEmbeddingSyncHelper');
+const { sendFacultyAttendanceSummaryById } = require('./facultyAttendanceMailer');
 const {
     resolveSubjectRoster,
     reconcileFinalReport,
@@ -556,6 +557,20 @@ async function stopSession(reportId) {
         await AttendanceReport.findByIdAndUpdate(reportId, { status: 'draft' });
     } catch (err) {
         console.error(`[Session] Failed to update report status: ${err.message}`);
+    }
+
+    // End of the live session — mail the faculty their attendance for this
+    // period. Gated by the Email Notifications toggles and idempotent per
+    // report, so the cron finishing the same period cannot double-send.
+    // Deliberately awaited: stopSession is not on a request's critical path,
+    // and a caller that returns before the mail goes has nowhere to log it.
+    try {
+        const outcome = await sendFacultyAttendanceSummaryById(reportId);
+        if (!outcome.sent) {
+            console.log(`[Session ${reportId}] Faculty summary not sent: ${outcome.reason}`);
+        }
+    } catch (err) {
+        console.error(`[Session ${reportId}] Faculty summary failed: ${err.message}`);
     }
 
     return { status: 'stopped', reportId };

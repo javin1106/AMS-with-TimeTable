@@ -1,4 +1,5 @@
 const NotificationSettings = require('../../../models/attendanceModule/notificationSettings');
+const { sendFacultyAttendanceSummary } = require('./facultyAttendanceMailer');
 
 const ALERT_KEYS = ['serverDown', 'erpDown', 'lowConfidence', 'noReportSaved', 'classBunk', 'duplicateAttendance', 'dailySummary', 'embeddingProgress', 'scheduleCheck'];
 const VALID_ROLES = ['admin', 'coordinator', 'head'];
@@ -96,6 +97,73 @@ class NotificationSettingsController {
       res.json({ message: 'Updated', settings });
     } catch (error) {
       res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  // Update the end-of-class faculty attendance summary config. Only an on/off
+  // switch plus optional BCC addresses — there is no per-role opt-in because
+  // the recipient is the faculty named on the timetable, not a configured role.
+  async updateFacultySummaryConfig(req, res) {
+    try {
+      const { enabled, bccEmails } = req.body;
+      const settings = await NotificationSettings.getSettings();
+      const cfg = settings.facultySummaryConfig;
+      if (typeof enabled === 'boolean') cfg.enabled = enabled;
+      if (bccEmails !== undefined) {
+        if (!Array.isArray(bccEmails)) return res.status(400).json({ error: 'bccEmails must be an array' });
+        const cleaned = bccEmails.map((e) => String(e).trim()).filter(Boolean);
+        const bad = cleaned.find((e) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e));
+        if (bad) return res.status(400).json({ error: `Invalid email address: ${bad}` });
+        cfg.bccEmails = cleaned;
+      }
+      await settings.save();
+      res.json({ message: 'Updated', settings });
+    } catch (error) {
+      console.error('[NotificationSettings] updateFacultySummaryConfig error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+
+  // POST — send one sample faculty summary to an arbitrary address, so the
+  // toggle can be checked without waiting for a class to end. Uses the most
+  // recent report with a finalReport when none is named; falls back to
+  // representative sample data when the database has no reports yet.
+  async sendFacultySummarySample(req, res) {
+    try {
+      const { email, reportId } = req.body;
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email).trim())) {
+        return res.status(400).json({ error: 'A valid email is required' });
+      }
+
+      const AttendanceReport = require('../../../models/attendanceReport');
+      const report = reportId
+        ? await AttendanceReport.findById(reportId)
+        : await AttendanceReport.findOne({ 'finalReport.0': { $exists: true } }).sort({ date: -1 });
+
+      if (!report) {
+        return res.status(404).json({
+          error: 'No attendance report with a finalReport exists yet — run a class first, or pass reportId',
+        });
+      }
+
+      // force: bypass the toggles and the already-sent guard; toOverride keeps
+      // it off the faculty's inbox and stops it consuming this period's send.
+      const outcome = await sendFacultyAttendanceSummary(report, {
+        force: true,
+        toOverride: String(email).trim(),
+      });
+      if (!outcome.sent) return res.status(502).json({ error: outcome.reason });
+
+      res.json({
+        message: `Sample sent to ${outcome.to}`,
+        reportId: report._id,
+        date: report.date,
+        timeSlot: report.timeSlot,
+        subject: report.subject,
+      });
+    } catch (error) {
+      console.error('[NotificationSettings] sendFacultySummarySample error:', error);
+      res.status(500).json({ error: error.message });
     }
   }
 

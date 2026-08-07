@@ -1,6 +1,17 @@
 import { useState, useEffect } from 'react';
 import DOMPurify from 'dompurify';
 import getEnvironment from '../getenvironment';
+import { rolesOf } from '../learningModule/roles';
+
+/**
+ * Who may see this page at all. It mirrors `checkRole(["iams-admin"])` on
+ * `/api/v1/guide` — which also lets plain `admin` through — and exists only so
+ * the UI can say "not authorised" instead of "failed to load". The server is
+ * the authority; nothing here is a security boundary.
+ */
+const GUIDE_ADMIN_ROLES = ['admin', 'iams-admin'];
+const isGuideAdmin = (role) =>
+  rolesOf(role).some((value) => GUIDE_ADMIN_ROLES.includes(value));
 
 /* Tab accent colours — one per tab, cycles if more tabs added */
 const TAB_COLORS = [
@@ -115,7 +126,8 @@ export default function GuidePage() {
   const [activeIdx, setActiveIdx]     = useState(0);
   const [editing, setEditing]         = useState(false);
   const [editContent, setEditContent] = useState('');
-  const [isLoggedIn, setIsLoggedIn]   = useState(false);
+  const [isAdmin, setIsAdmin]         = useState(false);
+  const [denied, setDenied]           = useState(false);
   const [loading, setLoading]         = useState(true);
   const [saving, setSaving]           = useState(false);
   const [saveError, setSaveError]     = useState('');
@@ -125,20 +137,31 @@ export default function GuidePage() {
   useEffect(() => {
     const init = async () => {
       const [guideRes, userRes] = await Promise.allSettled([
-        fetch(`${apiUrl}/api/v1/guide`),
+        // The cookie has to go with this now — the guide is no longer readable
+        // without one.
+        fetch(`${apiUrl}/api/v1/guide`, { credentials: 'include' }),
         fetch(`${apiUrl}/user/getuser/`, { credentials: 'include' }),
       ]);
+
+      if (userRes.status === 'fulfilled' && userRes.value.ok) {
+        const details = await userRes.value.json();
+        setIsAdmin(isGuideAdmin(details?.user?.role));
+      }
 
       if (guideRes.status === 'fulfilled' && guideRes.value.ok) {
         const data = await guideRes.value.json();
         const sorted = [...data.tabs].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
         setTabs(sorted);
         setUpdatedAt(data.updatedAt);
+      } else if (
+        guideRes.status === 'fulfilled'
+        && [401, 403].includes(guideRes.value.status)
+      ) {
+        setDenied(true);
       } else {
         setFetchError('Failed to load documentation. Please refresh.');
       }
 
-      if (userRes.status === 'fulfilled' && userRes.value.ok) setIsLoggedIn(true);
       setLoading(false);
     };
     init();
@@ -158,6 +181,11 @@ export default function GuidePage() {
         credentials: 'include',
         body: JSON.stringify({ tabs: newTabs }),
       });
+      if ([401, 403].includes(res.status)) {
+        setSaving(false);
+        setSaveError('Your account is not allowed to edit the documentation.');
+        return;
+      }
       if (!res.ok) throw new Error();
       const data = await res.json();
       setTabs([...data.tabs].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)));
@@ -179,6 +207,32 @@ export default function GuidePage() {
           }} />
           <p style={{ color: '#7c3aed', fontWeight: 600 }}>Loading documentation…</p>
           <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+        </div>
+      </div>
+    );
+  }
+
+  /* ── refused by the API ── */
+  if (denied) {
+    return (
+      <div style={{
+        minHeight: '100vh', background: '#f8f7ff', display: 'flex',
+        alignItems: 'center', justifyContent: 'center', padding: 24,
+        fontFamily: "'Inter','Segoe UI',sans-serif",
+      }}>
+        <div style={{
+          maxWidth: 460, textAlign: 'center', background: '#fff',
+          border: '1px solid #ede9fe', borderRadius: 16,
+          padding: '40px 36px', boxShadow: '0 4px 32px rgba(124,58,237,.08)',
+        }}>
+          <h1 style={{ margin: '0 0 10px', fontSize: '1.3rem', fontWeight: 800, color: '#1e1b4b' }}>
+            Administrators only
+          </h1>
+          <p style={{ margin: 0, fontSize: 14, color: '#475569', lineHeight: 1.7 }}>
+            The developer documentation describes the server&apos;s internal
+            configuration and APIs, so it is restricted to administrator
+            accounts.
+          </p>
         </div>
       </div>
     );
@@ -219,7 +273,7 @@ export default function GuidePage() {
               )}
             </div>
 
-            {isLoggedIn && !editing && (
+            {isAdmin && !editing && (
               <button
                 onClick={handleEdit}
                 style={{

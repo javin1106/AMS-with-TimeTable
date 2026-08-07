@@ -24,6 +24,7 @@ const {
   buildEnrolledEmbeddingsAdafaceTopK,
 } = require("./embeddingSyncHelper");
 const alertNotifier = require("./alertNotifier");
+const { sendFacultyAttendanceSummary } = require("./facultyAttendanceMailer");
 const { pushAttendanceToErp } = require("./erpAttendancePushController");
 const {
   checkAttendanceRunAllowed,
@@ -653,6 +654,27 @@ async function runSlotAttendance({
   console.log(
     `[AutoScheduler] Slot ${slot} room ${room} — all ${numRuns} checks done`,
   );
+
+  // The period is over for this room — mail the faculty their attendance.
+  // Gated by the Email Notifications toggles and idempotent, so the manual
+  // "stop session" path ending the same period cannot double-send.
+  try {
+    const report = await AttendanceReport.findOne({
+      batch: ctx.batch,
+      date,
+      timeSlot: slot,
+    });
+    if (report) {
+      const outcome = await sendFacultyAttendanceSummary(report);
+      if (!outcome.sent) {
+        console.log(
+          `[AutoScheduler] Faculty summary not sent for ${slot} room ${room}: ${outcome.reason}`,
+        );
+      }
+    }
+  } catch (err) {
+    console.error("[AutoScheduler] Faculty summary failed:", err.message);
+  }
 }
 
 // ── Missed/bunked class check, ~5 min after a slot ends ──────────────────────
