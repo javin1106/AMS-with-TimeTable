@@ -9,11 +9,9 @@ class TimeTabledto {
           if (timetable) {
             return timetable.session;
           } else {
-            console.log('No session found with the specified code.');
             return null;
           }
         } catch (err) {
-          console.error('An error occurred while searching for the TimeTable:', err);
           throw err; // Re-throw the error to propagate it to the calling function
         }
       }
@@ -24,11 +22,9 @@ class TimeTabledto {
           if (timetable) {
             return timetable;
           } else {
-            console.log('No data found with the specified code.');
             return null;
           }
         } catch (err) {
-          console.error('An error occurred while searching for the TimeTable:', err);
           throw err; // Re-throw the error to propagate it to the calling function
         }
       }
@@ -43,11 +39,9 @@ class TimeTabledto {
             const codes = timetable.map(item => item.code);
             return codes;
           } else {
-            console.log('No codes found with the specified session.');
             return [];
           }
         } catch (err) {
-          console.error('An error occurred while searching for the TimeTable:', err);
           throw err; // Re-throw the error to propagate it to the calling function
         }
       }

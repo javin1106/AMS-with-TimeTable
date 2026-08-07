@@ -3,9 +3,11 @@ const path       = require('path');
 const fs         = require('fs');
 const fsPromises = require('fs').promises;
 const axios      = require('axios');
+const mongoose   = require('mongoose');
 
 const StudentEmbedding = require('../../../models/attendanceModule/studentEmbedding');
 const Student          = require('../../../models/student');
+const Subject          = require('../../../models/subject');
 const {
     updateStudentEmbedding: syncUpdateStudentEmbedding,
     buildBatchEmbeddingsPkl,
@@ -26,6 +28,16 @@ ensureDir(EMBEDDINGS_DIR);
 function safeSubject(raw) {
     return (raw || '').trim().replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/, '');
 }
+
+// NOT mongoose.isValidObjectId: that accepts ANY 12-character string, because
+// 12 raw bytes is a legal ObjectId encoding. The subject dropdown falls back to
+// using the subject NAME as _id when no Subject document exists, and plenty of
+// names are 12 characters — "FPGA (DE/GE)" is exactly 12, and casts to the
+// ObjectId 46504741202844452f474529, i.e. the bytes of the name. Anything
+// keyed on that check would treat a display name as a document id.
+function isObjectIdHex(value) {
+    return /^[0-9a-fA-F]{24}$/.test(String(value ?? ''));
+}
 // Returns academic session string, e.g. "2025-26"
 function currentSession() {
     const now   = new Date();
@@ -36,14 +48,145 @@ function currentSession() {
 }
 
 // Builds folder path + filename: EMBEDDINGS_DIR/{session}/{deptSafe}/{subCode}_{subjectSafe}_{session}.pkl
-function buildEmbeddingPath(sem, subject, dept, subjectCode) {
+// The filename is the Subject's _id whenever we have one.
+//
+// The old name, {subCode}_{safeSubject(subject)}_{session}.pkl, was derived from
+// the display name through a lossy sanitizer: safeSubject collapses every run of
+// non-alphanumerics to "_", so "FPGA (DE/GE)", "FPGA-DE-GE" and "FPGA DE GE" all
+// produce "FPGA_DE_GE". With subCode absent it falls back to sem, so two
+// same-semester subjects differing only in punctuation resolved to the SAME
+// filename — the second generation overwrote the first, both Subject rows
+// pointed at one file, and one class silently ran on the other's embeddings.
+// An _id cannot collide and never needs sanitizing.
+//
+// The {session}/{dept} folders are kept because the embeddings browser groups
+// and filters by them, but they are no longer how the file is FOUND: the caller
+// stores the returned relPath on the Subject and lookups use it verbatim.
+function buildEmbeddingPath(sem, subject, dept, subjectCode, subjectId) {
     const session      = currentSession();
-    const subjectSafeStr = safeSubject(subject);
     const deptSafe     = safeSubject(dept || 'UNKNOWN');
-    const subCodeSafe  = safeSubject(subjectCode || sem.toString());
-    const filename     = `${subCodeSafe}_${subjectSafeStr}_${session}.pkl`;
-    const folder       = path.join(EMBEDDINGS_DIR, session, deptSafe);
-    return { filename, folder, fullPath: path.join(folder, filename), session };
+
+    // Falls back to the descriptive name only when there is no Subject document
+    // to key on — the subject dropdown uses the raw name as _id in that case
+    // (see the isValidObjectId guard where embeddingFile is saved).
+    const useId = isObjectIdHex(subjectId);
+    const filename = useId
+        ? `${String(subjectId)}.pkl`
+        : `${safeSubject(subjectCode || sem.toString())}_${safeSubject(subject)}_${session}.pkl`;
+
+    const folder  = path.join(EMBEDDINGS_DIR, session, deptSafe);
+    // Forward slashes: this is a stored identifier, not a live OS path, and it
+    // must resolve the same if the database moves between Windows and Linux.
+    const relPath = `${session}/${deptSafe}/${filename}`;
+    return { filename, folder, fullPath: path.join(folder, filename), session, relPath };
+}
+
+// ── What KIND of .pkl is this? ───────────────────────────────────────────────
+//
+// ml-data/embeddings/ holds two unrelated artifacts, and the browser's
+// collectPkls() walks the whole tree, so it returns both:
+//
+//   {session}/{dept}/{subjectId}.pkl        — a SUBJECT embedding, one class's
+//                                             enrolled students (this page's job)
+//   erp/{dept}/{batch}/embeddings_db.pkl    — an ERP BATCH STORE, every student
+//                                             in a batch, written by
+//                                             erpEmbeddingSyncHelper.js
+//
+// The batch stores have no StudentEmbedding record (nothing is keyed on the
+// filename "embeddings_db.pkl") and no Subject, so they used to render as
+// nameless "Unknown" rows in the subject browser. This tells the two apart so
+// the browser can list only the first kind.
+function isErpBatchStore(relPath) {
+    // erp/<department>/<batch>/embeddings_db.pkl — the leading segment is the
+    // marker; the depth check keeps a stray file directly under erp/ from
+    // being mistaken for one.
+    const parts = String(relPath || '').replace(/\\/g, '/').split('/').filter(Boolean);
+    return parts[0]?.toLowerCase() === 'erp' && parts.length >= 3;
+}
+
+// ── Roster annotation for the embeddings browser ─────────────────────────────
+//
+// The browser's per-file counts all come from StudentEmbedding.rollNos — the
+// roll numbers a .pkl was BUILT from. Attendance does not read that. It reads
+// Subject.enrolledRollNos, and when that is empty the ML service falls back to
+// matching against every student in the batch's embedding store (see
+// rtsp_routes.py `has_sir_list`), so an elective silently reports on the whole
+// year.
+//
+// The two diverge exactly where it hurts: generating with an auto-fetched
+// sem/dept list writes StudentEmbedding.rollNos but deliberately NOT the
+// Subject roster (see the rosterSupplied guard below). The file then shows a
+// confident "60 students" while no roster exists at all. These fields let the
+// browser show the roster the same row, so the count stops implying one.
+//
+// Joined on Subject.embeddingFile (with embeddingRelPath breaking ties between
+// legacy same-named files), plus the _id encoded in the filename itself for
+// files written by buildEmbeddingPath. This is a display-time join only —
+// attendance still finds its Subject by name+semester via subjectLookup.js.
+async function attachSubjectRosters(files) {
+    if (files.length === 0) return files;
+
+    const filenames = files.map(f => f.filename);
+    // "64f0a1c9….pkl" → "64f0a1c9…" for the id-named files.
+    const idsFromNames = filenames
+        .map(f => f.replace(/\.pkl$/i, ''))
+        .filter(isObjectIdHex);
+
+    let subjects = [];
+    try {
+        subjects = await Subject.find({
+            $or: [
+                { embeddingFile: { $in: filenames } },
+                ...(idsFromNames.length ? [{ _id: { $in: idsFromNames } }] : []),
+            ],
+        })
+            .select('subName subjectFullName sem dept enrolledRollNos embeddingFile embeddingRelPath')
+            .lean();
+    } catch (err) {
+        // A roster lookup failure must not blank out the file listing itself —
+        // degrade to "unknown" (rosterCount: null) rather than 500.
+        console.error('[Embeddings] roster lookup failed:', err.message);
+        return files.map(f => ({ ...f, rosterCount: null, rosterRollNos: [], subjectLinked: false }));
+    }
+
+    const byId   = new Map(subjects.map(s => [String(s._id), s]));
+    // Last-resort join. Two Subjects can share a legacy descriptive filename,
+    // so this is only reached after the _id and relPath matches below have both
+    // failed — first one wins, which is as good as the ambiguity allows.
+    const byFile = new Map();
+    for (const s of subjects) {
+        if (s.embeddingFile && !byFile.has(s.embeddingFile)) byFile.set(s.embeddingFile, s);
+    }
+
+    // Subject files only — ERP batch stores are filtered out before this point
+    // (see listFilesByDept), so every file here is expected to have a Subject.
+    return files.map((f) => {
+        const idFromName = f.filename.replace(/\.pkl$/i, '');
+        let subj = isObjectIdHex(idFromName) ? byId.get(idFromName) : null;
+        if (!subj && f.relPath) {
+            const norm = String(f.relPath).replace(/\\/g, '/');
+            subj = subjects.find(s => s.embeddingRelPath && String(s.embeddingRelPath).replace(/\\/g, '/') === norm);
+        }
+        if (!subj) subj = byFile.get(f.filename);
+
+        const roster      = subj?.enrolledRollNos || [];
+        const subjectName = subj?.subName || subj?.subjectFullName || null;
+        return {
+            ...f,
+            // The StudentEmbedding record is only one of two places a name can
+            // come from. A .pkl generated before that record existed (or whose
+            // record was pruned) still has a Subject pointing at it, so fall
+            // back to that before giving up and calling it unnamed.
+            displayName: f.subject || subjectName || null,
+            dept:        f.dept || subj?.dept || null,
+            sem:         f.sem  || subj?.sem  || null,
+            rosterCount:   subj ? roster.length : null,
+            rosterRollNos: roster,
+            subjectLinked: !!subj,
+            subjectId:     subj ? String(subj._id) : null,
+            subjectName,
+        };
+    });
 }
 
 // ── Resolve which embedding .pkl to use for a given sem+subject ──────────────
@@ -337,6 +480,17 @@ async listFilesByDept(req, res) {
 
         let allFiles = collectPkls(EMBEDDINGS_DIR);
 
+        // Drop the ERP batch stores. collectPkls walks the whole tree, so it
+        // also returns erp/{dept}/{batch}/embeddings_db.pkl — a batch-wide
+        // gallery shared by every subject in the batch, with no subject, no
+        // roster and no generation record. They matched the dept filter below
+        // (their path contains the department name) and then rendered as
+        // nameless "Unknown" rows offering Update and Delete buttons that
+        // either did nothing useful or destroyed a whole batch's embeddings
+        // from a page about subjects. The ERP Embedding Generation tab owns
+        // them; this listing is subject embeddings only.
+        allFiles = allFiles.filter(f => !isErpBatchStore(f.relPath));
+
         // Filter by dept if provided — match against folder path
         if (dept && dept.trim()) {
             const deptNorm = dept.trim().replace(/[^a-zA-Z0-9]+/g, '_').toLowerCase();
@@ -366,7 +520,7 @@ async listFilesByDept(req, res) {
             };
         }));
 
-        res.json({ files: enriched });
+        res.json({ files: await attachSubjectRosters(enriched) });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -461,6 +615,12 @@ uploadPkl() {
             return res.status(400).json({ error: 'sem is required' });
         }
 
+        // Did the CALLER name this subject's roll numbers, or are we about to
+        // invent a list below? Only a supplied list is a roster, and only a
+        // roster may be written back to Subject.enrolledRollNos — see the
+        // Subject bookkeeping block at the end of this handler.
+        const rosterSupplied = Array.isArray(rollNos) && rollNos.length > 0;
+
         // ── Auto-fetch roll nos if not supplied ───────────────────────────────
         if (!Array.isArray(rollNos) || rollNos.length === 0) {
             const filter = { sem: Number(sem) || sem };
@@ -494,7 +654,13 @@ uploadPkl() {
         // New file name format: {sem}_{subjectSafe}.pkl
         const semSafe = sem.toString().trim();
         const subjectCode = (req.body.subjectCode || '').trim();
-        const { filename: embeddingFile, folder: embFolder, fullPath: outputPath, session: sessionStr } = buildEmbeddingPath(semSafe, subject, dept, subjectCode);
+        const {
+            filename: embeddingFile,
+            folder: embFolder,
+            fullPath: outputPath,
+            session: sessionStr,
+            relPath: embeddingRelPath,
+        } = buildEmbeddingPath(semSafe, subject, dept, subjectCode, subjectId);
         ensureDir(embFolder);
 
         // For GT lookup we still need a batch-like folder path.
@@ -508,6 +674,7 @@ uploadPkl() {
     subject:         subject.trim(),
     dept:            (dept || '').trim().toUpperCase(),
     embeddingFile,
+    embeddingRelPath,
     session:         sessionStr,
     subjectCode,
     rollNos,
@@ -666,19 +833,62 @@ try {
         record.lastUpdatedAt   = new Date();
         await record.save();
 
-        // ERP Sync page bookkeeping: when the caller names the Subject doc,
-        // keep its embedding status truthful without a second request.
-        if (subjectId) {
+        // ── Subject bookkeeping ──────────────────────────────────────────────
+        // Subject is the single roster of record: enrolledRollNos is the one
+        // place a subject's roll numbers live, and the only place attendance
+        // reads them from (see attendanceModule/controllers/subjectRoster.js).
+        // Generating embeddings from a supplied roll list IS establishing that
+        // roster, so it is written here — otherwise the roster would exist
+        // only inside this run's StudentEmbedding record, where attendance
+        // cannot see it, and the report would fall back to the whole batch.
+        //
+        // A list this handler auto-fetched (every student in the sem/dept) is
+        // deliberately NOT written back: it is not a roster, and persisting it
+        // would make every elective look like it enrols the whole semester.
+        //
+        // The subject dropdown falls back to using the subject NAME as _id
+        // when no Subject document exists, so validate before casting.
+        // isObjectIdHex, not mongoose.isValidObjectId — the latter passes any
+        // 12-character string, so a 12-character subject NAME arriving here as
+        // subjectId (the dropdown's fallback) used to clear this guard and hit
+        // findByIdAndUpdate with a name cast to bytes. That matched no document,
+        // updated nothing, and skipped the "could not be saved" warning below,
+        // so embeddings looked linked when the Subject row was never touched.
+        if (isObjectIdHex(subjectId)) {
             try {
                 const Subject = require('../../../models/subject');
                 await Subject.findByIdAndUpdate(subjectId, {
                     embeddingFile,
+                    // Recorded so the scheduler never has to rebuild the
+                    // {session}/{dept} folders from timetable values that may
+                    // punctuate the department differently, or from a session
+                    // that has since rolled over.
+                    embeddingRelPath,
                     embeddingUpdatedAt: new Date(),
                     missedGroundTruth: missedRollNos.map(m => m.rollNo),
+                    ...(rosterSupplied
+                        ? { enrolledRollNos: rollNos.map(r => String(r).trim().toUpperCase()).filter(Boolean) }
+                        : {}),
                 });
+                if (!rosterSupplied) {
+                    sse({
+                        type: 'warning',
+                        message:
+                            'Roll numbers were auto-fetched for the whole semester, so the subject roster '
+                            + 'was left unchanged. Attendance for this subject will cover the whole batch '
+                            + 'until a roster is uploaded or fetched from the ERP.',
+                    });
+                }
             } catch (subjErr) {
                 sse({ type: 'warning', message: `Subject record update failed: ${subjErr.message}` });
             }
+        } else if (subjectId) {
+            sse({
+                type: 'warning',
+                message:
+                    'This subject has no record in the Subject collection, so its roster and embedding '
+                    + 'file could not be saved. The .pkl was still written.',
+            });
         }
 
         sse({

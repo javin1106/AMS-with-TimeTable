@@ -154,6 +154,13 @@ export default function NotificationSettingsTab() {
     threshold: 75,
   });
   const [savingDailySummary, setSavingDailySummary] = useState(false);
+  const [facultySummaryConfig, setFacultySummaryConfig] = useState({
+    enabled: false,
+    bccEmails: [],
+  });
+  const [savingFacultySummary, setSavingFacultySummary] = useState(false);
+  const [sampleEmail, setSampleEmail] = useState('');
+  const [sendingSample, setSendingSample] = useState(false);
   const [loading, setLoading] = useState(true);
   const [email, setEmail] = useState('');
   const [role, setRole] = useState('admin');
@@ -173,6 +180,7 @@ export default function NotificationSettingsTab() {
         setRoles(d.settings?.roles || []);
         setRecipients(d.settings?.recipients || []);
         if (d.settings?.dailySummaryConfig) setDailySummaryConfig(d.settings.dailySummaryConfig);
+        if (d.settings?.facultySummaryConfig) setFacultySummaryConfig(d.settings.facultySummaryConfig);
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -253,6 +261,51 @@ export default function NotificationSettingsTab() {
       showMsg('Error: ' + err.message, 'error');
     } finally {
       setSavingDailySummary(false);
+    }
+  };
+
+  const handleFacultySummaryChange = async (patch) => {
+    const next = { ...facultySummaryConfig, ...patch };
+    setFacultySummaryConfig(next);
+    setSavingFacultySummary(true);
+    try {
+      const res = await fetch(`${BASE}/faculty-summary`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(next),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update');
+      setFacultySummaryConfig(data.settings.facultySummaryConfig);
+    } catch (err) {
+      showMsg('Error: ' + err.message, 'error');
+    } finally {
+      setSavingFacultySummary(false);
+    }
+  };
+
+  const handleSendSample = async () => {
+    const trimmed = sampleEmail.trim();
+    if (!trimmed) {
+      showMsg('Enter an email address for the sample.', 'error');
+      return;
+    }
+    setSendingSample(true);
+    try {
+      const res = await fetch(`${BASE}/faculty-summary/sample`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: trimmed }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to send');
+      showMsg(data.message || `Sample sent to ${trimmed}`);
+    } catch (err) {
+      showMsg('Error: ' + err.message, 'error');
+    } finally {
+      setSendingSample(false);
     }
   };
 
@@ -746,6 +799,110 @@ export default function NotificationSettingsTab() {
                   />
                 </div>
               )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* End-of-class summary mailed to the faculty who taught the period */}
+      <div className="ns-card">
+        <div className="ns-card-header">
+          <span className="ns-section-title">Faculty attendance summary</span>
+        </div>
+        <div className="ns-card-body">
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              marginBottom: facultySummaryConfig.enabled ? 18 : 0,
+            }}
+          >
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: T.text, marginBottom: 2 }}>
+                Email faculty at the end of each class
+              </div>
+              <div style={{ fontSize: 12, color: T.textMuted }}>
+                Sends present/absent roll numbers to the faculty on the timetable, using their
+                address from the Faculty directory. Not tied to the roles above.
+              </div>
+            </div>
+            <div
+              onClick={() =>
+                !savingFacultySummary &&
+                handleFacultySummaryChange({ enabled: !facultySummaryConfig.enabled })
+              }
+              title={facultySummaryConfig.enabled ? 'Click to disable' : 'Click to enable'}
+              role="switch"
+              aria-checked={facultySummaryConfig.enabled}
+              aria-label="Email faculty at the end of each class"
+              style={{
+                width: 46,
+                height: 26,
+                borderRadius: 26,
+                cursor: savingFacultySummary ? 'not-allowed' : 'pointer',
+                opacity: savingFacultySummary ? 0.6 : 1,
+                background: facultySummaryConfig.enabled ? T.accent : '#d1d5db',
+                transition: 'background .2s',
+                position: 'relative',
+                flexShrink: 0,
+              }}
+            >
+              <span
+                style={{
+                  position: 'absolute',
+                  height: 20,
+                  width: 20,
+                  left: facultySummaryConfig.enabled ? 23 : 3,
+                  top: 3,
+                  background: '#fff',
+                  borderRadius: '50%',
+                  transition: 'left .2s',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                }}
+              />
+            </div>
+          </div>
+
+          {facultySummaryConfig.enabled && (
+            <div className="ns-add-row">
+              <div style={{ flex: 2, minWidth: 220 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 6 }}>
+                  Send a sample to
+                </label>
+                <input
+                  type="email"
+                  className="native-input"
+                  value={sampleEmail}
+                  onChange={(e) => setSampleEmail(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && !sendingSample && handleSendSample()}
+                  placeholder="you@example.com"
+                  disabled={sendingSample}
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+                <button
+                  type="button"
+                  className="native-btn"
+                  onClick={handleSendSample}
+                  disabled={sendingSample || !sampleEmail.trim()}
+                  style={{
+                    background: T.accent,
+                    color: '#fff',
+                    opacity: sendingSample || !sampleEmail.trim() ? 0.55 : 1,
+                    flexShrink: 0,
+                  }}
+                >
+                  {sendingSample ? 'Sending…' : 'Send sample'}
+                </button>
+              </div>
+            </div>
+          )}
+          {facultySummaryConfig.enabled && (
+            <div style={{ fontSize: 12, color: T.textMuted, marginTop: 10, lineHeight: 1.6 }}>
+              The sample uses the most recent real attendance report, and does not count as that
+              period&apos;s email to the faculty.
             </div>
           )}
         </div>

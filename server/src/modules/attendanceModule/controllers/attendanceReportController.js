@@ -1,13 +1,24 @@
 // server/src/modules/attendanceModule/controllers/attendanceReportController.js
 
 const AttendanceReport = require("../../../models/attendanceReport");
+const { reportQuery, roomKey } = require("./reportKey");
 const LockSem = require("../../../models/locksem");
 const Student = require("../../../models/student");
 const Subject = require("../../../models/subject");
+const mongoose = require('mongoose');
+const attendanceSessionController = require('./attendanceSessionController');
+const { deleteUnknownFacesForReport } = require('./unknownFaceWriter');
+const { normalizeDepartment } = require('../middleware/attendanceAccess');
 const ErpCommunicationLog = require("../../../models/attendanceModule/erpCommunicationLog");
 const { recordErpPeriodAttendance } = require("./erpAttendanceStore");
+const {
+  rosterFromSubject,
+  reconcileFinalReport,
+  rosterMembers,
+  membership,
+} = require("./subjectRoster");
 
-function mergeStudentStatus(slotResults) {
+function mergeStudentStatus(slotResults, roster = []) {
   const rollMap = {};
 
   for (const slot of slotResults) {
@@ -87,15 +98,20 @@ function mergeStudentStatus(slotResults) {
     });
   }
 
-  return finalReport;
+  // Pin the merged result to the subject's roster: roster students the model
+  // never saw become Absent, and anyone else it recognised is kept but flagged
+  // out of the counts. See subjectRoster.js.
+  return reconcileFinalReport(finalReport, roster);
 }
 
-// Build summary counts
+// Build summary counts — over the subject's roster only, never over faces the
+// model happened to recognise from elsewhere in the batch.
 function buildSummary(finalReport) {
-  const total = finalReport.length;
-  const present = finalReport.filter((s) => s.finalStatus === "P").length;
-  const absent = finalReport.filter((s) => s.finalStatus === "A").length;
-  const review = finalReport.filter((s) => s.finalStatus === "R").length;
+  const members = rosterMembers(finalReport);
+  const total = members.length;
+  const present = members.filter((s) => s.finalStatus === "P").length;
+  const absent = members.filter((s) => s.finalStatus === "A").length;
+  const review = members.filter((s) => s.finalStatus === "R").length;
   return {
     totalStudents: total,
     present,
@@ -177,6 +193,9 @@ async function detectAndUpdateProxies(date, timeSlot) {
   for (const report of reports) {
     for (const student of report.finalReport) {
       if (student.finalStatus !== "P") continue;
+      // A flagged face isn't enrolled in this class, so "present in two rooms"
+      // doesn't apply to it — it's already surfaced as a flag on the report.
+      if (student.inList === false) continue;
       if (!studentMap.has(student.rollNo)) {
         studentMap.set(student.rollNo, []);
       }
@@ -262,6 +281,43 @@ class AttendanceReportController {
       const students = [];
       const attendance = mlResult.attendance || {};
 
+      // Resolve subject metadata (abbreviation/code/full name) from the
+      // timetable module's Subject collection — this is the data ERP needs
+      // (the free-text `subject` field above is just the timetable's slot
+      // text). Resolved server-side rather than trusted from the client,
+      // since Subject is the timetable module's source of truth. A client-
+      // supplied subjectMeta (if any) is used only as a fallback.
+      //
+      // The same document carries enrolledRollNos — the roll numbers this
+      // report is actually about. The ML result can name students who merely
+      // have embeddings in this batch, so it is not a roster (subjectRoster.js).
+      let resolvedSubjectMeta = subjectMeta || undefined;
+      let roster = [];
+      if (subject) {
+        const subjectDoc = await Subject.findOne({
+          subName: subject,
+          ...(department ? { dept: department } : {}),
+          ...(semester ? { sem: semester } : {}),
+        }).lean();
+        if (subjectDoc) {
+          resolvedSubjectMeta = {
+            subName: subjectDoc.subName || "",
+            subCode: subjectDoc.subCode || "",
+            subjectFullName: subjectDoc.subjectFullName || "",
+            credits: subjectDoc.credits ?? null,
+            subAbbreviation: subjectDoc.subAbbreviation || "",
+          };
+        }
+        roster = rosterFromSubject(subjectDoc);
+        if (roster.length === 0) {
+          console.warn(
+            `[AttendanceReport] No enrolledRollNos for subject "${subject}" (sem ${semester || "?"}) — ` +
+              `report will cover every roll number the ML result returned.`,
+          );
+        }
+      }
+      const rosterSet = new Set(roster);
+
       // Bulk-fetch enrolled students' recorded gender for cross-checking
       // against what InsightFace detected during this session — avoids one
       // DB round-trip per student.
@@ -302,6 +358,7 @@ class AttendanceReportController {
           genderMismatch,
           finalStatus:
             status === "present" ? "P" : status === "review" ? "R" : "A",
+          ...membership(rollNo, data, rosterSet),
         });
       }
 
@@ -319,37 +376,14 @@ class AttendanceReportController {
         },
       };
 
-      // Resolve subject metadata (abbreviation/code/full name) from the
-      // timetable module's Subject collection — this is the data ERP needs
-      // (the free-text `subject` field above is just the timetable's slot
-      // text). Resolved server-side rather than trusted from the client,
-      // since Subject is the timetable module's source of truth. A client-
-      // supplied subjectMeta (if any) is used only as a fallback.
-      let resolvedSubjectMeta = subjectMeta || undefined;
-      if (subject) {
-        const subjectDoc = await Subject.findOne({
-          subName: subject,
-          ...(department ? { dept: department } : {}),
-          ...(semester ? { sem: semester } : {}),
-        }).lean();
-        if (subjectDoc) {
-          resolvedSubjectMeta = {
-            subName: subjectDoc.subName || "",
-            subCode: subjectDoc.subCode || "",
-            subjectFullName: subjectDoc.subjectFullName || "",
-            credits: subjectDoc.credits ?? null,
-            subAbbreviation: subjectDoc.subAbbreviation || "",
-          };
-        }
-      }
-
       // Upsert: ONE report per batch+date+timeSlot ──
       const slotKey = timeSlot || "";
-      let report = await AttendanceReport.findOne({
-        batch,
-        date,
-        timeSlot: slotKey,
-      });
+      // Room joined the key: two rooms running the same batch in one slot
+      // (split lab, elective across rooms) otherwise shared one document.
+      // See reportKey.js.
+      let report = await AttendanceReport.findOne(
+        reportQuery({ batch, date, timeSlot: slotKey, room }),
+      );
 
       if (report) {
         if (report.status === "finalized") {
@@ -368,7 +402,8 @@ class AttendanceReportController {
           semester,
           subject,
           faculty,
-          room,
+          // Part of the report key - see reportKey.js.
+          room: roomKey(room),
           date,
           timeSlot: slotKey,
           locksemId: locksemId || null,
@@ -378,8 +413,8 @@ class AttendanceReportController {
         });
       }
 
-      // Always recompute merged final from ALL runs
-      report.finalReport = mergeStudentStatus(report.slotResults);
+      // Always recompute merged final from ALL runs, scoped to the roster
+      report.finalReport = mergeStudentStatus(report.slotResults, roster);
       report.summary = buildSummary(report.finalReport);
 
       // If report was live (session), keep it live
@@ -740,20 +775,48 @@ class AttendanceReportController {
     }
   }
 
-  // Delete a draft report
+  // Permanently delete a saved report and data tied to that report id.
   // DELETE /attendancemodule/reports/:id
   async deleteReport(req, res) {
     try {
+      if (!mongoose.isValidObjectId(req.params.id)) {
+        return res.status(400).json({ error: "Invalid report id" });
+      }
+
       const report = await AttendanceReport.findById(req.params.id);
       if (!report) return res.status(404).json({ error: "Report not found" });
-      if (report.status === "finalized") {
-        return res
-          .status(400)
-          .json({ error: "Cannot delete a finalized report" });
+
+      // The toggle grants dept-admins only their normal department-scoped
+      // access; it must never allow deletion of another department's report.
+      if (
+        !req.attendanceFullAccess
+        && normalizeDepartment(report.department) !== normalizeDepartment(req.attendanceDepartment)
+      ) {
+        return res.status(403).json({ error: "Department access denied." });
       }
+
+      // Stop timers before deleting a live report so no background callback can
+      // recreate or update it after the destructive action completes.
+      if (attendanceSessionController.getSessionStatus(String(report._id)).active) {
+        await attendanceSessionController.stopSession(String(report._id));
+      }
+
+      const unknownFaceCleanup = await deleteUnknownFacesForReport(report._id);
+      const { date, timeSlot } = report;
       await report.deleteOne();
-      res.json({ message: "Report deleted" });
+
+      // Proxy links are embedded in neighbouring reports. Rebuilding the slot
+      // after deletion removes references to the deleted report and refreshes
+      // each remaining report's proxy flag/count.
+      await detectAndUpdateProxies(date, timeSlot);
+
+      res.json({
+        message: "Attendance report and associated data deleted",
+        deletedReportId: String(report._id),
+        cleanup: unknownFaceCleanup,
+      });
     } catch (err) {
+      console.error('[AttendanceReport] deleteReport error:', err);
       res.status(500).json({ error: err.message });
     }
   }
@@ -1124,7 +1187,9 @@ class AttendanceReportController {
       for (const report of reports) {
         const dateStr = report.date;
         dateSet.add(dateStr);
-        for (const student of report.finalReport) {
+        // Roster students only — an export of a subject's attendance must not
+        // grow rows for faces recognised from elsewhere in the batch.
+        for (const student of rosterMembers(report.finalReport)) {
           if (!studentMap[student.rollNo]) {
             studentMap[student.rollNo] = {};
           }

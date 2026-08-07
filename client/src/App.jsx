@@ -66,6 +66,7 @@ import AdminClash from './timetableadmin/AdminClashes.jsx';
 
 import Home from './pages/Home';
 import GuidePage from './pages/GuidePage';
+import PrivacyPolicy from './pages/PrivacyPolicy';
 import ErrorPage from './pages/ErrorPage.jsx';
 import animation404 from '../src/assets/404.json';
 import { LogoAnimation } from './components/login/LogoAnimation.jsx';
@@ -161,6 +162,7 @@ import CameraPreview from './attendancemodule/cameraPreview';
 import FrameVerification from './attendancemodule/FrameVerification';
 import UnknownFaces from './attendancemodule/UnknownFaces';
 import SchedulerPage from './attendancemodule/SchedulerPage';
+import SchedulerLedgerPage from './attendancemodule/SchedulerLedgerPage';
 import { ExtraClassPage, AlterClassPage } from './attendancemodule/extraAlterClasses';
 import LiveReportPage from './attendancemodule/LiveReportPage';
 import RecordStream from './attendancemodule/RecordStream';
@@ -216,6 +218,7 @@ function App() {
         {/* Landing Page */}
         <Route path="/" element={<Home />} />
         <Route path="/guide" element={<GuidePage />} />
+        <Route path="/privacy" element={<PrivacyPolicy />} />
         <Route path="/nirf" element={<NirfRanking />} />
 
         <Route path="/services/:serviceId" element={<ServicePage />} />
@@ -517,6 +520,7 @@ function App() {
           <Route path="client-console" element={<ReactConsole />} />
           <Route path="dept-menu-config" element={<DeptMenuConfig />} />
           <Route path="scheduler" element={<SchedulerPage />} />
+          <Route path="scheduler-ledger" element={<SchedulerLedgerPage />} />
           <Route path="live-report" element={<LiveReportPage />} />
           <Route path="view-mldata" element={<MLDataFolder />} />
         </Route>

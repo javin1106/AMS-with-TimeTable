@@ -98,7 +98,11 @@ function mapStatusForErp(finalStatus) {
 }
 
 function buildRecognitionResults(report) {
+    // Roster only. ERP's own roster for the period is the subject's, so a
+    // flagged non-enrolled face would come straight back as a discarded roll
+    // number on an ATTENDANCE_ACCEPTED_WITH_FLAGS response (spec §6, §12.1).
     return (report.finalReport || [])
+        .filter((s) => s.inList !== false)
         .map((s) => ({
             rollNo: s.rollNo,
             status: mapStatusForErp(s.finalStatus),

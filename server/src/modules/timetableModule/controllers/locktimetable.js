@@ -206,7 +206,6 @@ async function sendFacultyChangeEmails(facultyChanges) {
     const email = (facultyDoc?.email || "").trim();
 
     if (!facultyDoc || !email) {
-      console.warn(`No email found for faculty: ${change.faculty}`);
       results.push({
         email: null,
         faculty: change.faculty,
@@ -255,7 +254,6 @@ async function sendFacultyChangeEmails(facultyChanges) {
         success: true,
       });
     } catch (err) {
-      console.error(`Failed to send email to ${group.email}:`, err);
       results.push({
         email: group.email,
         faculty: facultyLabel,
@@ -337,7 +335,6 @@ class LockTimeTableController {
             session = tt.session || '';
           }
         } catch (err) {
-          console.warn('Failed to fetch timetable for log enrichment:', err.message || err);
         }
 
         await TimetableChangeLog.create({
@@ -382,11 +379,9 @@ class LockTimeTableController {
 
       // Execute MasterTable logic asynchronously (fire-and-forget)
       MasterClassTableController.createMasterTable(req.body).catch((err) => {
-        console.error("Background MasterTable creation failed:", err);
         // Optionally: Send to error monitoring service (e.g., Sentry)
       });
     } catch (err) {
-      console.error("Error in locktt:", err);
       // Only send error response if headers haven't been sent yet
       if (!res.headersSent) {
         res.status(500).json({ error: "An error occurred" });
@@ -428,7 +423,6 @@ class LockTimeTableController {
       const notes = await Notecontroller.getNoteByCode(code, "sem", sem);
       res.status(200).json({ timetableData, notes });
     } catch (error) {
-      console.error(error);
       throw new Error("Error fetching and formatting data from the database");
     }
   }
@@ -518,7 +512,6 @@ class LockTimeTableController {
 
       res.status(200).json({ timetableData, updatedTime, notes });
     } catch (error) {
-      console.error(error);
       res.status(500).json({ error: "Internal server error" });
     }
   }
@@ -595,7 +588,6 @@ class LockTimeTableController {
       // console.log('rooom data',timetableData)
       res.status(200).json({ timetableData, updatedTime, notes });
     } catch (error) {
-      console.error(error);
       res.status(500).json({ error: "Internal server error" });
     }
   }
@@ -617,8 +609,6 @@ class LockTimeTableController {
         ? await getIndianTime(new Date(saveTime[0].updated_at))
         : null;
 
-    console.log(lockTimeIST);
-    console.log(saveTimeIST);
 
     return {
       lockTimeIST,

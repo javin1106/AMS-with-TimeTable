@@ -49,7 +49,6 @@ class TableController {
       } else {
         data.currentSession = false;
       }
-        console.log("seesionstatus",data.currentSession);
       const newTimeTable = new TimeTable({
         ...data,
         code: newCode,
@@ -68,7 +67,6 @@ class TableController {
       }
 
       const roomdata = await AddAllotment.find({ session: data.session });
-      console.log(roomdata);
       const centralisedAllotments = roomdata[0]?.centralisedAllotments || [];
       const openElectiveAllotments = roomdata[0]?.openElectiveAllotments || [];
 
@@ -96,7 +94,6 @@ class TableController {
 
       res.json(createdTT);
     } catch (error) {
-      console.error(error);
       res.status(500).json({ error: "Internal server error" });
     }
   }
@@ -125,15 +122,12 @@ class TableController {
           // Save the ClassTable instance to the MongoDB database
           classTableInstance.save((err) => {
             if (err) {
-              console.error(`Error saving class table data: ${err}`);
             } else {
-              console.log(`Saved class table data for ${day} - ${slot}`);
             }
           });
         }
       }
     } catch (error) {
-      console.error(error);
       res.status(500).json({ error: "Internal server error" });
     }
   }
@@ -145,7 +139,6 @@ class TableController {
       res.json(TableField);
       return;
     } catch (error) {
-      console.error(error);
       res.status(500).json({ error: "Internal server error" });
     }
   }
@@ -166,14 +159,11 @@ class TableController {
   async getTableByCode(code) {
     try {
       if (typeof code !== "string") {
-        console.error("Invalid code received:", code);
         throw new HttpException(400, "Invalid code format");
       }
 
-      console.log("Fetching timetable details for code:", code);
 
       const TableField = await TimeTable.findOne({ code });
-      console.log("Fetched timetable details:", TableField);
 
       if (!TableField) {
         throw new HttpException(404, "Timetable not found for the given code");
@@ -181,7 +171,6 @@ class TableController {
 
       return TableField;
     } catch (error) {
-      console.error("Error fetching timetable by code:", error);
       throw new HttpException(500, error.message || "Internal server error");
     }
   }
@@ -311,7 +300,6 @@ class TableController {
         updatedSessions,
       });
     } catch (error) {
-      console.error("Error updating current session:", error);
       res.status(500).json({ error: "Internal Server Error" });
     }
   }
@@ -325,7 +313,6 @@ class TableController {
       const codes = sessions.map((s) => s.code);
       res.json({ codes });
     } catch (error) {
-      console.error("Error updating current session:", error);
       res.status(500).json({ error: "Internal Server Error" });
     }
   }
@@ -409,7 +396,6 @@ async publishTimetable(req, res) {
       );
 
       if (!faculty) {
-        console.warn(`Faculty not found: ${facultyName}`);
         results.push({
           faculty: facultyName,
           email: null,
@@ -421,7 +407,6 @@ async publishTimetable(req, res) {
 
       const email = (faculty.email || "").trim();
       if (!email) {
-        console.warn(`No email on record for faculty: ${facultyName}`);
         results.push({
           faculty: facultyName,
           email: null,
@@ -433,7 +418,6 @@ async publishTimetable(req, res) {
 
       const emailKey = email.toLowerCase();
       if (mailedEmails.has(emailKey)) {
-        console.log(`Skipping duplicate recipient: ${email} (${facultyName})`);
         results.push({
           faculty: facultyName,
           email,
@@ -455,7 +439,6 @@ async publishTimetable(req, res) {
         await mailSender(email, subject, body);
         results.push({ faculty: facultyName, email, success: true });
       } catch (err) {
-        console.error(`Failed to send publish email to ${email}:`, err);
         results.push({
           faculty: facultyName,
           email,
@@ -475,7 +458,6 @@ async publishTimetable(req, res) {
     });
 
   } catch (error) {
-    console.error("Error publishing timetable:", error);
     if (!res.headersSent) {
       res.status(500).json({ error: "Internal Server Error" });
     }
@@ -503,7 +485,6 @@ async publishTimetable(req, res) {
 
       res.json({ success: true });
     } catch (error) {
-      console.error("Error publishing session timetables:", error);
       res.status(500).json({ error: "Internal Server Error" });
     }
   }

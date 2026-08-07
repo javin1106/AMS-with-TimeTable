@@ -51,6 +51,7 @@ import {
 } from '@chakra-ui/react';
 import lmApi from '../api/lmApi';
 import { EmptyState, ErrorState, Loading, SectionCard, StatTile, buttonTextStyles } from '../components/common';
+import QuizReview from '../components/QuizReview';
 import { richTextToPlain } from '../richTextUtils';
 import { formatDateTime, relativeTime } from '../format';
 
@@ -210,6 +211,76 @@ function AttemptActions({ attempt, onAct }) {
         </MenuItem>
       </MenuList>
     </Menu>
+  );
+}
+
+/**
+ * One student's paper, question by question.
+ *
+ * The table above it answers "how did the class do"; this answers the question
+ * a teacher is actually asked at the desk afterwards — "which one did I get
+ * wrong, and what was the right answer?" It reuses the review the student sees,
+ * against the same endpoint, so staff and student are never looking at two
+ * different accounts of the same paper.
+ */
+function AttemptAnswersModal({ attempt, classId, onClose }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!attempt) {
+      setData(null);
+      setError(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setData(null);
+    setError(null);
+    lmApi
+      .getAttempt(classId, attempt._id)
+      .then((fetched) => !cancelled && setData(fetched))
+      .catch((err) => !cancelled && setError(err));
+    return () => {
+      cancelled = true;
+    };
+  }, [attempt, classId]);
+
+  const review = data?.review || [];
+
+  return (
+    <Modal isOpen={Boolean(attempt)} onClose={onClose} size="4xl" scrollBehavior="inside">
+      <ModalOverlay />
+      <ModalContent>
+        <ModalHeader>
+          {attempt?.studentName || attempt?.studentEmail}
+          <Text fontSize="sm" fontWeight="400" color="gray.600">
+            {attempt?.rollNumber ? `${attempt.rollNumber} · ` : ''}
+            {attempt?.score}/{attempt?.maxScore} ({attempt?.percent}%) ·{' '}
+            {attempt?.totalCorrect} correct · {attempt?.totalWrong} wrong ·{' '}
+            {attempt?.totalUnattempted} unattempted
+          </Text>
+        </ModalHeader>
+        <ModalCloseButton />
+        <ModalBody pb={6}>
+          <ErrorState error={error} />
+          {!data && !error ? (
+            <Loading label="Loading the paper…" />
+          ) : review.length === 0 ? (
+            <EmptyState
+              icon="📝"
+              title="Nothing to show"
+              description="This sitting has no marked answers — it may still be in progress."
+            />
+          ) : (
+            <QuizReview
+              review={review}
+              title=""
+              answerLabel={`${attempt?.studentName || 'Student'}’s answer`}
+            />
+          )}
+        </ModalBody>
+      </ModalContent>
+    </Modal>
   );
 }
 
@@ -970,6 +1041,9 @@ export default function QuizResults() {
   const [regrading, setRegrading] = useState(false);
   const [tab, setTab] = useState(0);
   const [auto, setAuto] = useState(true);
+  const [releasing, setReleasing] = useState(false);
+  // The attempt whose answer sheet is open, if any.
+  const [viewing, setViewing] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [updatedAt, setUpdatedAt] = useState(null);
   // How far this browser's clock is ahead of the server's, so the countdowns
@@ -1018,12 +1092,45 @@ export default function QuizResults() {
 
   const act = useCallback((attempt, next) => setAction({ attempt, action: next }), []);
 
+  /**
+   * The override the whole scheduling exists to be overridden by.
+   *
+   * Confirmed rather than immediate: it notifies every student who sat the
+   * paper and cannot be taken back, and the commonest moment to press it is
+   * while still deciding whether the marks are right.
+   */
+  const releaseNow = useCallback(async () => {
+    // eslint-disable-next-line no-alert
+    if (!window.confirm('Announce these results to the class now? Every student who sat the paper is notified, and this cannot be undone.')) {
+      return;
+    }
+    setReleasing(true);
+    try {
+      const outcome = await lmApi.releaseQuizResults(classId, quizId);
+      toast({
+        status: 'success',
+        title: 'Results published',
+        description: outcome.notified
+          ? `${outcome.notified} student(s) notified.`
+          : 'Nobody has sat this paper yet, so there was nobody to notify.',
+      });
+      await load(true);
+    } catch (err) {
+      toast({ status: 'error', title: 'Could not publish results', description: err.message });
+    } finally {
+      setReleasing(false);
+    }
+  }, [classId, quizId, load, toast]);
+
   if (loading) return <Loading />;
   if (error) return <ErrorState error={error} onRetry={load} />;
   if (!data) return null;
 
   const { quiz, attempts, summary, perQuestion, perSection, distribution, resultsVisible } = data;
   const notStartedStudents = data.notStartedStudents || [];
+  // `results` is absent on a response cached from before this shipped; falling
+  // back to the old boolean keeps the page rendering rather than blanking.
+  const results = data.results || { released: resultsVisible };
   const maxBand = Math.max(1, ...distribution.map((band) => band.count));
 
   return (
@@ -1043,6 +1150,14 @@ export default function QuizResults() {
           </Text>
         </Box>
         <HStack>
+          {/* The override, sitting where a teacher looks when they have just
+              finished checking the marks — not buried back in the publish
+              dialog, which is about setting the paper rather than closing it. */}
+          {!results.released && (
+            <Button size="sm" colorScheme="green" onClick={releaseNow} isLoading={releasing}>
+              📢 Publish results now
+            </Button>
+          )}
           <Button size="sm" colorScheme="purple" onClick={() => setKeyOpen(true)}>
             Edit answer key
           </Button>
@@ -1055,11 +1170,39 @@ export default function QuizResults() {
         </HStack>
       </Flex>
 
-      {!resultsVisible && (
+      {/* Three states, because "students cannot see this yet" has three quite
+          different reasons and only one of them is a date. */}
+      {!results.released && (
         <Alert status="info" borderRadius="md" mb={4} fontSize="sm">
           <AlertIcon />
-          Results are scheduled for release on {formatDateTime(quiz.settings.resultReleaseAt)} — students
-          cannot see their scores yet, but you can.
+          <Box>
+            <Text>
+              {results.scheduled
+                ? `Results are scheduled for ${formatDateTime(results.releaseAt)} — students cannot see their scores yet, but you can.`
+                : 'Results are held until you release them — students cannot see their scores yet, but you can.'}
+            </Text>
+            <Text fontSize="xs" color="gray.600">
+              Publishing notifies every student who sat the paper, and marks the subject on their
+              class card until they have read it.
+            </Text>
+          </Box>
+        </Alert>
+      )}
+      {results.released && results.announcedAt && (
+        <Alert status="success" borderRadius="md" mb={4} fontSize="sm">
+          <AlertIcon />
+          <Box>
+            <Text>
+              Results announced {formatDateTime(results.announcedAt)}
+              {results.announcedByName ? ` by ${results.announcedByName}` : ''}.
+            </Text>
+            {(results.viewed > 0 || results.awaitingView > 0) && (
+              <Text fontSize="xs" color="gray.600">
+                {results.viewed} student(s) have opened their result; {results.awaitingView} have not
+                yet.
+              </Text>
+            )}
+          </Box>
         </Alert>
       )}
 
@@ -1107,7 +1250,7 @@ export default function QuizResults() {
               </Badge>
             )}
           </Tab>
-          <Tab fontSize="sm">Attempts ({attempts.length})</Tab>
+          <Tab fontSize="sm">Student analysis ({attempts.length})</Tab>
           <Tab fontSize="sm">Question analysis</Tab>
           {perSection.length > 0 && <Tab fontSize="sm">Sections</Tab>}
           <Tab fontSize="sm">Distribution</Tab>
@@ -1151,7 +1294,11 @@ export default function QuizResults() {
                         <Th isNumeric>Time</Th>
                         <Th>Flags</Th>
                         <Th>Submitted</Th>
-                        <Th>Fix</Th>
+                        {/* Was a "Fix" menu duplicating the one on the Live
+                            monitor, where reopening and resetting a sitting
+                            belong. This column answers the question the table
+                            cannot: what did this student actually write. */}
+                        <Th>Answers</Th>
                       </Tr>
                     </Thead>
                     <Tbody>
@@ -1215,7 +1362,15 @@ export default function QuizResults() {
                             )}
                           </Td>
                           <Td>
-                            <AttemptActions attempt={attempt} onAct={(next) => act(attempt, next)} />
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              colorScheme="purple"
+                              isDisabled={attempt.status === 'in_progress'}
+                              onClick={() => setViewing(attempt)}
+                            >
+                              View answers
+                            </Button>
                           </Td>
                         </Tr>
                       ))}
@@ -1381,6 +1536,8 @@ export default function QuizResults() {
           </TabPanel>
         </TabPanels>
       </Tabs>
+
+      <AttemptAnswersModal attempt={viewing} classId={classId} onClose={() => setViewing(null)} />
 
       <AttemptActionModal
         state={action}

@@ -12,11 +12,32 @@ const studentEmbeddingSchema = new mongoose.Schema({
     subject:         { type: String, default: '' },
     subjectCode:     { type: String, default: '' },
     embeddingFile:   { type: String, default: null },
+    // Where that file was written, relative to ml-data/embeddings —
+    // "2026-27/ELECTRONICS_.../64f0a1c9....pkl".
+    //
+    // embeddingFile stopped being unique on its own once files were named after
+    // the Subject _id: the session used to be baked into the filename, so the
+    // same subject in 2025-26 and 2026-27 produced two distinct names, whereas
+    // now both are "{id}.pkl" in different session folders. Consumers that hunt
+    // for a bare filename under ml-data/embeddings (rebuildSubjectPklsForStudent)
+    // would otherwise take whichever session's copy they happened to walk into
+    // first and rebuild the wrong one. Null on pre-existing records.
+    embeddingRelPath: { type: String, default: null },
     // AdaFace's independent embedding .pkl for this subject (separate folder,
     // server/ml-data/embeddings_adaface/...) — null until an AdaFace ONNX
     // model is loaded and generation produces AdaFace data for at least one
     // student. Never affects embeddingFile (InsightFace) above.
     adafaceEmbeddingFile: { type: String, default: null },
+    // Manifest of one build: which roll numbers this .pkl was generated from.
+    // NOT a roster — do not read it to answer "who is enrolled in this
+    // subject?". Subject.enrolledRollNos is the single roster of record, and
+    // attendanceModule/controllers/subjectRoster.js is the only way to read it.
+    // The two legitimately differ: a student on the roster with no ground-truth
+    // photos never makes it into the .pkl (that's `missedRollNos`), and a .pkl
+    // is a point-in-time artifact while the roster keeps changing.
+    // The consumers that want this — rebuildSubjectPklsForStudent() and
+    // /ml/enrolled-students — are asking about file contents, which is exactly
+    // what this records.
     rollNos:         { type: [String], default: [] },
     missedRollNos: [{
         rollNo:  { type: String },

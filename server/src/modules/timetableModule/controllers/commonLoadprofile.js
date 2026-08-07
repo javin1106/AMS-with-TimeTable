@@ -16,7 +16,6 @@ class CommonLoadController {
           res.json(createdCommonLoad);
           return;
         } catch (error) {
-          console.error(error); 
           res.status(500).json({ error: "Internal server error" });
         }
       }
@@ -27,7 +26,6 @@ class CommonLoadController {
       res.json(commonLoadList);
       return;
     } catch (error) {
-      console.error(error);
       res.status(500).json({ error: "Internal server error" });
     }
   }

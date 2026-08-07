@@ -1,24 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { cssReset, styles, theme } from './config';
+import { usePeriods } from './usePeriods';
 import getEnvironment from '../getenvironment';
 
 const apiUrl = getEnvironment();
-const ROOMS_API = `${apiUrl}/timetablemodule/lock/rooms`;
+const CAMERA_ROOMS_API = `${apiUrl}/attendancemodule/cameras/rooms`;
 const MASTERROOM_API = `${apiUrl}/timetablemodule/masterroom`;
 const VERIFY_API = `${apiUrl}/attendancemodule/frame-verification`;
 const CLASS_INFO_API = `${apiUrl}/timetablemodule/lock/attendance-lookup`;
-
-const SLOT_LABELS = {
-    period1: 'Period 1 - 08:30',
-    period2: 'Period 2 - 09:30',
-    period3: 'Period 3 - 10:30',
-    period4: 'Period 4 - 11:30',
-    period5: 'Period 5 - 13:30',
-    period6: 'Period 6 - 14:30',
-    period7: 'Period 7 - 15:30',
-    period8: 'Period 8 - 16:30',
-};
 
 const PAGE_CSS = `
     ${cssReset}
@@ -80,10 +70,12 @@ function EmptyState({ title, subtitle }) {
 }
 
 export default function FrameVerification({ fixedDepartment = '' }) {
+    const { slotLabel } = usePeriods();
     // Deep-link support (e.g. from the ERP Overrides page): ?room=&date=&period=
     // pre-fills the selectors so the linked folder loads without manual clicks.
     const [searchParams] = useSearchParams();
     const [rooms, setRooms] = useState([]);
+    const [roomsLoading, setRoomsLoading] = useState(true);
     const [room, setRoom] = useState(() => searchParams.get('room') || '');
     const [availableDates, setAvailableDates] = useState([]);
     const [availablePeriods, setAvailablePeriods] = useState([]);
@@ -112,14 +104,17 @@ export default function FrameVerification({ fixedDepartment = '' }) {
         let cancelled = false;
 
         (async () => {
+            setRoomsLoading(true);
             try {
-                const res = await fetch(ROOMS_API);
+                // Only rooms that already have a camera registered are shown
+                // (Camera registry → distinct roomId).
+                const res = await fetch(CAMERA_ROOMS_API);
                 const data = await res.json();
                 let allRooms = Array.isArray(data.rooms) ? data.rooms : [];
 
                 if (fixedDepartment) {
                     // Dept-admin: only show rooms belonging to their department.
-                    // Intersect the locked-timetable room list with the dept's
+                    // Intersect the camera-registered room list with the dept's
                     // master room list so we never show a room outside scope.
                     try {
                         const deptRes  = await fetch(`${MASTERROOM_API}/dept/${encodeURIComponent(fixedDepartment)}`);
@@ -143,6 +138,8 @@ export default function FrameVerification({ fixedDepartment = '' }) {
                 if (!cancelled) {
                     setRooms([]);
                 }
+            } finally {
+                if (!cancelled) setRoomsLoading(false);
             }
         })();
 
@@ -480,12 +477,19 @@ export default function FrameVerification({ fixedDepartment = '' }) {
                         }}>
                             <div>
                                 <label style={styles.label}>Room</label>
-                                <select value={room} onChange={(e) => setRoom(e.target.value)} style={styles.select}>
-                                    <option value="">Select room</option>
+                                <select value={room} onChange={(e) => setRoom(e.target.value)} style={styles.select} disabled={roomsLoading}>
+                                    <option value="">
+                                        {roomsLoading ? 'Loading rooms with cameras...' : 'Select room'}
+                                    </option>
                                     {rooms.map((roomName) => (
                                         <option key={roomName} value={roomName}>{roomName}</option>
                                     ))}
                                 </select>
+                                {!roomsLoading && rooms.length === 0 && (
+                                    <div style={{ marginTop: 6, fontSize: '11px', color: theme.danger }}>
+                                        No cameras registered for any room. Add a camera in the Camera Registry first.
+                                    </div>
+                                )}
                             </div>
 
                             <div>
@@ -517,7 +521,7 @@ export default function FrameVerification({ fixedDepartment = '' }) {
                                         {!room ? 'Select room first' : availabilityLoading ? 'Loading periods...' : 'Select period'}
                                     </option>
                                     {visiblePeriods.map((item) => (
-                                        <option key={item} value={item}>{SLOT_LABELS[item] || item}</option>
+                                        <option key={item} value={item}>{slotLabel(item)}</option>
                                     ))}
                                 </select>
                             </div>
@@ -571,7 +575,7 @@ export default function FrameVerification({ fixedDepartment = '' }) {
                                 }}>
                                     <div>
                                         <div style={{ fontSize: 16, fontWeight: 700, color: theme.text, marginBottom: 6 }}>
-                                            {room} · {SLOT_LABELS[period] || period} · {date}
+                                            {room} · {slotLabel(period)} · {date}
                                         </div>
                                         <div style={{ fontSize: 13, color: theme.textMuted }}>
                                             {framesLoading ? 'Loading frames...' : 'Open any image to inspect it in the fullscreen viewer.'}

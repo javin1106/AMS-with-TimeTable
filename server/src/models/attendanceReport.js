@@ -20,6 +20,13 @@ const studentAttendanceSchema = new Schema({
     detectedAge:     { type: Number, default: null },
     detectedGender:  { type: String, enum: ['M', 'F', null], default: null },
     genderMismatch:  { type: Boolean, default: false },  // true if detectedGender != Student.gender
+    // Roster membership — is this roll number on Subject.enrolledRollNos for
+    // the subject taught in this period? Only inList students are counted in
+    // `summary` below. A flagged entry is someone the model recognised from
+    // the batch's embedding store who does not take this subject; kept for
+    // review (wrong room, proxy) but never part of present/absent.
+    inList:          { type: Boolean, default: true },
+    flagged:         { type: Boolean, default: false },
     // logic merge: if multiple time slots
     finalStatus:     { type: String, enum: ['P', 'A', 'R'], default: 'A' },
     // ERP override: set to true when the ERP system records an override for
@@ -233,6 +240,17 @@ const attendanceReportSchema = new Schema({
         // top of these yet.
         flags:         { type: [Schema.Types.Mixed], default: [] },
         idempotencyKey:{ type: String, default: null }, // hash of reportId + finalReport content
+    },
+
+    // End-of-class summary mailed to the faculty who taught this period — see
+    // attendanceModule/controllers/facultyAttendanceMailer.js. A period is
+    // reachable from two paths that both "end" it (a live session being
+    // stopped, and the cron finishing its runs), so this is what stops the
+    // faculty getting the same class twice.
+    facultyEmail: {
+        sentAt:    { type: Date,   default: null },   // set only on a successful send
+        toAddress: { type: String, default: null },   // the address actually used
+        lastError: { type: String, default: null },   // why the last attempt failed
     },
 });
 

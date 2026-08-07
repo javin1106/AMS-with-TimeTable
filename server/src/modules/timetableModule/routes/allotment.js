@@ -61,7 +61,6 @@ allotmentRouter.post("/", allotmentWriteAccess, async (req, res) => {
   
       res.status(200).json({ message: 'Session updated successfully' });
     } catch (error) {
-      console.error('Error updating session:', error);
       res.status(500).json({ error: 'Internal Server Error' });
     }
   });

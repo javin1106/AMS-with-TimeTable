@@ -9,7 +9,6 @@ class lockFacultyController {
           res.json(lockedFaculty)
           return;
         } catch (error) {
-          console.error(error); 
           res.status(500).json({ error: "Internal server error" });
         }
       }
@@ -20,7 +19,6 @@ class lockFacultyController {
           res.json(facultyList)
           return;
         } catch (error) {
-          console.error(error); 
           res.status(500).json({ error: "Internal server error" });
         }
       }

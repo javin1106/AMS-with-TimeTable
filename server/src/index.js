@@ -24,7 +24,20 @@ const { startGpuMetricsCollector } = require('./modules/attendanceModule/control
 const alertNotifier = require("./modules/attendanceModule/controllers/alertNotifier");
 const cameraHealthScheduler = require("./modules/attendanceModule/controllers/cameraHealthScheduler");
 
-process.on('uncaughtException',  (err) => console.error('UNCAUGHT EXCEPTION:', err));
+// Log and DIE, rather than log and limp on. After an uncaught throw the
+// process state is undefined — a half-finished attendance run, a mongoose
+// connection mid-operation, timers whose callbacks will never fire — and a
+// process that stays up in that state is worse than one that exits, because
+// the supervisor (pm2 / systemd Restart=always / Docker restart policy) never
+// learns it needs restarting and the scheduler quietly stops firing periods
+// while the health check still says the server is up.
+//
+// The exit is delayed a beat so the log line actually reaches the transports
+// in nodeLogBuffer before the process goes.
+process.on('uncaughtException', (err) => {
+  console.error('UNCAUGHT EXCEPTION — exiting for the supervisor to restart:', err);
+  setTimeout(() => process.exit(1), 500).unref();
+});
 process.on('unhandledRejection', (err) => console.error('UNHANDLED REJECTION:', err));
 
 
@@ -79,7 +92,11 @@ app.use(
     // X-Short-Guest carries a live Short's guest identity for participants with
     // no account. Omitting it here makes the browser fail the preflight, so an
     // open Short would be unjoinable from any deployed origin.
-    allowedHeaders: "Content-Type, Authorization, X-Short-Guest",
+
+    // X-Quiz-Session names the one browser allowed to drive a quiz sitting. Same
+    // rule: leave it out and every deployed origin fails the preflight, which
+    // fails the whole sitting rather than only the proctoring.
+    allowedHeaders: "Content-Type, Authorization, X-Short-Guest, X-Quiz-Session , X-App-Name",
     credentials: true, // Set to true if you need to allow credentials (e.g., cookies)
   })
 );
@@ -211,6 +228,17 @@ mongoose
       // of as an invite that quietly went nowhere. Never throws.
       require("./modules/mailerModule/transport").verifyTransport();
 
+      // ── Restart reconciliation ────────────────────────────────
+      // Finishes what an interrupted process left behind: reports stranded in
+      // status 'live' by a session whose timers died with the old process, and
+      // end-of-period faculty summaries that never went because the run never
+      // reached its last check. Idempotent and safe to run on every boot; runs
+      // before the scheduler so a period it is about to resume is already in a
+      // consistent state. Not awaited — a slow sweep must not delay listening.
+      const { reconcileAfterRestart } = require('./modules/attendanceModule/controllers/schedulerRecovery');
+      reconcileAfterRestart().catch((err) =>
+        console.error('[SchedulerRecovery] Sweep failed:', err.message));
+
      // ── Auto Attendance Scheduler ─────────────────────────────
       // No args needed — rooms, periods, and run settings are now read
       // live from AcquisitionControl + the Camera Registry on every tick.
@@ -301,6 +329,56 @@ mongoose
         throw err;
       }
     });
+
+    // ── Graceful shutdown ───────────────────────────────────────
+    // Most restarts are deploys, and a deploy used to cost exactly what a
+    // crash costs: the in-flight period lost its remaining checks and, worse,
+    // its faculty summary — that mail only fires after the last check, so
+    // killing the process anywhere before it means the class is never mailed.
+    //
+    // Instead: stop claiming new periods, let each in-flight run finish the
+    // check it is on and break out of its loop (it then takes its own normal
+    // end-of-run path, mail included), and only then close the listener. The
+    // ledger keeps whatever could not finish reclaimable, so the next process
+    // resumes the period if there is still time in it.
+    let shuttingDown = false;
+    const gracefulShutdown = async (signal) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      console.log(`[Shutdown] ${signal} received — draining in-flight attendance runs…`);
+
+      // Hard ceiling. A run wedged on an unresponsive RTSP stream must not
+      // hold a deploy open forever; the supervisor would SIGKILL us anyway,
+      // and losing the drain is better than losing control of when we exit.
+      const forceExit = setTimeout(() => {
+        console.error('[Shutdown] Drain timed out — forcing exit');
+        process.exit(1);
+      }, 120000);
+      forceExit.unref();
+
+      try {
+        const { shutdownAutoScheduler } = require('./modules/attendanceModule/controllers/autoAttendanceScheduler');
+        const { drained, pending } = await shutdownAutoScheduler({ timeoutMs: 90000 });
+        if (!drained) {
+          console.warn(`[Shutdown] ${pending.length} run(s) did not drain in time — their periods stay resumable`);
+        }
+      } catch (err) {
+        console.error('[Shutdown] Scheduler drain failed:', err.message);
+      }
+
+      server.close(() => console.log('[Shutdown] HTTP listener closed'));
+      try {
+        await mongoose.connection.close(false);
+        console.log('[Shutdown] MongoDB connection closed');
+      } catch (err) {
+        console.error('[Shutdown] MongoDB close failed:', err.message);
+      }
+      clearTimeout(forceExit);
+      process.exit(0);
+    };
+
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
   })
   .catch((err) => {
     console.error("Error connecting to MongoDB:", err);

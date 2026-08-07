@@ -21,7 +21,6 @@ async function findDuplicateSubjects(code) {
 
     return duplicates.map((duplicate) => duplicate._id); 
   } catch (error) {
-    console.error('Error finding duplicates:', error);
     throw error;
   }
 }

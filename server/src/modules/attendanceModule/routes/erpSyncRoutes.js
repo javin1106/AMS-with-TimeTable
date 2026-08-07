@@ -8,12 +8,17 @@
 
 const express = require('express');
 const router  = express.Router();
-const { listSubjects, fetchRolls, fetchRollsBulk, getSettings, updateSettings } = require('../controllers/erpSyncController');
+const { listSubjects, fetchRolls, fetchRollsBulk, getSettings, updateSettings, probeErp } = require('../controllers/erpSyncController');
 const { runNow } = require('../controllers/erpAutoSyncScheduler');
 
 router.get('/subjects', listSubjects);
 router.post('/fetch-rolls', fetchRolls);
 router.post('/fetch-rolls-bulk', fetchRollsBulk);
+// Diagnostic: sends one roster request built from exactly the posted fields
+// and returns the ERP's raw, uninterpreted response next to the request that
+// produced it. Persists nothing — for comparing this server's request against
+// one that is known to work by hand.
+router.post('/probe', probeErp);
 router.get('/settings', getSettings);
 router.patch('/settings', updateSettings);
 // Manual trigger for the nightly roster-sync job — same runErpAutoSync() the

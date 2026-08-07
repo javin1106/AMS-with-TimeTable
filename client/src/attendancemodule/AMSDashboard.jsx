@@ -13,6 +13,7 @@ import ILeed, { ILEED_FULL_FORM } from './BrandName';
 import PendingActionsCard from './PendingActionsCard';
 import DeptOverridesChart from './DeptOverridesChart';
 import { MLDataFolder } from './MLDataFolder';
+import { usePeriods } from './usePeriods';
 import { createPortal } from "react-dom";
 import { useRef } from "react";
 
@@ -21,12 +22,6 @@ const CAM_API         = `${apiUrl}/attendancemodule/cameras`;
 const LIVE_STATUS_API = `${apiUrl}/attendancemodule/scheduler/live-status`;
 const NOTIF_API       = `${apiUrl}/attendancemodule/settings/notifications`;
 
-const SLOT_LABELS = {
-  period1: 'Period 1 — 08:30', period2: 'Period 2 — 09:30',
-  period3: 'Period 3 — 10:30', period4: 'Period 4 — 11:30',
-  period5: 'Period 5 — 13:30', period6: 'Period 6 — 14:30',
-  period7: 'Period 7 — 15:30', period8: 'Period 8 — 16:30',
-};
 const REPORT_API = `${apiUrl}/attendancemodule/reports`;
 const USER_API   = `${apiUrl}/user/getuser`;
 const ML_DATA_API   = `${apiUrl}/attendancemodule/mldatafoldertree`;
@@ -68,13 +63,22 @@ const CSS = `
   .dash-stat-grid  { display:grid; gap:14px; grid-template-columns: repeat(auto-fill, minmax(130px,1fr)); }
   .dash-chart-grid { display:grid; gap:20px; grid-template-columns: 1fr 1fr; }
 
+  /* header rows: title/subtitle + status chips + icon buttons.
+     Flex-wrap by default so chips/icons reflow instead of overflowing
+     into a single unbroken line on narrower viewports. */
+  .dash-header-row  { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; }
+  .dash-chip-group  { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+
   @media (max-width: 900px) {
     .dash-chart-grid { grid-template-columns: 1fr; }
   }
   @media (max-width: 600px) {
-    .dash-stat-grid  { grid-template-columns: repeat(2, 1fr); }
-    .dash-chart-grid { grid-template-columns: 1fr; }
-    .dash-header     { flex-direction: column; align-items: flex-start; gap: 12px; }
+    .dash-stat-grid   { grid-template-columns: repeat(2, 1fr); }
+    .dash-chart-grid  { grid-template-columns: 1fr; }
+    .dash-header      { flex-direction: column; align-items: flex-start; gap: 12px; }
+    .dash-header-row  { flex-direction: column; align-items: flex-start; }
+    .dash-chip-group  { width: 100%; }
+    .dash-chip-group .dash-sep { display: none; }
   }
 `;
 
@@ -117,6 +121,7 @@ function StatCard({ label, value, color, loading, delay = 0, suffix = '' }) {
 
 /* ── live report panel ── */
 function LivePanel({ rooms, loading, open, acquisitionActive, slot, date, lastUpdated, onRefresh, onViewFull }) {
+  const { slotLabel } = usePeriods();
   return (
     <div style={{
       overflow: 'hidden',
@@ -132,7 +137,7 @@ function LivePanel({ rooms, loading, open, acquisitionActive, slot, date, lastUp
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: `1px solid ${T.border}`, background: T.surfaceAlt, flexWrap: 'wrap', gap: 8 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>
-            {slot && date ? `${SLOT_LABELS[slot] || slot} — ${date}` : <span style={{ color: T.textMuted }}>No active period</span>}
+            {slot && date ? `${slotLabel(slot)} — ${date}` : <span style={{ color: T.textMuted }}>No active period</span>}
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <span style={{ fontSize: 11, color: T.textMuted }}>Updated: {lastUpdated || '—'}</span>
@@ -527,14 +532,14 @@ export default function AMSDashboard() {
         <div style={{ marginBottom: camOpen ? 0 : 24, animation: 'fadeUp .4s ease both' }}>
           <div>
             {/* Row 1: title + status chips + icon buttons */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <div className="dash-header-row" style={{ marginBottom: 8 }}>
               <div style={{ fontWeight: 700, fontSize: 'clamp(17px,2.5vw,22px)', letterSpacing: '-0.03em', color: T.text }}>
                 Welcome to <ILeed />
                 <span style={{ fontWeight: 500, fontSize: '0.62em', letterSpacing: '0', color: T.textMuted, marginLeft: 10 }}>
                   — {ILEED_FULL_FORM}
                 </span>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div className="dash-chip-group">
                 {/* Acquisition status chip */}
                 <button
                   onClick={() => navigate('/attendance/acquisition-control')}
@@ -572,11 +577,22 @@ export default function AMSDashboard() {
                 )}
 
                 {/* separator */}
-                <div style={{ width: 1, height: 20, background: T.border, flexShrink: 0 }} />
+                <div className="dash-sep" style={{ width: 1, height: 20, background: T.border, flexShrink: 0 }} />
 
                 <IconNavButton title="Acquisition Control" onClick={() => navigate('/attendance/acquisition-control')}>
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={T.textMuted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+                  </svg>
+                </IconNavButton>
+                {/* Scheduler Ledger — the per-period record of what the cron
+                    actually did, including the pre-flight checks behind every
+                    skip. Sits next to Acquisition Control because it is the
+                    answer to "I configured that period, why did nothing run?" */}
+                <IconNavButton title="Scheduler Ledger" onClick={() => navigate('/attendance/scheduler-ledger')}>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={T.textMuted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" />
+                    <rect x="9" y="3" width="6" height="4" rx="1" />
+                    <path d="M9 12h6" /><path d="M9 16h4" />
                   </svg>
                 </IconNavButton>
                 <IconNavButton title="ML Fine Tuning" onClick={() => navigate('/attendance/ml-fine-tuning')}>
@@ -614,11 +630,11 @@ export default function AMSDashboard() {
               </div>
             </div>
             {/* Row 2: subtitle + badge buttons */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+            <div className="dash-header-row">
               <div style={{ fontSize: 12, color: T.textMuted }}>
                 {userRoles.length > 0 ? userRoles.join(' · ') : ''}
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div className="dash-chip-group">
               <HealthDashboard />
             <div>
               <button ref={mlBtnRef} onClick={handleMLClick}

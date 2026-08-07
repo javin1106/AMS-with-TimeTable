@@ -5,6 +5,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { DEGREES, YEARS, theme, styles, cssReset } from './config';
 import { useDepartments } from './useDepartments';
+import { usePeriods } from './usePeriods';
 import UnknownFaces from './UnknownFaces';
 import RejectedSamples from './RejectedSamples';
 import getEnvironment from '../getenvironment';
@@ -14,7 +15,10 @@ import ProxyModal from './ProxyModal';
 
 const apiUrl = getEnvironment();
 const REPORT_API = `${apiUrl}/attendancemodule/reports`;
+const REPORT_DELETE_SETTINGS_API = `${apiUrl}/attendancemodule/settings/report-deletion`;
+const USER_API = `${apiUrl}/user/getuser`;
 const ML_API = `${apiUrl}/ml`;
+const SCHEDULER_API = `${apiUrl}/attendancemodule/scheduler`;
 const OTHER_CONTROLS_API = `${apiUrl}/attendancemodule/settings/other-controls`;
 const pct = (a, b) => (b > 0 ? Math.round((a / b) * 100) : 0);
 
@@ -46,18 +50,8 @@ const DEFAULT_CAMERA_SWITCH_SEC = 30;
 // ── LT103 dual-camera preset (same as groundtruthgen_rtsp) ───────────────────
 //const LT103L_URL = 'rtsp://admin:Admin%401234%23@10.10.177.249:554/video/live?channel=1&subtype=0&rtsp_transport=tcp';
 //const LT103R_URL = 'rtsp://admin:Admin%401234%23@10.10.177.250:554/video/live?channel=1&subtype=0&rtsp_transport=tcp';
-const SLOT_LABELS = {
-  period1: 'Period 1 — 08:30',
-  period2: 'Period 2 — 09:30',
-  period3: 'Period 3 — 10:30',
-  period4: 'Period 4 — 11:30',
-  period5: 'Period 5 — 13:30',
-  period6: 'Period 6 — 14:30',
-  period7: 'Period 7 — 15:30',
-  period8: 'Period 8 — 16:30',
-};
-
 export default function AttendanceReport() {
+  const { slotLabel, slotKeys } = usePeriods();
   const navigate = useNavigate();
   const location = useLocation();
   const [tab, setTab] = useState('run');
@@ -71,10 +65,9 @@ export default function AttendanceReport() {
   const [rtspUrl2, setRtspUrl2] = useState('');
   const [checkIntervalMin, setCheckIntervalMin] = useState(5);
 
-  // ── Room list from DB ─────────────────────────────────────────
+  // ── Room list from DB (only rooms that have cameras registered) ──
   const [rooms, setRooms] = useState([]);
-  const [roomSearch, setRoomSearch] = useState('');
-  const [showRoomDrop, setShowRoomDrop] = useState(false);
+  const [roomsLoading, setRoomsLoading] = useState(true);
 
   // ── Timetable auto-lookup state ───────────────────────────────
   const [ttStatus, setTtStatus] = useState(null); // null | 'loading' | 'found' | 'notfound'
@@ -166,6 +159,8 @@ export default function AttendanceReport() {
   const [filterDate, setFilterDate] = useState('');
   const [availableSems, setAvailableSems] = useState([]);
   const [semsLoading, setSemsLoading] = useState(false);
+  const [canDeleteReports, setCanDeleteReports] = useState(false);
+  const [deletingReportId, setDeletingReportId] = useState(null);
 
   // ── Detail ────────────────────────────────────────────────────
   const [detailReport, setDetailReport] = useState(null);
@@ -188,21 +183,26 @@ export default function AttendanceReport() {
   };
 
   // ── Fetch room list from DB on mount ──────────────────────────
+  // Only rooms that already have a camera registered are shown
+  // (Camera registry → distinct roomId).
   useEffect(() => {
     (async () => {
+      setRoomsLoading(true);
       try {
-        const res = await fetch(`${apiUrl}/timetablemodule/lock/rooms`);
+        const res = await fetch(`${apiUrl}/attendancemodule/cameras/rooms`);
         const data = await res.json();
         setRooms(data.rooms || []);
       } catch {
         /* silently ignore */
+      } finally {
+        setRoomsLoading(false);
       }
     })();
   }, []);
 
   // ── Timetable auto-lookup when room + slot change ─────────────
   useEffect(() => {
-    if (!room || !slot) {
+    if (!room || !slot || !date) {
       setDerivedCtx(null);
       setTtStatus(null);
       return;
@@ -211,7 +211,9 @@ export default function AttendanceReport() {
     setTtStatus('loading');
     (async () => {
       try {
-        const params = new URLSearchParams({ room, slot });
+        // date matters: the same room+slot holds a different subject each
+        // weekday, and extra classes / alterations are per-date.
+        const params = new URLSearchParams({ room, slot, date });
         const res = await fetch(
           `${apiUrl}/timetablemodule/lock/attendance-lookup?${params}`,
           { signal: ctrl.signal },
@@ -227,7 +229,7 @@ export default function AttendanceReport() {
       }
     })();
     return () => ctrl.abort();
-  }, [room, slot]);
+  }, [room, slot, date]);
 
   // ── Auto-fetch camera RTSPs for the selected room from Camera model ────────
   useEffect(() => {
@@ -331,6 +333,40 @@ export default function AttendanceReport() {
   useEffect(() => {
     if (tab === 'history') fetchReports();
   }, [tab, fetchReports]);
+
+  // Platform admins and iams-admin have deletion access by default. The
+  // platform-admin setting only opts iams-dept-admin into the action; the
+  // backend independently enforces the same role and department rules.
+  useEffect(() => {
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const userResponse = await fetch(USER_API, {
+          credentials: 'include',
+          signal: controller.signal,
+        });
+        if (!userResponse.ok) return;
+        const userData = await userResponse.json();
+        const roles = Array.isArray(userData?.user?.role) ? userData.user.role : [];
+        if (roles.includes('admin') || roles.includes('iams-admin')) {
+          setCanDeleteReports(true);
+          return;
+        }
+        if (!roles.includes('iams-dept-admin')) return;
+
+        const settingsResponse = await fetch(REPORT_DELETE_SETTINGS_API, {
+          credentials: 'include',
+          signal: controller.signal,
+        });
+        if (!settingsResponse.ok) return;
+        const settings = await settingsResponse.json();
+        setCanDeleteReports(settings.enabled === true);
+      } catch (error) {
+        if (error.name !== 'AbortError') setCanDeleteReports(false);
+      }
+    })();
+    return () => controller.abort();
+  }, []);
 
   // ── Auto-poll detail report when session is live ──────────────
   useEffect(() => {
@@ -450,6 +486,11 @@ export default function AttendanceReport() {
           faculty: derivedCtx?.faculty || '',
           semester: derivedCtx?.sem || '',
           locksemId: derivedCtx?.locksemId || '',
+          // Roll numbers enrolled in THIS subject. Without them the ML service
+          // matches against every student in the batch's embedding store, so an
+          // elective's report lists the whole year and its present/absent
+          // counts move with the embedding store rather than the class.
+          enrolledRollNos: derivedCtx?.enrolledRollNos || [],
         }),
       });
 
@@ -564,11 +605,6 @@ export default function AttendanceReport() {
       return;
     }
 
-    const effectiveBatch = derivedCtx?.batch || manualBatch;
-    if (!effectiveBatch) {
-      showToast('Batch not found — fill in Degree/Dept/Year', 'error');
-      return;
-    }
     // ── Camera inactive/none warning gate ────────────────────
     if (
       (cameraStatus === 'inactive' || cameraStatus === 'none') &&
@@ -579,46 +615,69 @@ export default function AttendanceReport() {
       return;
     }
 
+    // Batch, subject, faculty and roster are all resolved server-side by
+    // runRoom()'s own resolveClassContext, so nothing is sent from here. That
+    // also drops the old `derivedCtx?.batch || manualBatch` fallback, which
+    // could quietly substitute a batch string assembled from the Degree/Dept/
+    // Year dropdowns when the timetable did not match — and a batch that does
+    // not match the enrolled data is what produced the opaque 422s. A
+    // timetable that does not resolve now comes back as an explicit
+    // "skipped" with its reason instead.
+    setSessionActive(true);
+    setSessionChecks(0);
+    setProcessing(true);
+    setStreamLog([]);
+    setActiveCam(rtspUrl2.trim() ? 1 : null);
+    activeCamRef.current = rtspUrl2.trim() ? 1 : null;
+    setCamSwitchAt(Date.now());
+    setCamCountdown(camSwitchSec);
+    rtspUrl2Ref.current = rtspUrl2.trim();
+
     try {
-      const res = await fetch(`${REPORT_API}/start-session`, {
+      // Holds open for the whole run — see the note on POST /scheduler/run-room.
+      const res = await fetch(`${SCHEDULER_API}/run-room`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           room,
           slot,
           date,
-          rtspUrl: rtspUrl.trim(),
+          rtspUrl1: rtspUrl.trim(),
           rtspUrl2: rtspUrl2.trim(),
-          durationSec: duration,
-          checkIntervalMin,
-          batch: effectiveBatch,
-          department: derivedCtx?.dept || department,
-          subject: derivedCtx?.subject || '',
-          faculty: derivedCtx?.faculty || '',
-          semester: derivedCtx?.sem || '',
-          locksemId: derivedCtx?.locksemId || '',
         }),
       });
       const data = await res.json();
-      if (data.error) {
-        showToast(data.error, 'error');
+
+      // runRoom reports its own outcome in `log` whether it succeeded, skipped
+      // or errored, so surface it before branching on status.
+      if (Array.isArray(data.log)) {
+        setStreamLog(data.log.map((l) => l.msg));
+      }
+
+      if (!res.ok || data.error) {
+        showToast(data.error || `Server error ${res.status}`, 'error');
         return;
       }
-      setSessionReportId(data.reportId);
-      setSessionActive(true);
-      setActiveCam(rtspUrl2.trim() ? 1 : null);
-      activeCamRef.current = rtspUrl2.trim() ? 1 : null;
-      setCamSwitchAt(Date.now());
-      setCamCountdown(camSwitchSec);
-      rtspUrl2Ref.current = rtspUrl2.trim();
-      setSessionChecks(0);
-      const stopNote = data.autoStopAt
-        ? ` — auto-stops at ${new Date(data.autoStopAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
-        : '';
-      showToast(`Session started — checks every ${checkIntervalMin} min${stopNote}`);
-      openDetail(data.reportId);
+      if (data.status === 'skipped' || data.status === 'error') {
+        showToast(`${data.room}: ${data.reason || data.status}`, 'error');
+        return;
+      }
+
+      if (data.reportId) {
+        setSessionReportId(data.reportId);
+        openDetail(data.reportId);
+      }
+      const s = data.summary;
+      showToast(
+        s ? `Run complete — P:${s.present} A:${s.absent} R:${s.review}` : 'Run complete',
+      );
     } catch (e) {
-      showToast('Failed to start session: ' + e.message, 'error');
+      showToast('Failed to run: ' + e.message, 'error');
+    } finally {
+      setSessionActive(false);
+      setProcessing(false);
+      setActiveCam(null);
+      activeCamRef.current = null;
     }
   };
 
@@ -686,20 +745,24 @@ export default function AttendanceReport() {
   };
 
   const deleteReport = async (id) => {
-    if (!window.confirm('Delete this draft?')) return;
+    if (!window.confirm(
+      'Permanently delete this attendance report and its associated data? This cannot be undone.',
+    )) return;
+    setDeletingReportId(id);
     try {
-      const data = await (
-        await fetch(`${REPORT_API}/${id}`, { method: 'DELETE' })
-      ).json();
-      if (data.error) {
-        showToast(data.error, 'error');
-        return;
-      }
-      showToast('Deleted');
-      setTab('history');
-      fetchReports();
-    } catch {
-      showToast('Delete failed', 'error');
+      const response = await fetch(`${REPORT_API}/${id}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Delete failed');
+      setReports((current) => current.filter((report) => report._id !== id));
+      if (detailReport?._id === id) setDetailReport(null);
+      showToast('Attendance report deleted');
+    } catch (error) {
+      showToast(error.message || 'Delete failed', 'error');
+    } finally {
+      setDeletingReportId(null);
     }
   };
 
@@ -794,83 +857,33 @@ export default function AttendanceReport() {
                 marginBottom: 14,
               }}
             >
-              <div style={{ position: 'relative' }}>
+              <div>
                 <label style={styles.label}>Room No</label>
-                <input
-                  placeholder="Search room..."
-                  value={showRoomDrop ? roomSearch : room}
-                  onChange={(e) => {
-                    setRoomSearch(e.target.value);
-                    setShowRoomDrop(true);
-                  }}
-                  onFocus={() => {
-                    setRoomSearch('');
-                    setShowRoomDrop(true);
-                  }}
-                  onBlur={() => setTimeout(() => setShowRoomDrop(false), 150)}
-                  style={styles.input}
-                />
-                {showRoomDrop && (
+                <select
+                  value={room}
+                  onChange={(e) => setRoom(e.target.value)}
+                  style={styles.select}
+                  disabled={roomsLoading}
+                >
+                  <option value="">
+                    {roomsLoading ? 'Loading rooms with cameras...' : 'Select room with camera...'}
+                  </option>
+                  {rooms.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+                {!roomsLoading && rooms.length === 0 && (
                   <div
                     style={{
-                      position: 'absolute',
-                      top: '100%',
-                      left: 0,
-                      right: 0,
-                      background: '#ffffff',
-                      border: `1px solid ${theme.border}`,
-                      borderRadius: '8px',
-                      zIndex: 100,
-                      maxHeight: 220,
-                      overflowY: 'auto',
-                      boxShadow: '0 8px 24px rgba(26,31,60,0.12)',
+                      marginTop: 6,
+                      fontSize: '11px',
+                      color: theme.danger,
                     }}
                   >
-                    {rooms
-                      .filter((r) =>
-                        r.toLowerCase().includes(roomSearch.toLowerCase()),
-                      )
-                      .map((r) => (
-                        <div
-                          key={r}
-                          onMouseDown={() => {
-                            setRoom(r);
-                            setRoomSearch('');
-                            setShowRoomDrop(false);
-                          }}
-                          style={{
-                            padding: '9px 14px',
-                            cursor: 'pointer',
-                            fontSize: '13px',
-                            color: theme.text,
-                            borderBottom: `1px solid ${theme.border}`,
-                            background:
-                              r === room ? theme.accentDim : 'transparent',
-                          }}
-                          onMouseEnter={(e) =>
-                            (e.currentTarget.style.background = theme.accentDim)
-                          }
-                          onMouseLeave={(e) =>
-                          (e.currentTarget.style.background =
-                            r === room ? theme.accentDim : 'transparent')
-                          }
-                        >
-                          {r}
-                        </div>
-                      ))}
-                    {rooms.filter((r) =>
-                      r.toLowerCase().includes(roomSearch.toLowerCase()),
-                    ).length === 0 && (
-                        <div
-                          style={{
-                            padding: '9px 14px',
-                            color: theme.textMuted,
-                            fontSize: '12px',
-                          }}
-                        >
-                          No rooms match &quot;{roomSearch}&quot;
-                        </div>
-                      )}
+                    No cameras registered for any room. Add a camera in the
+                    Camera Registry first.
                   </div>
                 )}
               </div>
@@ -882,9 +895,9 @@ export default function AttendanceReport() {
                   style={styles.select}
                 >
                   <option value="">Select slot...</option>
-                  {Object.entries(SLOT_LABELS).map(([val, label]) => (
+                  {slotKeys.map((val) => (
                     <option key={val} value={val}>
-                      {label}
+                      {slotLabel(val)}
                     </option>
                   ))}
                 </select>
@@ -913,7 +926,7 @@ export default function AttendanceReport() {
                   color: theme.accent,
                 }}
               >
-                🔍 Looking up timetable for {room} / {SLOT_LABELS[slot]}…
+                🔍 Looking up timetable for {room} / {slotLabel(slot)}…
               </div>
             )}
             {ttStatus === 'notfound' && (
@@ -949,7 +962,7 @@ export default function AttendanceReport() {
                 }}
               >
                 <span style={{ color: theme.success, fontWeight: 700 }}>
-                  ✓ Timetable matched
+                  ✓ Timetable matched{derivedCtx.day ? ` (${derivedCtx.day})` : ''}
                 </span>
                 {[
                   ['Batch', derivedCtx.batch],
@@ -971,6 +984,24 @@ export default function AttendanceReport() {
                       </span>
                     </span>
                   ))}
+                {derivedCtx.altered && (
+                  <span style={{ color: theme.warning, fontWeight: 600 }}>
+                    ⇄ Altered for this date — originally{' '}
+                    {derivedCtx.originalSubject || '—'} /{' '}
+                    {derivedCtx.originalFaculty || '—'}
+                  </span>
+                )}
+                {derivedCtx.source === 'extraClass' && (
+                  <span style={{ color: theme.warning, fontWeight: 600 }}>
+                    ➕ Extra class (not on the regular timetable)
+                  </span>
+                )}
+                {derivedCtx.ambiguous && (
+                  <span style={{ color: theme.danger, fontWeight: 600 }}>
+                    ⚠ More than one current-session timetable books this room in
+                    this slot — verify the batch before running.
+                  </span>
+                )}
               </div>
             )}
 
@@ -1237,8 +1268,9 @@ export default function AttendanceReport() {
               </div>
             </div>
 
-            {/* Live stream log while processing */}
-            {processing && streamLog.length > 0 && (
+            {/* Run log — kept visible after the run ends, since a run-room
+                call reports its preflight trail only in its final response */}
+            {streamLog.length > 0 && (
               <div
                 style={{
                   marginTop: 14,
@@ -1838,7 +1870,7 @@ export default function AttendanceReport() {
                           'A',
                           '%',
                           'Status',
-                          '',
+                          'Action',
                         ].map((h) => (
                           <th key={h}>{h}</th>
                         ))}
@@ -1868,7 +1900,7 @@ export default function AttendanceReport() {
                           <td
                             style={{ padding: '11px 14px', color: theme.textMuted }}
                           >
-                            {SLOT_LABELS[r.timeSlot] || r.timeSlot || '—'}
+                            {r.timeSlot ? slotLabel(r.timeSlot) : '—'}
                           </td>
                           <td style={{ padding: '11px 14px', color: theme.text }}>
                             {r.subject || '—'}
@@ -1919,11 +1951,38 @@ export default function AttendanceReport() {
                           <td
                             style={{
                               padding: '11px 14px',
-                              color: theme.accent,
                               fontSize: '12px',
                             }}
+                            onClick={(event) => event.stopPropagation()}
                           >
-                            View
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <button
+                                type="button"
+                                onClick={() => openDetail(r._id)}
+                                style={{
+                                  ...styles.btnGhost,
+                                  padding: '6px 10px',
+                                  fontSize: 11,
+                                }}
+                              >
+                                View
+                              </button>
+                              {canDeleteReports && (
+                                <button
+                                  type="button"
+                                  onClick={() => deleteReport(r._id)}
+                                  disabled={deletingReportId === r._id}
+                                  style={{
+                                    ...styles.btnDanger,
+                                    padding: '6px 10px',
+                                    fontSize: 11,
+                                    opacity: deletingReportId === r._id ? 0.6 : 1,
+                                  }}
+                                >
+                                  {deletingReportId === r._id ? 'Deleting…' : 'Delete'}
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -2046,7 +2105,7 @@ export default function AttendanceReport() {
                         ['Date', detailReport.date],
                         [
                           'Slot',
-                          SLOT_LABELS[detailReport.timeSlot] ||
+                          slotLabel(detailReport.timeSlot) ||
                           detailReport.timeSlot ||
                           '—',
                         ],
@@ -2451,6 +2510,25 @@ function MultiRunTable({ report, readOnly, onOverride, theme, styles }) {
                   }}
                 >
                   {rollNo}
+                  {/* Recognised, but not on this subject's roll list — kept
+                      visible (wrong room? proxy?) and excluded from the
+                      present/absent counts. */}
+                  {final?.inList === false && (
+                    <span
+                      title="Not enrolled in this subject — excluded from the counts"
+                      style={{
+                        marginLeft: 6,
+                        padding: '1px 5px',
+                        borderRadius: 4,
+                        fontSize: 10,
+                        fontWeight: 700,
+                        background: theme.warningDim,
+                        color: theme.textMuted,
+                      }}
+                    >
+                      not enrolled
+                    </span>
+                  )}
                 </td>
                 {runs.map((_, ri) => {
                   const s = runLookup[rollNo][ri];

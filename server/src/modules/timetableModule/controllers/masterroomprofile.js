@@ -10,7 +10,6 @@ class MroomController {
           res.json(createdRoom)
           return;
         } catch (error) {
-          console.error(error); 
           res.status(500).json({ error: "Internal server error" });
         }
       }
@@ -30,7 +29,6 @@ class MroomController {
           return;
           }
         } catch (error) {
-          console.error(error); 
           res.status(500).json({ error: "Internal server error" });
         }
       }
@@ -41,7 +39,6 @@ class MroomController {
            const roomlist = await Masterroom.find({type:type});
            return roomlist;
          } catch (error) {
-           console.error(error); 
            res.status(500).json({ error: "Internal server error" });
          }
        }

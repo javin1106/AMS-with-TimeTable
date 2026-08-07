@@ -13,6 +13,7 @@ import DeptMenuConfig from './DeptMenuConfig';
 import DegreeManagement from './DegreeManagement';
 import ErpSyncSettingsTab from './ErpSyncSettingsTab';
 import ErpPushSettingsTab from './ErpPushSettingsTab';
+import ReportDeletionSettingsTab from './ReportDeletionSettingsTab';
 
 const apiUrl = getEnvironment();
 const ALLOTMENT_API = `${apiUrl}/timetablemodule/allotment`;
@@ -194,6 +195,7 @@ export default function EditSessionDates() {
 
   // ── Auth ──────────────────────────────────────────────────────────────────
   const [isAuthorized, setIsAuthorized] = useState(null);
+  const [isIamsAdmin, setIsIamsAdmin] = useState(false);
 
   // ── Session Setup state ───────────────────────────────────────────────────
   const [sessions, setSessions] = useState([]);
@@ -315,7 +317,9 @@ export default function EditSessionDates() {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         const roles = d?.user?.role || [];
-        setIsAuthorized(roles.includes('iams-admin'));
+        const hasIamsAdmin = roles.includes('iams-admin');
+        setIsIamsAdmin(hasIamsAdmin);
+        setIsAuthorized(hasIamsAdmin);
       })
       .catch(() => setIsAuthorized(false));
   }, []);
@@ -776,8 +780,8 @@ export default function EditSessionDates() {
           Access Restrictions Enforced
         </div>
         <div style={{ fontSize: 13, color: T.textMuted }}>
-          Only accounts holding <strong>iams-admin</strong> clearances can alter
-          session registries.
+          Only accounts holding <strong>iams-admin</strong> clearance can access
+          these controls.
         </div>
       </div>
     );
@@ -1707,6 +1711,7 @@ export default function EditSessionDates() {
         {activeTab === 'otherControls' && (
           <div>
             <OtherControlsSettingsTab />
+            <ReportDeletionSettingsTab />
             <div
               style={{
                 fontSize: 14,

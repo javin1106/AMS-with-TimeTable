@@ -106,6 +106,7 @@ export default function AMSLayout() {
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
   const [accessChecked, setAccessChecked] = useState(false);
 
   useEffect(() => {
@@ -140,7 +141,8 @@ export default function AMSLayout() {
   }, []);
 
   useEffect(() => {
-    if (isMobile) setCollapsed(true);
+    // If mobile status changes, make sure drawer starts as closed
+    if (isMobile) setMobileOpen(false);
   }, [isMobile]);
 
   function isActive(item) {
@@ -158,7 +160,8 @@ export default function AMSLayout() {
     return location.pathname.startsWith(item.route);
   }
 
-  const SIDEBAR_W = collapsed ? 52 : 208;
+  const isSidebarCollapsed = isMobile ? false : collapsed;
+  const SIDEBAR_W = isMobile ? 240 : (isSidebarCollapsed ? 52 : 208);
 
   if (!accessChecked) return null;
 
@@ -174,6 +177,23 @@ export default function AMSLayout() {
           fontFamily: T.fontBody,
         }}
       >
+        {/* Sidebar Backdrop on Mobile */}
+        {isMobile && mobileOpen && (
+          <div
+            onClick={() => setMobileOpen(false)}
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              background: 'rgba(26,31,60,0.4)',
+              backdropFilter: 'blur(2px)',
+              zIndex: 9998,
+            }}
+          />
+        )}
+
         {/* Sidebar */}
         <aside
           style={{
@@ -183,13 +203,16 @@ export default function AMSLayout() {
             borderRight: `1px solid ${T.border}`,
             display: 'flex',
             flexDirection: 'column',
-            transition: 'width .22s ease',
+            transition: 'width .22s ease, transform .22s ease',
             overflow: 'hidden',
-            position: 'sticky',
+            position: isMobile ? 'fixed' : 'sticky',
             top: 0,
+            bottom: 0,
+            left: 0,
             height: '100vh',
-            zIndex: 100,
+            zIndex: isMobile ? 9999 : 1000,
             boxShadow: '1px 0 8px rgba(26,31,60,0.05)',
+            transform: isMobile && !mobileOpen ? 'translateX(-100%)' : 'none',
           }}
         >
           {/* Nav */}
@@ -201,18 +224,21 @@ export default function AMSLayout() {
                 <div
                   key={item.id}
                   className="ams-nav-item"
-                  onClick={() =>
-                    item.newTab
-                      ? window.open(item.route, '_blank', 'noopener,noreferrer')
-                      : navigate(item.route)
-                  }
-                  title={collapsed ? item.label : undefined}
+                  onClick={() => {
+                    if (item.newTab) {
+                      window.open(item.route, '_blank', 'noopener,noreferrer');
+                    } else {
+                      navigate(item.route);
+                      if (isMobile) setMobileOpen(false);
+                    }
+                  }}
+                  title={isSidebarCollapsed ? item.label : undefined}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
-                    justifyContent: collapsed ? 'center' : 'flex-start',
+                    justifyContent: isSidebarCollapsed ? 'center' : 'flex-start',
                     gap: 9,
-                    padding: collapsed ? '10px 0' : '9px 11px',
+                    padding: isSidebarCollapsed ? '10px 0' : '9px 11px',
                     borderRadius: 8,
                     marginBottom: 2,
                     background: active ? `${color}12` : 'transparent',
@@ -234,7 +260,7 @@ export default function AMSLayout() {
                       }}
                     />
                   )}
-                  {collapsed ? (
+                  {isSidebarCollapsed ? (
                     item.id === 'dashboard' ? (
                       <HomeIcon />
                     ) : (
@@ -270,7 +296,7 @@ export default function AMSLayout() {
                         : item.label}
                     </span>
                   )}
-                  {!collapsed && !item.newTab && (
+                  {!isSidebarCollapsed && !item.newTab && (
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -306,51 +332,102 @@ export default function AMSLayout() {
           </nav>
 
           {/* Collapse toggle */}
-          <div
-            style={{
-              padding: '10px 8px',
-              borderTop: `1px solid ${T.border}`,
-              flexShrink: 0,
-            }}
-          >
+          {!isMobile && (
             <div
-              className="ams-nav-item"
-              onClick={() => setCollapsed((c) => !c)}
               style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: collapsed ? 'center' : 'flex-start',
-                gap: 8,
-                padding: collapsed ? '8px 0' : '8px 11px',
-                borderRadius: 7,
-                color: T.textMuted,
-                fontSize: 11,
-                fontWeight: 500,
+                padding: '10px 8px',
+                borderTop: `1px solid ${T.border}`,
+                flexShrink: 0,
               }}
             >
-              <span
+              <div
+                className="ams-nav-item"
+                onClick={() => setCollapsed((c) => !c)}
                 style={{
-                  display: 'inline-block',
-                  transform: collapsed ? 'rotate(180deg)' : 'none',
-                  transition: 'transform .2s',
-                  fontSize: 13,
-                  lineHeight: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: isSidebarCollapsed ? 'center' : 'flex-start',
+                  gap: 8,
+                  padding: isSidebarCollapsed ? '8px 0' : '8px 11px',
+                  borderRadius: 7,
+                  color: T.textMuted,
+                  fontSize: 11,
+                  fontWeight: 500,
                 }}
               >
-                ‹
-              </span>
-              {!collapsed && 'Collapse'}
+                <span
+                  style={{
+                    display: 'inline-block',
+                    transform: isSidebarCollapsed ? 'rotate(180deg)' : 'none',
+                    transition: 'transform .2s',
+                    fontSize: 13,
+                    lineHeight: 1,
+                  }}
+                >
+                  ‹
+                </span>
+                {!isSidebarCollapsed && 'Collapse'}
+              </div>
             </div>
-          </div>
+          )}
         </aside>
 
-        {/* Main content */}
-        <main
-          className="ams-page-content"
-          style={{ flex: 1, minWidth: 0, overflow: 'auto' }}
-        >
-          <Outlet />
-        </main>
+        {/* Main content wrapper */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: '100vh' }}>
+          {isMobile && (
+            <header
+              style={{
+                height: 52,
+                background: '#ffffff',
+                borderBottom: `1px solid ${T.border}`,
+                display: 'flex',
+                alignItems: 'center',
+                padding: '0 16px',
+                position: 'sticky',
+                top: 0,
+                zIndex: 90,
+                boxShadow: '0 1px 4px rgba(26,31,60,0.05)',
+                justifyContent: 'space-between',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <button
+                  onClick={() => setMobileOpen(true)}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: 4,
+                    color: T.text,
+                  }}
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="3" y1="12" x2="21" y2="12" />
+                    <line x1="3" y1="6" x2="21" y2="6" />
+                    <line x1="3" y1="18" x2="21" y2="18" />
+                  </svg>
+                </button>
+                <span style={{ fontWeight: 700, fontSize: 16 }}>
+                  <ILeed style={{ lineHeight: 1, display: 'inline-block', fontSize: 16 }} />
+                </span>
+              </div>
+              <div style={{ fontSize: 11, color: T.textMuted, fontWeight: 500 }}>
+                Attendance System
+              </div>
+            </header>
+          )}
+
+          {/* Main content */}
+          <main
+            className="ams-page-content"
+            style={{ flex: 1, minWidth: 0, overflow: 'auto' }}
+          >
+            <Outlet />
+          </main>
+        </div>
       </div>
     </HealthProvider>
   );

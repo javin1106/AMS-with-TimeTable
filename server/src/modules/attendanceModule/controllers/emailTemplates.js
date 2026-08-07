@@ -26,13 +26,19 @@ const ILEED_MARK =
   `<span style="font-family:Georgia,'Times New Roman',serif;"><i>i</i><b>LEED</b></span>`;
 const ILEED_FULL_FORM = "Intelligent Learning Engagement and Entity Detection";
 
+// Automated alerts go out from an unattended mailbox, so the default footer
+// says so. The faculty attendance summary is the exception — it asks for a
+// reply — and overrides this via `footerHtml`.
+const DEFAULT_FOOTER = `<span style="font-size:11px;color:#999;">This is an automated alert from ${ILEED_MARK} on the XCEED platform — please do not reply.</span>`;
+
 /**
  * Wrap inner HTML in the colorful iLEED email card.
- * @param {string} title    Heading shown at the top of the card body.
- * @param {string} accent   Banner / accent colour.
- * @param {string} bodyHtml Inner HTML for the message body.
+ * @param {string} title      Heading shown at the top of the card body.
+ * @param {string} accent     Banner / accent colour.
+ * @param {string} bodyHtml   Inner HTML for the message body.
+ * @param {string} [footerHtml] Replaces the default "do not reply" footer.
  */
-function renderAlert({ title, accent = "#0e7490", bodyHtml }) {
+function renderAlert({ title, accent = "#0e7490", bodyHtml, footerHtml }) {
   return `
 <div style="background:#f4f6fb;padding:32px 16px;font-family:Arial,Helvetica,sans-serif;">
   <div style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:12px;border:1px solid #e4e8f5;overflow:hidden;">
@@ -44,7 +50,7 @@ function renderAlert({ title, accent = "#0e7490", bodyHtml }) {
       ${bodyHtml}
     </div>
     <div style="padding:14px 28px;border-top:1px solid #e4e8f5;background:#fafbfe;">
-      <span style="font-size:11px;color:#999;">This is an automated alert from ${ILEED_MARK} on the XCEED platform — please do not reply.</span>
+      ${footerHtml || DEFAULT_FOOTER}
     </div>
   </div>
 </div>`;
@@ -341,7 +347,155 @@ function uptimeDigestTemplate({ checkedAt, results }) {
   });
 }
 
+// ── End-of-class attendance summary, mailed to the faculty ──────────────────
+// The only template addressed to someone outside the recipients list, so it
+// leads with the class it is about and keeps the counts above the fold.
+// Roll numbers arrive already sorted (see facultyAttendanceMailer) — this
+// renders them, it does not order them.
+//
+// `presentRolls` / `absentRolls` are plain roll-number strings.
+function facultyAttendanceSummaryTemplate({
+  facultyName,
+  subject,
+  subjectCode,
+  batch,
+  semester,
+  room,
+  date,
+  timeSlot,
+  totalStudents,
+  presentRolls = [],
+  absentRolls = [],
+  // Absent, but only because the system has no ground-truth photos for them —
+  // they are not in the subject's embedding store, so the cameras cannot
+  // recognise them and they can never be marked present. Counted as absent
+  // (they are), but listed apart so the faculty can see the difference between
+  // a student who skipped the class and one the system is unable to see.
+  noGroundTruthRolls = [],
+  // Recognised but below the auto-present threshold. The cron path never
+  // produces these (it merges to P or A), so this section is usually absent —
+  // it exists so a manual session's "review" students are never silently
+  // reported to the faculty as one of the other two.
+  reviewRolls = [],
+  // Department coordinator, resolved from the department's admin user. Copied
+  // on the message itself, so a Reply-All from the faculty reaches them.
+  coordinatorEmail = "",
+}) {
+  const present = presentRolls.length;
+  const noGt = noGroundTruthRolls.length;
+  // The tile shows every absent student; the lists below split them by cause.
+  const absent = absentRolls.length + noGt;
+  const pct = totalStudents > 0 ? Math.round((present / totalStudents) * 100) : 0;
+
+  // Three stat tiles side by side. A table (not flexbox) because Outlook
+  // ignores display:flex entirely and would stack these as full-width blocks.
+  const tile = (label, value, color, bg) => `
+        <td width="33%" style="padding:4px;">
+          <div style="background:${bg};border:1px solid ${color}33;border-radius:10px;padding:14px 10px;text-align:center;">
+            <div style="font-size:28px;font-weight:700;color:${color};line-height:1.1;">${value}</div>
+            <div style="font-size:11px;color:#5b6472;text-transform:uppercase;letter-spacing:.06em;margin-top:4px;">${label}</div>
+          </div>
+        </td>`;
+
+  const statTiles = `
+      <table style="border-collapse:collapse;width:100%;margin:0 0 20px;">
+        <tr>
+          ${tile("Total", totalStudents, "#0e7490", "#ecfeff")}
+          ${tile("Present", present, "#16a34a", "#f0fdf4")}
+          ${tile("Absent", absent, "#dc2626", "#fef2f2")}
+        </tr>
+      </table>`;
+
+  // Roll numbers as wrapping chips — a 40-student list stays readable on a
+  // phone, which a 40-row table does not.
+  const chips = (rolls, color, bg) =>
+    rolls.length === 0
+      ? `<p style="margin:0 0 16px;font-size:13px;color:#888;font-style:italic;">None</p>`
+      : `<p style="margin:0 0 16px;line-height:2.1;">${rolls
+          .map(
+            (r) =>
+              `<span style="background:${bg};color:${color};border:1px solid ${color}33;border-radius:6px;padding:4px 9px;font-size:13px;font-weight:600;margin:0 6px 6px 0;white-space:nowrap;">${r}</span>`,
+          )
+          .join(" ")}</p>`;
+
+  const body = `
+      <p style="${P}">Dear <strong>${facultyName || "Faculty"}</strong>, here is the attendance recorded for your class.</p>
+      ${infoCard("#0e7490", [
+        ["Subject", `<strong>${subject || "N/A"}</strong>${subjectCode ? ` (${subjectCode})` : ""}`],
+        ["Date", `<strong>${date}</strong>`],
+        ["Period", `<strong>${timeSlot}</strong>`],
+        ...(room ? [["Room", room]] : []),
+        ...(batch ? [["Batch", batch]] : []),
+        ...(semester ? [["Semester", semester]] : []),
+      ])}
+      ${statTiles}
+      <div style="text-align:center;margin:0 0 22px;">
+        <span style="font-size:13px;color:#5b6472;">Attendance</span>
+        <span style="font-size:22px;font-weight:700;color:${pct >= 75 ? "#16a34a" : pct >= 50 ? "#d97706" : "#dc2626"};margin-left:8px;">${pct}%</span>
+      </div>
+
+      <h4 style="margin:0 0 8px;color:#16a34a;font-size:14px;">✅ Present — ${present} student${present === 1 ? "" : "s"}</h4>
+      ${chips(presentRolls, "#15803d", "#f0fdf4")}
+
+      <h4 style="margin:0 0 8px;color:#dc2626;font-size:14px;">❌ Absent — ${absentRolls.length} student${absentRolls.length === 1 ? "" : "s"}</h4>
+      ${chips(absentRolls, "#b91c1c", "#fef2f2")}
+
+      ${
+        reviewRolls.length > 0
+          ? `<h4 style="margin:0 0 8px;color:#d97706;font-size:14px;">🔍 Needs review — ${reviewRolls.length} student${reviewRolls.length === 1 ? "" : "s"}</h4>
+      <p style="margin:0 0 10px;font-size:12px;color:#888;">Recognised, but below the confidence threshold for an automatic Present. Please confirm these manually.</p>
+      ${chips(reviewRolls, "#b45309", "#fffbeb")}`
+          : ""
+      }
+
+      ${
+        noGt > 0
+          ? `<div style="background:#fffbeb;border:1px solid #d9770633;border-left:4px solid #d97706;border-radius:10px;padding:16px 18px;margin:0 0 16px;">
+        <h4 style="margin:0 0 6px;color:#b45309;font-size:14px;">⚠️ Marked absent — no photos on record (${noGt} student${noGt === 1 ? "" : "s"})</h4>
+        <p style="margin:0 0 10px;font-size:13px;color:#5b6472;line-height:1.6;">
+          The system has no ground-truth photographs for these students, so the classroom cameras
+          <strong>cannot recognise them and they will be marked absent in every class</strong> until this is fixed.
+          This is a records problem, not an attendance one.
+        </p>
+        ${chips(noGroundTruthRolls, "#b45309", "#fef3c7")}
+        <p style="margin:0;font-size:13px;color:#b45309;line-height:1.6;">
+          <strong>Please ask these students to contact the Department Faculty Coordinator</strong>
+          to get their photographs registered.
+        </p>
+      </div>`
+          : ""
+      }
+
+      <div style="background:#f7f9fc;border:1px solid #e4e8f5;border-left:4px solid #0e7490;border-radius:10px;padding:14px 18px;margin:20px 0 0;">
+        <p style="margin:0 0 10px;font-size:13px;color:#1a1f3c;line-height:1.7;">
+          <strong>If there is any problem with this attendance, simply reply to this email</strong>${
+            coordinatorEmail
+              ? ` — your reply reaches both the ${ILEED_MARK} team and the Department Coordinator (<a href="mailto:${coordinatorEmail}" style="color:#0e7490;">${coordinatorEmail}</a>), who is also copied on this message.`
+              : `. Please also copy your Department Coordinator.`
+          }
+        </p>
+        <p style="margin:0;font-size:13px;color:#0e7490;line-height:1.7;">
+          Your feedback is crucial in improving the system — <strong>thank you in advance</strong>.
+        </p>
+      </div>
+      <p style="margin:16px 0 0;font-size:12px;color:#888;line-height:1.6;">
+        Attendance was captured automatically by the ${ILEED_MARK} classroom cameras.
+        We are in the process of merging with the ERP once the system gets stabilised.
+      </p>`;
+
+  return renderAlert({
+    title: `📋 Attendance — ${subject || "Class"} · ${timeSlot}`,
+    accent: "#0e7490",
+    bodyHtml: body,
+    // No "do not reply" here — this message asks for exactly that.
+    footerHtml: `<span style="font-size:11px;color:#999;">Sent by ${ILEED_MARK} — ${ILEED_FULL_FORM}, NIT Jalandhar. Replies to this message are read by the ${ILEED_MARK} team${
+      coordinatorEmail ? ` and the Department Coordinator` : ""
+    }.</span>`,
+  });
+}
+
 module.exports = {
+  facultyAttendanceSummaryTemplate,
   serverDownTemplate,
   serverRecoveredTemplate,
   noReportSavedTemplate,

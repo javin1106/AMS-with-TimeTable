@@ -4,13 +4,12 @@
 // flow but runs every enabled room for a chosen slot in parallel (Promise.allSettled)
 // and returns a full per-room status array instead of running silently via cron.
 
+const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 
 const AcquisitionControl = require('../../../models/acquisitionControl');
 const Allotment = require('../../../models/allotment');
-const LockSem = require('../../../models/locksem');
-const TimeTable = require('../../../models/timetable');
 const Camera = require('../../../models/attendanceModule/camera');
 const Subject = require('../../../models/subject');
 const AttendanceReport = require('../../../models/attendanceReport');
@@ -20,23 +19,29 @@ const {
   buildEnrolledEmbeddingsAdaface,
   buildEnrolledEmbeddingsAdafaceTopK,
 } = require('./embeddingSyncHelper');
-const { checkAttendanceRunAllowed } = require('./timeWindowGuard');
+const { checkAttendanceRunAllowed, nowMinIST, todayIST } = require('./timeWindowGuard');
+const { resolveClassContext } = require('./classContextResolver');
+const { findSubjectForSlot } = require('./subjectLookup');
+const { reportQuery, roomKey } = require('./reportKey');
+const { resolveEmbeddingFile } = require('./embeddingPathResolver');
+// autoAttendanceScheduler does not require this file back, so this stays a
+// one-way dependency — see runRoomOne for why the manual trigger reuses the
+// cron's runSlotAttendance rather than this file's runRoom.
+const { runSlotAttendance, isRunInProgress } = require('./autoAttendanceScheduler');
+const SchedulerLedger = require('../../../models/attendanceModule/schedulerLedger');
 
 const ML_URL = process.env.ML_SERVICE_URL || 'http://localhost:8500';
-const EMBEDDINGS_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'embeddings');
+// Embedding .pkl paths come from embeddingPathResolver — see that file for why
+// the dept folder cannot be joined naively.
 const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'ground_truth');
 
+// Campus wall-clock date (IST), not UTC. `toISOString()` names the previous
+// day between 00:00 and 05:30 IST, so a dashboard using it looked for reports
+// under yesterday's date while autoAttendanceScheduler (which uses todayIST)
+// wrote them under today's — the card then showed "Waiting" for a period that
+// had already run.
 function todayStr() {
-  return new Date().toISOString().split('T')[0];
-}
-
-function dayOfWeek(dateStr) {
-  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  return days[new Date(dateStr).getDay()];
-}
-
-function safeSubject(raw) {
-  return (raw || '').trim().replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/, '');
+  return todayIST();
 }
 
 function currentSession() {
@@ -82,86 +87,13 @@ function timeStrToMin(t) {
   return (h || 0) * 60 + (m || 0);
 }
 
-// ── Step: resolve slot context for a room (LockSem primary, ExtraClass fallback) ──
+// ── Step: resolve slot context for a room ──────────────────────────────────
+// Shared with the cron scheduler and the developer lookup page — see
+// classContextResolver.js. Returns null when nothing should run; callers that
+// want the "why" can call resolveClassContext directly.
 async function resolveRoomContext(room, slot, date, config) {
-  const day = dayOfWeek(date);
-
-  // Primary: LockSem
-  const records = await LockSem.aggregate([
-    {
-      $match: {
-        slot: { $regex: new RegExp(`^${slot}$`, 'i') },
-        day: { $regex: new RegExp(`^${day}$`, 'i') },
-        'slotData.room': { $regex: new RegExp(`^${room}$`, 'i') },
-      },
-    },
-    {
-      $lookup: {
-        from: 'timetables',
-        localField: 'timetable',
-        foreignField: '_id',
-        as: 'tt',
-      },
-    },
-    { $unwind: { path: '$tt', preserveNullAndEmptyArrays: false } },
-    { $match: { 'tt.currentSession': true } },
-    { $limit: 1 },
-  ]);
-
-  if (records.length) {
-    const rec = records[0];
-    const tt = rec.tt;
-    const slotEntry = rec.slotData.find(
-      (s) => s.room && s.room.toLowerCase() === room.toLowerCase(),
-    );
-    if (slotEntry) {
-      const session = tt.session || currentSession();
-      const sessionStartYear = parseInt(session.split('-')[0]) || new Date().getFullYear();
-      const semNum = parseInt((rec.sem || '').match(/\d+/)?.[0] || '0');
-      const yearOfStudy = semNum > 0 ? Math.ceil(semNum / 2) : 1;
-      const batchYear = String(sessionStartYear - (yearOfStudy - 1));
-      const ttName = (tt.name || '').toUpperCase();
-      let degree = 'BTECH';
-      for (const d of ['MTECH', 'PHD', 'BSC', 'MSC', 'MBA', 'MCA', 'BTECH']) {
-        if (ttName.includes(d)) { degree = d; break; }
-      }
-      const dept = (tt.dept || '').trim().toUpperCase().replace(/\s+/g, '_');
-      const batch = `${degree}_${dept}_${batchYear}`;
-
-      return {
-        source: 'locksem',
-        batch,
-        subject: slotEntry.subject || '',
-        faculty: slotEntry.faculty || '',
-        sem: rec.sem || '',
-        dept,
-        session,
-        locksemId: rec._id.toString(),
-      };
-    }
-  }
-
-  // Fallback: ExtraClass
-  const extra = (config.extraClasses || []).find(
-    (ec) => ec.active
-      && ec.room?.toLowerCase().trim() === room.toLowerCase().trim()
-      && ec.periodKey === slot
-      && ec.date === date,
-  );
-  if (extra) {
-    return {
-      source: 'extraClass',
-      batch: extra.batch,
-      subject: extra.subject || '',
-      faculty: extra.faculty || '',
-      sem: extra.semester || '',
-      dept: '',
-      session: currentSession(),
-      locksemId: null,
-    };
-  }
-
-  return null;
+  const { ctx } = await resolveClassContext(room, slot, date, config);
+  return ctx;
 }
 
 // ── Step: resolve cameras for a room ──────────────────────────────────────
@@ -213,29 +145,45 @@ async function getEnabledRooms(config) {
 // authoritative pointer. We read it directly rather than fuzzy-guessing a
 // filename, and never touch ground_truth/ or roll numbers from here at all.
 async function resolveSubjectAndPkl(subjectText, sem, dept, session) {
-  const subj = await Subject.findOne({
-    subjectFullName: { $regex: (subjectText || '').trim(), $options: 'i' },
+  // Shared with autoAttendanceScheduler — see subjectLookup.js. This copy also
+  // compared `sem` with plain equality while the scheduler used a
+  // case-insensitive regex, so the two could disagree about the same slot.
+  const { subject: subj, reason: lookupReason } = await findSubjectForSlot({
+    subject: subjectText,
     sem,
-  }).lean();
+  });
 
-  const subjectMeta = subj ? {
+  if (!subj) {
+    return {
+      subjectMeta: null,
+      pkl: null,
+      pklMissingReason: lookupReason,
+    };
+  }
+
+  const subjectMeta = {
     subName: subj.subName || '',
     subCode: subj.subCode || '',
     subjectFullName: subj.subjectFullName || '',
     credits: subj.credits ?? null,
-  } : null;
+  };
 
-  if (!subj || !subj.embeddingFile) {
-    return { subjectMeta, pkl: null };
+  if (!subj.embeddingFile) {
+    return {
+      subjectMeta,
+      pkl: null,
+      pklMissingReason: `Subject "${subj.subjectFullName}" has no embeddingFile — generate embeddings for it`,
+    };
   }
 
-  const fs = require('fs');
-  const deptSafe = safeSubject(dept || subj.dept || 'UNKNOWN');
-  const sessionToUse = session || currentSession();
-  const fullPath = path.join(EMBEDDINGS_DIR, sessionToUse, deptSafe, subj.embeddingFile);
-
-  if (!fs.existsSync(fullPath)) {
-    return { subjectMeta, pkl: null, pklMissingReason: `Subject.embeddingFile (${subj.embeddingFile}) not found on disk at expected path` };
+  const { path: fullPath, reason } = resolveEmbeddingFile({
+    session: session || currentSession(),
+    dept: dept || subj.dept,
+    filename: subj.embeddingFile,
+    relPath: subj.embeddingRelPath,
+  });
+  if (!fullPath) {
+    return { subjectMeta, pkl: null, pklMissingReason: reason };
   }
 
   let pklData;
@@ -246,6 +194,135 @@ async function resolveSubjectAndPkl(subjectText, sem, dept, session) {
   }
 
   return { subjectMeta, pkl: { filename: subj.embeddingFile, pklData } };
+}
+
+// ── Preflight checklist for the Live page ──────────────────────────────────
+// The Live page used to show only the outcome ("Waiting for attendance run to
+// start…") with no way to tell a period that hadn't started yet from one that
+// could never start. These are the same five conditions autoAttendanceScheduler
+// evaluates before it calls the ML service, in the same order, each reported
+// with the values that were actually compared — so a failing check names the
+// field to fix rather than just saying "skipped".
+//
+// Read-only and deliberately cheap: the PKL is stat'd, never read into memory
+// (the live page polls every 15s), and the ML service is not contacted.
+async function buildPreflight({ room, slot, date, config, cameraInfo, runsCompleted, resolved, inProgress }) {
+  const checks = [];
+  const add = (key, label, ok, detail) => checks.push({ key, label, ok, detail });
+
+  // 1. Timetable — is a class scheduled here at all? The caller has usually
+  //    resolved this already; reuse it rather than repeating the LockSem
+  //    aggregate for every room on every 15s poll.
+  const { ctx, reason, day, ambiguous } =
+    resolved || (await resolveClassContext(room, slot, date, config));
+  if (!ctx) {
+    add('class', 'Class scheduled', false, reason || `No class for ${room} in ${slot} on ${day}`);
+    return { ctx: null, checks };
+  }
+  add(
+    'class',
+    'Class scheduled',
+    true,
+    `${ctx.subject} · ${ctx.batch}${ctx.sem ? ` · Sem ${ctx.sem}` : ''} (${ctx.source})` +
+      (ambiguous ? ' — WARNING: more than one timetable claims this slot' : ''),
+  );
+
+  // 2. Subject — matched on name AND semester. A sem mismatch between the
+  //    timetable row and the Subject document is the most common silent skip,
+  //    so both values are named when it fails.
+  // Uses the shared lookup, so this checklist reports on exactly the match the
+  // run will make. It previously ran its own subjectFullName regex, which could
+  // pass here and then fail (or match a different subject) during the run.
+  const { subject: subj, matchedBy } = await findSubjectForSlot({
+    subject: ctx.subject,
+    sem: ctx.sem,
+  });
+
+  if (!subj) {
+    // Retry without the semester to tell "wrong sem" apart from "no such
+    // subject" — the two need different fixes.
+    const { subject: byNameOnly } = await findSubjectForSlot({ subject: ctx.subject });
+    add(
+      'subject',
+      'Subject matched',
+      false,
+      byNameOnly
+        ? `Semester mismatch — timetable says sem "${ctx.sem}", Subject "${byNameOnly.subName || byNameOnly.subjectFullName}" is sem "${byNameOnly.sem}"`
+        : `No Subject whose subName (or subjectFullName) is exactly "${ctx.subject}" — ` +
+          `the timetable stores the subject abbreviation`,
+    );
+    return { ctx, checks };
+  }
+  add(
+    'subject',
+    'Subject matched',
+    true,
+    `${subj.subName || subj.subjectFullName}${subj.subCode ? ` (${subj.subCode})` : ''} — matched on ${matchedBy}`,
+  );
+  add('sem', 'Semester matched', true, `sem ${subj.sem} — matches the timetable`);
+
+  // 3. Roster — empty is not fatal, but it silently widens the run to the
+  //    whole batch, so it is surfaced as a warning-shaped pass.
+  const rollCount = (subj.enrolledRollNos || []).length;
+  add(
+    'roster',
+    'Roster loaded',
+    true,
+    rollCount > 0
+      ? `${rollCount} enrolled roll number(s)`
+      : 'No enrolledRollNos — the run will cover the whole batch’s embedding store',
+  );
+
+  // 4. Embeddings — the pointer must be set AND the file must be on disk.
+  if (!subj.embeddingFile) {
+    add('embeddings', 'Embedding file found', false,
+      'Subject.embeddingFile is not set — generate embeddings for this subject');
+    return { ctx, checks };
+  }
+  const { path: pklPath, reason: pklReason } = resolveEmbeddingFile({
+    session: ctx.session || currentSession(),
+    dept: ctx.dept || subj.dept,
+    filename: subj.embeddingFile,
+    relPath: subj.embeddingRelPath,
+  });
+  let stat = null;
+  if (pklPath) {
+    try { stat = fs.statSync(pklPath); } catch { /* raced away — reported below */ }
+  }
+  if (!stat) {
+    add('embeddings', 'Embedding file found', false, pklReason || `${subj.embeddingFile} not readable`);
+    return { ctx, checks };
+  }
+  add('embeddings', 'Embedding file found', true,
+    `${subj.embeddingFile} (${Math.round(stat.size / 1024)} KB)`);
+
+  // 5. Camera — resolveCameras needs a "front-left" camera (or an RTSP
+  //    override) for cam1; anything else and the scheduler skips the room.
+  const roomOverride = (config.includedRooms || []).find(
+    (r) => r.room && r.room.toUpperCase() === room.toUpperCase(),
+  );
+  const cams = await resolveCameras(room, roomOverride);
+  if (!cams.cam1) {
+    add('camera', 'Camera ready', false,
+      cameraInfo?.total ? `${cameraInfo.total} active camera(s) but none at position "front-left"`
+                        : 'No active camera registered for this room');
+    return { ctx, checks };
+  }
+  add('camera', 'Camera ready', true,
+    `cam1 via ${cams.source === 'override' ? 'RTSP override' : 'camera registry'}` +
+      (cameraInfo?.status === 'offline' ? ' — but the camera is offline' : '') +
+      (cams.cam2 ? ' · cam2 present' : ''));
+
+  // 6. Outcome. A run mid-capture passes this even with nothing recorded yet —
+  //    it used to report only "has a run finished", so the whole of the first
+  //    capture read as a failing check.
+  add('running', 'Attendance running', inProgress || runsCompleted > 0,
+    inProgress
+      ? `Run in progress${runsCompleted > 0 ? ` — ${runsCompleted} check(s) saved so far` : ' — capturing the first check'}`
+      : runsCompleted > 0 ? `${runsCompleted} run(s) recorded`
+                          : 'No run recorded yet for this period');
+
+  return { ctx, checks };
 }
 
 
@@ -274,11 +351,14 @@ async function runRoom({ room, roomOverride, slot, date, config }) {
   push('Working day check passed');
 
   // 2. Slot data
-  const ctx = await resolveRoomContext(room, slot, date, config);
+  const { ctx, reason: ctxReason, day } = await resolveClassContext(room, slot, date, config);
   if (!ctx) {
-    return { room, status: 'skipped', reason: 'No Class Scheduled', log };
+    return { room, status: 'skipped', reason: ctxReason || 'No Class Scheduled', log };
   }
-  push(`Class resolved: ${ctx.batch} — ${ctx.subject} (${ctx.source})`);
+  push(`Class resolved (${day}): ${ctx.batch} — ${ctx.subject} (${ctx.source})`);
+  if (ctx.altered) {
+    push(`Alteration applied: was "${ctx.originalSubject}" / ${ctx.originalFaculty}`);
+  }
 
   // 3. Cameras
   const cameras = await resolveCameras(room, roomOverride);
@@ -413,7 +493,9 @@ async function runRoom({ room, roomOverride, slot, date, config }) {
     primaryFallback: runPrimaryFallback,
   };
 
-  let report = await AttendanceReport.findOne({ batch: ctx.batch, date, timeSlot: slot });
+  let report = await AttendanceReport.findOne(
+    reportQuery({ batch: ctx.batch, date, timeSlot: slot, room }),
+  );
   if (report) {
     if (report.status === 'finalized') {
       return { room, status: 'error', reason: 'Report already finalized', ctx, log };
@@ -426,7 +508,8 @@ async function runRoom({ room, roomOverride, slot, date, config }) {
       semester: ctx.sem,
       subject: ctx.subject,
       faculty: ctx.faculty,
-      room,
+      // Part of the report key — see reportKey.js.
+      room: roomKey(room),
       date,
       timeSlot: slot,
       locksemId: ctx.locksemId,
@@ -510,6 +593,161 @@ exports.runAll = async (req, res) => {
   }
 };
 
+// ── POST /attendancemodule/scheduler/run-room ─────────────────────────────
+// Body: { room, slot, date?, rtspUrl1?, rtspUrl2? }
+//
+// Single-room manual trigger running autoAttendanceScheduler's own
+// runSlotAttendance() — the same code the cron executes, not a copy.
+//
+// Deliberately NOT this file's runRoom(): that one omits autoThreshold and
+// reviewThreshold from the ML payload (so the service falls back to 0.40/0.20
+// instead of the configured auto_present_threshold/review_threshold), omits
+// enrolledRollNos (so matching covers the whole batch rather than the subject
+// roster), writes a single merged slotResult at the end instead of a report
+// per run, and skips the ERP push, unknown-face capture, daily-data write,
+// duplicate alerts and faculty summary entirely.
+//
+// Holds the request open for the whole run (numRuns × runDurationSec plus the
+// waits between them) and answers once. Each check is saved to the report as
+// it completes, so the report is queryable while this is still in flight.
+exports.runRoomOne = async (req, res) => {
+  try {
+    const { room, slot, rtspUrl1, rtspUrl2 } = req.body;
+    const date = req.body.date || todayStr();
+    if (!room) return res.status(400).json({ error: 'room is required' });
+    if (!slot) return res.status(400).json({ error: 'slot is required' });
+
+    // Optional 08:30–17:30 IST restriction (admin toggle, default off).
+    const runGate = await checkAttendanceRunAllowed();
+    if (!runGate.allowed) return res.status(403).json({ error: runGate.reason });
+
+    const config = await AcquisitionControl.findOne({ profileName: 'default' }).lean();
+    if (!config) return res.status(404).json({ error: 'AcquisitionControl config not found' });
+
+    // An RTSP URL typed on the page beats the registry, so the operator can
+    // still run a room whose camera is not registered (or is registered with a
+    // stale URL) — that was possible on the old start-session path and would
+    // otherwise be lost. resolveCameras() treats this the same as an
+    // includedRooms override.
+    let roomOverride = null;
+    if (rtspUrl1 && rtspUrl1.trim()) {
+      roomOverride = {
+        room,
+        enabled: true,
+        rtspUrl1: rtspUrl1.trim(),
+        rtspUrl2: (rtspUrl2 || '').trim(),
+      };
+    } else {
+      const enabledRooms = await getEnabledRooms(config);
+      roomOverride =
+        enabledRooms.find((r) => (r.room || '').toUpperCase() === room.toUpperCase()) || null;
+    }
+
+    // runSlotAttendance spaces its runs over the time left in the period, so it
+    // needs the period window. Without a configured period there is nothing to
+    // space against — reject rather than run with a bogus window.
+    const periodCfg = (config.periods || []).find((p) => p.periodKey === slot);
+    const startMin = timeStrToMin(periodCfg?.startTime);
+    const endMin = timeStrToMin(periodCfg?.endTime);
+    if (startMin == null || endMin == null) {
+      return res.status(400).json({
+        error: `No start/end time configured for ${slot} — set it in Scheduler → Period Settings before running.`,
+      });
+    }
+
+    const result = await runSlotAttendance({
+      room: roomOverride?.room || room,
+      roomOverride,
+      slot,
+      date,
+      periodInfo: { startMin, endMin },
+      config,
+      // Recorded on its own ledger row (task 'manualRun') so pressing this
+      // button neither satisfies nor blocks the cron's claim for the period,
+      // and so `resume` stays off: an operator asking for a run wants a run,
+      // not "all checks already saved, nothing to do".
+      trigger: 'manual',
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[SchedulerController] runRoomOne error:', err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ── GET /attendancemodule/scheduler/ledger?date=YYYY-MM-DD ────────────────
+// What the scheduler actually did on a given day, per period per room: which
+// pre-flight checks passed, why a room was skipped, how many checks ran, what
+// was claimed and by whom, and what was interrupted.
+//
+// Before the ledger existed the only trace of any of this was a console.warn
+// on the server, so "why did P3 in LH-204 produce nothing?" was unanswerable
+// after the fact — the answer had scrolled away, or the process that logged it
+// had been restarted since.
+//
+// `full=1` includes each attempt's step trail. Without it the steps are
+// dropped and only counts/outcomes come back, which is all the summary table
+// needs — a day across every room is a lot of narration to send when nothing
+// is expanded yet.
+exports.ledger = async (req, res) => {
+  try {
+    const date = req.query.date || todayStr();
+    const full = req.query.full === '1' || req.query.full === 'true';
+
+    const query = SchedulerLedger.find({ date }).sort({ periodKey: 1, room: 1 });
+    if (!full) query.select('-attempts.steps');
+
+    const rows = await query.lean();
+
+    // Period windows come from the ledger row where present (captured at claim
+    // time) and from the live config otherwise, so a day rendered after the
+    // period times were edited still shows the times that were in force.
+    const config = await AcquisitionControl.findOne({ profileName: 'default' })
+      .select('periods')
+      .lean();
+    const periodTimes = {};
+    for (const p of config?.periods || []) {
+      periodTimes[p.periodKey] = { startTime: p.startTime, endTime: p.endTime };
+    }
+
+    res.json({
+      date,
+      // Lets the page distinguish "no rows because nothing was scheduled" from
+      // "no rows because the server was down all day" — if the day is over and
+      // periods were configured, empty means the latter.
+      periods: config?.periods || [],
+      serverNowMin: nowMinIST(),
+      rows: rows.map((r) => ({
+        ...r,
+        startTime: r.startTime || periodTimes[r.periodKey]?.startTime || null,
+        endTime: r.endTime || periodTimes[r.periodKey]?.endTime || null,
+      })),
+    });
+  } catch (err) {
+    console.error('[SchedulerController] ledger error:', err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ── GET /attendancemodule/scheduler/ledger/dates ──────────────────────────
+// Which days have any ledger history at all, newest first — the date picker
+// needs to know which dates are worth opening.
+exports.ledgerDates = async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 30, 120);
+    const dates = await SchedulerLedger.aggregate([
+      { $group: { _id: '$date', rows: { $sum: 1 } } },
+      { $sort: { _id: -1 } },
+      { $limit: limit },
+      { $project: { _id: 0, date: '$_id', rows: 1 } },
+    ]);
+    res.json({ dates });
+  } catch (err) {
+    console.error('[SchedulerController] ledgerDates error:', err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 // ── GET /attendancemodule/scheduler/preview?slot=period1&date=2026-06-22 ──
 // "Would-run" dry preview — does steps 1-4 only, no ML call, no save.
 // Used when acquisition is globally off, or just to check before running.
@@ -538,11 +776,15 @@ exports.preview = async (req, res) => {
         const ctx = await resolveRoomContext(room, slot, date, config);
         if (!ctx) return { room, status: 'skipped', reason: 'No Class Scheduled' };
         const cameras = await resolveCameras(room, roomOverride);
-        const pkl = resolveEmbeddingPkl(ctx.dept, ctx.subject, ctx.session);
+        // Was resolveEmbeddingPkl(), which does not exist anywhere in the
+        // codebase — this endpoint threw a ReferenceError on every call.
+        const { pkl, pklMissingReason } = await resolveSubjectAndPkl(
+          ctx.subject, ctx.sem, ctx.dept, ctx.session,
+        );
         return {
           room,
           status: pkl ? 'would-run' : 'skipped',
-          reason: pkl ? null : 'No Embeddings for Subject',
+          reason: pkl ? null : (pklMissingReason || 'No Embeddings for Subject'),
           ctx,
           cameras: { hasCam1: !!cameras.cam1, hasCam2: !!cameras.cam2 },
           pkl: pkl ? pkl.filename : null,
@@ -580,8 +822,12 @@ exports.liveStatus = async (req, res) => {
 
     // ── Auto-detect current period ─────────────────────────────────────────
     if (!slot) {
-      const now = new Date();
-      const currentMinutes = now.getHours() * 60 + now.getMinutes();
+      // Period times in AcquisitionControl are campus wall-clock (IST). Using
+      // the server's local clock here picked a different period than the one
+      // autoAttendanceScheduler was actually running (5h30m out on a UTC host),
+      // so the header showed a period as live while its card sat on "Waiting
+      // for attendance run to start…" — the run belonged to another period.
+      const currentMinutes = nowMinIST();
       const activePeriod = (config.periods || []).find(p => {
         if (!p.startTime || !p.endTime) return false;
         const [sH, sM] = p.startTime.split(':').map(Number);
@@ -606,7 +852,53 @@ exports.liveStatus = async (req, res) => {
 
     const enabledRooms = await getEnabledRooms(config);
     const periodCfg = (config.periods || []).find((p) => p.periodKey === slot) || {};
-    const targetRuns = periodCfg.numRuns ?? config.globalNumRuns ?? 1;
+    // Must match what actually executes. Both run paths (autoAttendanceScheduler
+    // and runRoomAttendance above) read globalNumRuns and ignore periodCfg.numRuns
+    // entirely, so reading the per-period value here made the page disagree with
+    // the scheduler: periodCfg.numRuns is never undefined (schema default 1, and
+    // defaultPeriods() seeds it), so `??` never reached globalNumRuns and the
+    // target stayed pinned at 1 however the global setting was changed.
+    const targetRuns = config.globalNumRuns ?? 1;
+
+    // ── Period window, in campus (IST) minutes ─────────────────────────────
+    // Sent to the client so the card can say when the period starts and ends
+    // without re-deriving it from the browser's clock, which is what let the
+    // header and the card disagree about whether a period was live.
+    const curMin = nowMinIST();
+    const pStart = periodCfg.startTime ? timeStrToMin(periodCfg.startTime) : null;
+    const pEnd = periodCfg.endTime ? timeStrToMin(periodCfg.endTime) : null;
+    const runDurationMin = Math.ceil((config.globalRunDurationSec ?? 120) / 60);
+    const timing = pStart == null || pEnd == null ? null : {
+      startTime: periodCfg.startTime,
+      endTime: periodCfg.endTime,
+      startMin: pStart,
+      endMin: pEnd,
+      nowMin: curMin,
+      // Same predicate autoAttendanceScheduler uses to decide whether to fire,
+      // so "would fire now" on the page means exactly what the cron means.
+      state: curMin < pStart ? 'upcoming' : curMin > pEnd ? 'over' : 'live',
+      minsToStart: Math.max(0, pStart - curMin),
+      minsToEnd: Math.max(0, pEnd - curMin),
+      runDurationMin,
+      wouldFireNow:
+        (curMin >= pStart && curMin <= pStart + 1) ||
+        (curMin > pStart && curMin + runDurationMin <= pEnd),
+      tooLateToStart: curMin > pStart && curMin <= pEnd && curMin + runDurationMin > pEnd,
+    };
+
+    // Global gates — shown once above the cards, because when one of these
+    // blocks, every room is "waiting" for the same reason.
+    const runGate = await checkAttendanceRunAllowed();
+    const gates = [
+      { key: 'active', label: 'Acquisition enabled', ok: !!config.active,
+        detail: config.active ? 'AcquisitionControl.active is on' : 'AcquisitionControl.active is OFF — no period will run' },
+      { key: 'workingDay', label: 'Working day', ok: isWorkingDay,
+        detail: isWorkingDay ? date : `${date} — ${workingDayReason}` },
+      { key: 'timeWindow', label: 'Within run window', ok: runGate.allowed,
+        detail: runGate.allowed ? 'Allowed at this time' : runGate.reason },
+      { key: 'period', label: 'Period configured', ok: timing != null,
+        detail: timing ? `${timing.startTime}–${timing.endTime} IST` : `No start/end time set for ${slot}` },
+    ];
 
     // ── Bulk camera fetch ──────────────────────────────────────────────────
     const allRoomIds = enabledRooms.map(r => r.room.toUpperCase());
@@ -636,8 +928,16 @@ exports.liveStatus = async (req, res) => {
           return { room, status: 'skipped', reason: workingDayReason || 'Non-working day', cameraInfo };
         }
 
-        const ctx = await resolveRoomContext(room, slot, date, config);
-        if (!ctx) return { room, status: 'skipped', reason: 'No Class Scheduled', cameraInfo };
+        const resolved = await resolveClassContext(room, slot, date, config);
+        const ctx = resolved.ctx;
+        if (!ctx) {
+          // Still run the checklist — its first line names *why* no class
+          // resolved (free period, wrong weekday, room not in the slot data).
+          const { checks } = await buildPreflight({
+            room, slot, date, config, cameraInfo, runsCompleted: 0, resolved,
+          });
+          return { room, status: 'skipped', reason: 'No Class Scheduled', cameraInfo, preflight: checks };
+        }
 
         // Find report for this batch + date + slot
         const report = await AttendanceReport.findOne({ batch: ctx.batch, date, timeSlot: slot }).lean();
@@ -667,9 +967,19 @@ exports.liveStatus = async (req, res) => {
           }
         }
 
+        // Mid-capture right now? The report row cannot answer this — it does
+        // not exist until the first check saves — so it comes from the
+        // scheduler's own in-flight registry.
+        const inProgress = isRunInProgress({ room, slot, date });
+
+        const { checks } = await buildPreflight({
+          room, slot, date, config, cameraInfo, runsCompleted, resolved, inProgress,
+        });
+
         return {
           room,
           status: reportStatus,
+          inProgress,
           runsCompleted,
           targetRuns,
           ctx,
@@ -677,6 +987,7 @@ exports.liveStatus = async (req, res) => {
           lastRecord,
           cameraInfo,
           reason: null,
+          preflight: checks,
         };
       })
     );
@@ -689,6 +1000,8 @@ exports.liveStatus = async (req, res) => {
       workingDaySource,
       acquisitionActive: config.active,
       periods: config.periods || [],
+      timing,
+      gates,
       rooms,
     });
   } catch (err) {

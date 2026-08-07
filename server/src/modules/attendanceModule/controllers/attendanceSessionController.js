@@ -18,6 +18,14 @@ const {
     buildEnrolledEmbeddingsAdafaceTopK,
 } = require('./embeddingSyncHelper');
 const { pklPath } = require('./erpEmbeddingSyncHelper');
+const { reportQuery, roomKey } = require('./reportKey');
+const { sendFacultyAttendanceSummaryById } = require('./facultyAttendanceMailer');
+const {
+    resolveSubjectRoster,
+    reconcileFinalReport,
+    rosterMembers,
+    membership,
+} = require('./subjectRoster');
 
 
 const ML_URL = process.env.ML_SERVICE_URL || 'http://localhost:8500';
@@ -154,7 +162,7 @@ async function runSessionClustering(sessionId, outputDir, dbPathStr) {
 
 // ── Merge helpers (same logic as attendanceReportController) ─────────────────
 
-function mergeStudentStatus(slotResults) {
+function mergeStudentStatus(slotResults, roster = []) {
     const rollMap = {};
     for (const slot of slotResults) {
         for (const s of slot.students) {
@@ -163,7 +171,7 @@ function mergeStudentStatus(slotResults) {
         }
     }
 
-    return Object.entries(rollMap).map(([rollNo, entries]) => {
+    const merged = Object.entries(rollMap).map(([rollNo, entries]) => {
         const best        = entries.reduce((p, c) => c.avgConfidence > p.avgConfidence ? c : p, entries[0]);
         const highPresent = entries.filter(e => e.status === 'present' && e.confidenceZone !== 'low');
         const anyPresent  = entries.some(e => e.status === 'present');
@@ -189,13 +197,19 @@ function mergeStudentStatus(slotResults) {
             autoFinalStatus: finalStatus,
         };
     });
+
+    // Pin the merged result to the subject's roster: roster students the model
+    // never saw are Absent, anyone else it recognised is kept but flagged.
+    return reconcileFinalReport(merged, roster);
 }
 
+// Roster students only — a flagged non-enrolled face must never move these.
 function buildSummary(finalReport) {
-    const total   = finalReport.length;
-    const present = finalReport.filter(s => s.finalStatus === 'P').length;
-    const absent  = finalReport.filter(s => s.finalStatus === 'A').length;
-    const review  = finalReport.filter(s => s.finalStatus === 'R').length;
+    const members = rosterMembers(finalReport);
+    const total   = members.length;
+    const present = members.filter(s => s.finalStatus === 'P').length;
+    const absent  = members.filter(s => s.finalStatus === 'A').length;
+    const review  = members.filter(s => s.finalStatus === 'R').length;
     return {
         totalStudents: total, present, absent, review,
         attendancePct: total > 0 ? Math.round((present / total) * 100) : 0,
@@ -263,6 +277,7 @@ async function runOneCheck(reportId, checkIndex, config) {
         // Build per-student list
         // Normalise status: only allow values in the Mongoose enum
         const VALID_STATUSES = new Set(['present', 'absent', 'review', 'not_enrolled']);
+        const rosterSet = new Set(config.enrolledRollNos || []);
         const students = Object.entries(attendance).map(([rollNo, data]) => {
             const rawStatus = data.status || 'absent';
             const status    = VALID_STATUSES.has(rawStatus) ? rawStatus : 'absent';
@@ -275,6 +290,7 @@ async function runOneCheck(reportId, checkIndex, config) {
                 clusterFolder:  null,
                 finalStatus:    status === 'present' ? 'P'
                               : status === 'review'  ? 'R' : 'A',
+                ...membership(rollNo, data, rosterSet),
             };
         });
         const slotResult = {
@@ -307,7 +323,7 @@ async function runOneCheck(reportId, checkIndex, config) {
         }
 
         report.slotResults.push(slotResult);
-        report.finalReport = mergeStudentStatus(report.slotResults);
+        report.finalReport = mergeStudentStatus(report.slotResults, config.enrolledRollNos || []);
         
         const currentUnknownCount = report.summary && report.summary.unknownFaceCount ? report.summary.unknownFaceCount : 0;
         const newUnknownCount = (mlResult.unmatched_clusters && mlResult.unmatched_clusters.length) ? mlResult.unmatched_clusters.length : 0;
@@ -368,7 +384,13 @@ async function runOneCheck(reportId, checkIndex, config) {
             .catch(err => console.error(`${tag} Session clustering failed: ${err.message}`));
 
     } catch (err) {
-        console.error(`${tag} ❌ Failed: ${err.message}`);
+        // The ML service returns 422 with the pipeline's own error text in
+        // `detail` ("Cannot open RTSP stream: …", "No enrolled students found
+        // for batch …", "No faces detected during the recording."). Logging
+        // only err.message reduced all of those to "status code 422", which
+        // says nothing about which one actually happened.
+        const detail = err.response?.data?.detail;
+        console.error(`${tag} ❌ Failed: ${err.message}${detail ? ` — ${detail}` : ''}`);
         // Don't stop the session — next check may succeed
     }
 }
@@ -387,10 +409,29 @@ async function startSession(config) {
         throw new Error('batch, rtspUrl, room, slot, and date are required');
     }
 
+    // Roll numbers for this period come from the subject, not from whichever
+    // students happen to have embeddings for this batch — see subjectRoster.js.
+    // Resolved once here rather than per check, so every run in a session
+    // reports on the same class even if the roster is edited mid-session.
+    // An explicit list from the caller still wins.
+    let roster = (enrolledRollNos || []).map(String);
+    if (roster.length === 0) {
+        const resolved = await resolveSubjectRoster({ subject, sem: semester, dept: department });
+        roster = resolved.rollNos;
+        if (roster.length === 0) {
+            console.warn(
+                `[Session] No enrolledRollNos on file for subject "${subject || ''}" (sem ${semester || '?'}) — ` +
+                `falling back to the whole batch's embedding store; present/absent will cover the whole batch.`,
+            );
+        }
+    }
+
     const intervalMin = checkIntervalMin || 5;
 
     // 1. Upsert: reuse existing report for this batch+date+slot if it exists
-let report = await AttendanceReport.findOne({ batch, date, timeSlot: slot });
+let report = await AttendanceReport.findOne(
+    reportQuery({ batch, date, timeSlot: slot, room }),
+);
 if (report) {
     if (report.status === 'finalized') {
         throw new Error('A finalized report already exists for this slot. Cannot start a new session.');
@@ -410,7 +451,8 @@ if (report) {
         semester:   semester   || '',
         subject:    subject    || '',
         faculty:    faculty    || '',
-        room,
+        // Part of the report key — see reportKey.js.
+        room:       roomKey(room),
         date,
         timeSlot:   slot,
         locksemId:  locksemId || null,
@@ -435,7 +477,7 @@ const reportId = report._id.toString();
         batch, room, slot, date,
         durationSec:      durationSec      || 60,
         subject, faculty, semester, locksemId,
-        enrolledRollNos:  enrolledRollNos  || [],
+        enrolledRollNos:  roster,
         autoThreshold:    config.autoThreshold    || 0.40,
         reviewThreshold:  config.reviewThreshold  || 0.20,
         clusterThreshold: config.clusterThreshold || 0.45,
@@ -525,6 +567,20 @@ async function stopSession(reportId) {
         await AttendanceReport.findByIdAndUpdate(reportId, { status: 'draft' });
     } catch (err) {
         console.error(`[Session] Failed to update report status: ${err.message}`);
+    }
+
+    // End of the live session — mail the faculty their attendance for this
+    // period. Gated by the Email Notifications toggles and idempotent per
+    // report, so the cron finishing the same period cannot double-send.
+    // Deliberately awaited: stopSession is not on a request's critical path,
+    // and a caller that returns before the mail goes has nowhere to log it.
+    try {
+        const outcome = await sendFacultyAttendanceSummaryById(reportId);
+        if (!outcome.sent) {
+            console.log(`[Session ${reportId}] Faculty summary not sent: ${outcome.reason}`);
+        }
+    } catch (err) {
+        console.error(`[Session ${reportId}] Faculty summary failed: ${err.message}`);
     }
 
     return { status: 'stopped', reportId };
