@@ -80,12 +80,23 @@ function deriveBatch(tt, rec) {
 async function deriveBatchForExtraClass(extra) {
   try {
     const Subject = require("../../../models/subject");
-    const subj = await Subject.findOne({
-      subjectFullName: {
-        $regex: new RegExp(escapeRegex(String(extra.subject).trim()), "i"),
-      },
-      ...(extra.semester ? { sem: extra.semester } : {}),
-    }).lean();
+    const flexSubject = escapeRegex(String(extra.subject).trim())
+      .replace(/\\\(/g, "\\s*\\(\\s*")
+      .replace(/\\\)/g, "\\s*\\)\\s*")
+      .replace(/-/g, "\\s*-\\s*")
+      .replace(/\s+/g, "\\s+");
+
+    let query = {
+      subjectFullName: { $regex: new RegExp(flexSubject, "i") },
+    };
+    if (extra.semester) {
+      const flexSem = escapeRegex(String(extra.semester).trim())
+        .replace(/-/g, "\\s*-\\s*")
+        .replace(/\s+/g, "\\s+");
+      query.sem = { $regex: new RegExp(`^${flexSem}$`, "i") };
+    }
+
+    const subj = await Subject.findOne(query).lean();
     const dept = (subj?.dept || "").trim().toUpperCase().replace(/\s+/g, "_");
     if (!dept) return { batch: "", dept: "" };
 

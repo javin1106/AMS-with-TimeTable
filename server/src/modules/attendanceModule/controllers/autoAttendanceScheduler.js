@@ -134,9 +134,19 @@ async function resolveSubjectAndPkl(subjectText, sem, dept, session) {
   // "FPGADE/GE" and never the subject's own name. That returned null and the
   // room was skipped as "No Subject.embeddingFile set" — blaming the embedding
   // file for a lookup that never found the subject at all.
+  const flexSubject = escapeRegex((subjectText || "").trim())
+    .replace(/\\\(/g, "\\s*\\(\\s*")
+    .replace(/\\\)/g, "\\s*\\)\\s*")
+    .replace(/-/g, "\\s*-\\s*")
+    .replace(/\s+/g, "\\s+");
+
+  const flexSem = escapeRegex((sem || "").trim())
+    .replace(/-/g, "\\s*-\\s*")
+    .replace(/\s+/g, "\\s+");
+
   const subj = await Subject.findOne({
-    subjectFullName: { $regex: escapeRegex((subjectText || "").trim()), $options: "i" },
-    sem,
+    subjectFullName: { $regex: new RegExp(flexSubject, "i") },
+    sem: { $regex: new RegExp(`^${flexSem}$`, "i") },
   }).lean();
 
   if (!subj) {
