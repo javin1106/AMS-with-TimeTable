@@ -63,13 +63,22 @@ const CSS = `
   .dash-stat-grid  { display:grid; gap:14px; grid-template-columns: repeat(auto-fill, minmax(130px,1fr)); }
   .dash-chart-grid { display:grid; gap:20px; grid-template-columns: 1fr 1fr; }
 
+  /* header rows: title/subtitle + status chips + icon buttons.
+     Flex-wrap by default so chips/icons reflow instead of overflowing
+     into a single unbroken line on narrower viewports. */
+  .dash-header-row  { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; }
+  .dash-chip-group  { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+
   @media (max-width: 900px) {
     .dash-chart-grid { grid-template-columns: 1fr; }
   }
   @media (max-width: 600px) {
-    .dash-stat-grid  { grid-template-columns: repeat(2, 1fr); }
-    .dash-chart-grid { grid-template-columns: 1fr; }
-    .dash-header     { flex-direction: column; align-items: flex-start; gap: 12px; }
+    .dash-stat-grid   { grid-template-columns: repeat(2, 1fr); }
+    .dash-chart-grid  { grid-template-columns: 1fr; }
+    .dash-header      { flex-direction: column; align-items: flex-start; gap: 12px; }
+    .dash-header-row  { flex-direction: column; align-items: flex-start; }
+    .dash-chip-group  { width: 100%; }
+    .dash-chip-group .dash-sep { display: none; }
   }
 `;
 
@@ -523,14 +532,14 @@ export default function AMSDashboard() {
         <div style={{ marginBottom: camOpen ? 0 : 24, animation: 'fadeUp .4s ease both' }}>
           <div>
             {/* Row 1: title + status chips + icon buttons */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <div className="dash-header-row" style={{ marginBottom: 8 }}>
               <div style={{ fontWeight: 700, fontSize: 'clamp(17px,2.5vw,22px)', letterSpacing: '-0.03em', color: T.text }}>
                 Welcome to <ILeed />
                 <span style={{ fontWeight: 500, fontSize: '0.62em', letterSpacing: '0', color: T.textMuted, marginLeft: 10 }}>
                   — {ILEED_FULL_FORM}
                 </span>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div className="dash-chip-group">
                 {/* Acquisition status chip */}
                 <button
                   onClick={() => navigate('/attendance/acquisition-control')}
@@ -568,7 +577,7 @@ export default function AMSDashboard() {
                 )}
 
                 {/* separator */}
-                <div style={{ width: 1, height: 20, background: T.border, flexShrink: 0 }} />
+                <div className="dash-sep" style={{ width: 1, height: 20, background: T.border, flexShrink: 0 }} />
 
                 <IconNavButton title="Acquisition Control" onClick={() => navigate('/attendance/acquisition-control')}>
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={T.textMuted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -610,11 +619,11 @@ export default function AMSDashboard() {
               </div>
             </div>
             {/* Row 2: subtitle + badge buttons */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+            <div className="dash-header-row">
               <div style={{ fontSize: 12, color: T.textMuted }}>
                 {userRoles.length > 0 ? userRoles.join(' · ') : ''}
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div className="dash-chip-group">
               <HealthDashboard />
             <div>
               <button ref={mlBtnRef} onClick={handleMLClick}
