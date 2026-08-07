@@ -430,59 +430,81 @@ class CameraController {
             return sendKnownError(res, error);
         }
     }
+    async _doStartRecording(rtspUrl, label, format) {
+        const fs = require('fs');
+        const path = require('path');
+        const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+        const RECORDINGS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'recordings');
+        if (!fs.existsSync(RECORDINGS_DIR)) fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
+
+        const safeLabel = String(label).replace(/[^a-zA-Z0-9_-]/g, '_');
+        const d = new Date();
+        const dateStr = d.toISOString().split('T')[0].replace(/-/g, '');
+        const timeStr = [d.getHours(), d.getMinutes(), d.getSeconds()]
+            .map(n => n.toString().padStart(2, '0')).join('');
+        const filename = `${safeLabel}_${dateStr}_${timeStr}.mp4`;
+        const filepath = path.join(RECORDINGS_DIR, filename);
+
+        let args = ['-rtsp_transport', 'tcp', '-i', rtspUrl];
+        
+        const fmt = format && ['video+audio', 'video', 'audio'].includes(format) ? format : 'video+audio';
+        if (fmt === 'video+audio') {
+            args.push('-c:v', 'copy', '-c:a', 'libmp3lame', '-ar', '44100', '-ac', '2', '-b:a', '128k', '-movflags', '+faststart');
+        } else if (fmt === 'video') {
+            args.push('-c:v', 'copy', '-an', '-movflags', '+faststart');
+        } else { // audio
+            args.push('-vn', '-c:a', 'libmp3lame', '-ar', '44100', '-ac', '2', '-b:a', '128k', '-movflags', '+faststart');
+        }
+        args.push(filepath);
+
+        const proc = spawn(ffmpegPath, args, { stdio: ['pipe', 'ignore', 'ignore'] });
+
+        global.activeNodeRecordings = global.activeNodeRecordings || new Map();
+        global.activeNodeRecordings.set(filename, {
+            proc,
+            filename,
+            label: safeLabel,
+            started: Math.floor(Date.now() / 1000),
+            filepath
+        });
+
+        proc.on('exit', () => {
+            if (global.activeNodeRecordings) {
+                global.activeNodeRecordings.delete(filename);
+            }
+        });
+
+        return { recordingId: filename, filename };
+    }
+
     async startRecording(req, res) {
         const { rtspUrl, label, format } = req.body;
         if (!rtspUrl || !label)
             return res.status(400).json({ error: 'rtspUrl and label required' });
 
         try {
-            const fs = require('fs');
-            const path = require('path');
-            const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
-            const RECORDINGS_DIR = path.resolve(__dirname, '..', '..', '..', '..', 'ml-data', 'recordings');
-            if (!fs.existsSync(RECORDINGS_DIR)) fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
-
-            const safeLabel = String(label).replace(/[^a-zA-Z0-9_-]/g, '_');
-            const d = new Date();
-            const dateStr = d.toISOString().split('T')[0].replace(/-/g, '');
-            const timeStr = [d.getHours(), d.getMinutes(), d.getSeconds()]
-                .map(n => n.toString().padStart(2, '0')).join('');
-            const filename = `${safeLabel}_${dateStr}_${timeStr}.mp4`;
-            const filepath = path.join(RECORDINGS_DIR, filename);
-
-            let args = ['-rtsp_transport', 'tcp', '-i', rtspUrl];
-            
-            const fmt = format && ['video+audio', 'video', 'audio'].includes(format) ? format : 'video+audio';
-            if (fmt === 'video+audio') {
-                args.push('-c:v', 'copy', '-c:a', 'libmp3lame', '-ar', '44100', '-ac', '2', '-b:a', '128k', '-movflags', '+faststart');
-            } else if (fmt === 'video') {
-                args.push('-c:v', 'copy', '-an', '-movflags', '+faststart');
-            } else { // audio
-                args.push('-vn', '-c:a', 'libmp3lame', '-ar', '44100', '-ac', '2', '-b:a', '128k', '-movflags', '+faststart');
-            }
-            args.push(filepath);
-
-            const proc = spawn(ffmpegPath, args, { stdio: ['pipe', 'ignore', 'ignore'] });
-
-            global.activeNodeRecordings = global.activeNodeRecordings || new Map();
-            global.activeNodeRecordings.set(filename, {
-                proc,
-                filename,
-                label: safeLabel,
-                started: Math.floor(Date.now() / 1000),
-                filepath
-            });
-
-            proc.on('exit', () => {
-                if (global.activeNodeRecordings) {
-                    global.activeNodeRecordings.delete(filename);
-                }
-            });
-
-            return res.json({ recordingId: filename, filename });
+            const result = await this._doStartRecording(rtspUrl, label, format);
+            return res.json(result);
         } catch (error) {
             return sendKnownError(res, error);
         }
+    }
+
+    async _doStopRecording(recordingId) {
+        if (global.activeNodeRecordings && global.activeNodeRecordings.has(recordingId)) {
+            const rec = global.activeNodeRecordings.get(recordingId);
+            try {
+                if (rec.proc.stdin && rec.proc.stdin.writable) {
+                    rec.proc.stdin.write('q\n');
+                } else {
+                    rec.proc.kill();
+                }
+            } catch (e) {
+                console.error("[cameraController] Error stopping recording proc:", e);
+            }
+            global.activeNodeRecordings.delete(recordingId);
+        }
+        return { message: "Recording stopped", filename: recordingId };
     }
 
     async stopRecording(req, res) {
@@ -490,20 +512,8 @@ class CameraController {
         if (!recordingId) return res.status(400).json({ error: 'recordingId required' });
 
         try {
-            if (global.activeNodeRecordings && global.activeNodeRecordings.has(recordingId)) {
-                const rec = global.activeNodeRecordings.get(recordingId);
-                try {
-                    if (rec.proc.stdin && rec.proc.stdin.writable) {
-                        rec.proc.stdin.write('q\n');
-                    } else {
-                        rec.proc.kill();
-                    }
-                } catch (e) {
-                    console.error("[cameraController] Error stopping recording proc:", e);
-                }
-                global.activeNodeRecordings.delete(recordingId);
-            }
-            return res.json({ message: "Recording stopped", filename: recordingId });
+            const result = await this._doStopRecording(recordingId);
+            return res.json(result);
         } catch (error) {
             return sendKnownError(res, error);
         }
@@ -676,12 +686,8 @@ scheduleRecording(req, res) {
     // Auto-start timer
     const startTimer = setTimeout(async () => {
         try {
-            const axios = require('axios');
-            // Call the local Node.js server instead of ML_URL
-            const LOCAL_PORT = process.env.PORT || 8010;
-            const result = await axios.post(`http://localhost:${LOCAL_PORT}/attendancemodule/cameras/recording/start`,
-                { rtspUrl, label, format: entry.format }, { timeout: 10000 });
-            entry.activeRecordingId = result.data.recordingId;
+            const result = await this._doStartRecording(rtspUrl, label, entry.format);
+            entry.activeRecordingId = result.recordingId;
             entry.status = 'recording';
             console.log(`[RecordScheduler] Auto-started recording for ${label} period=${period} id=${entry.activeRecordingId}`);
         } catch (err) {
@@ -694,10 +700,7 @@ scheduleRecording(req, res) {
     const stopTimer = setTimeout(async () => {
         if (!entry.activeRecordingId) return;
         try {
-            const axios = require('axios');
-            const LOCAL_PORT = process.env.PORT || 8010;
-            await axios.post(`http://localhost:${LOCAL_PORT}/attendancemodule/cameras/recording/stop`,
-                { recordingId: entry.activeRecordingId }, { timeout: 15000 });
+            await this._doStopRecording(entry.activeRecordingId);
             entry.status = 'done';
             entry.activeRecordingId = null;
             console.log(`[RecordScheduler] Auto-stopped recording for ${label} period=${period}`);
