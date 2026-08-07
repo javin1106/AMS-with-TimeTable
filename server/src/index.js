@@ -79,6 +79,7 @@ app.use(
     // X-Short-Guest carries a live Short's guest identity for participants with
     // no account. Omitting it here makes the browser fail the preflight, so an
     // open Short would be unjoinable from any deployed origin.
+
     // X-Quiz-Session names the one browser allowed to drive a quiz sitting. Same
     // rule: leave it out and every deployed origin fails the preflight, which
     // fails the whole sitting rather than only the proctoring.
