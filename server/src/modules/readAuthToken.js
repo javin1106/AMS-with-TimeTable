@@ -18,6 +18,8 @@ function readAuthToken(req) {
   if (typeof header === "string" && header.startsWith("Bearer ")) {
     return header.slice(7).trim();
   }
+  if (req.query?.token) return req.query.token;
+  if (req.query?.jwt) return req.query.jwt;
   return null;
 }
 
