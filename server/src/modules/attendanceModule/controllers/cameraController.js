@@ -406,13 +406,24 @@ class CameraController {
                 },
             });
 
+            if (req.destroyed || res.destroyed || res.writableEnded) {
+                result.data.destroy();
+                return;
+            }
+
             res.setHeader('Content-Type', result.headers['content-type'] || 'multipart/x-mixed-replace; boundary=frame');
             res.setHeader('Cache-Control', 'no-cache');
             res.setHeader('X-Accel-Buffering', 'no');
+            
+            res.on('error', () => {
+                result.data.destroy();
+            });
+
             result.data.pipe(res);
             result.data.on('error', () => { if (!res.writableEnded) res.end(); });
             req.on('close', () => result.data.destroy());
         } catch (error) {
+            if (req.destroyed || res.destroyed) return;
             return sendKnownError(res, error);
         }
     }
@@ -442,18 +453,19 @@ class CameraController {
         const dateStr = d.toISOString().split('T')[0].replace(/-/g, '');
         const timeStr = [d.getHours(), d.getMinutes(), d.getSeconds()]
             .map(n => n.toString().padStart(2, '0')).join('');
-        const filename = `${safeLabel}_${dateStr}_${timeStr}.mp4`;
+        const fmt = format && ['video+audio', 'video', 'audio'].includes(format) ? format : 'video+audio';
+        const isAudioOnly = fmt === 'audio';
+        const filename = `${safeLabel}_${dateStr}_${timeStr}.${isAudioOnly ? 'mp3' : 'mp4'}`;
         const filepath = path.join(RECORDINGS_DIR, filename);
 
         let args = ['-rtsp_transport', 'tcp', '-i', rtspUrl];
         
-        const fmt = format && ['video+audio', 'video', 'audio'].includes(format) ? format : 'video+audio';
         if (fmt === 'video+audio') {
             args.push('-c:v', 'copy', '-c:a', 'libmp3lame', '-ar', '44100', '-ac', '2', '-b:a', '128k', '-movflags', '+faststart');
         } else if (fmt === 'video') {
             args.push('-c:v', 'copy', '-an', '-movflags', '+faststart');
         } else { // audio
-            args.push('-vn', '-c:a', 'libmp3lame', '-ar', '44100', '-ac', '2', '-b:a', '128k', '-movflags', '+faststart');
+            args.push('-vn', '-c:a', 'libmp3lame', '-ar', '44100', '-ac', '2', '-b:a', '128k');
         }
         args.push(filepath);
 
@@ -530,11 +542,11 @@ class CameraController {
             if (fs.existsSync(RECORDINGS_DIR)) {
                 const files = await fsPromises.readdir(RECORDINGS_DIR);
                 for (const file of files) {
-                    if (!file.endsWith('.mp4')) continue;
+                    if (!file.endsWith('.mp4') && !file.endsWith('.mp3')) continue;
                     try {
                         const stats = await fsPromises.stat(path.join(RECORDINGS_DIR, file));
                         let label = "Unknown";
-                        const parts = file.replace('.mp4', '').split('_');
+                        const parts = file.replace(/\.(mp4|mp3)$/, '').split('_');
                         if (parts.length >= 3) {
                             label = parts.slice(0, parts.length - 2).join('_');
                         } else if (parts.length > 0) {
@@ -553,7 +565,7 @@ class CameraController {
                             started: stats.birthtimeMs ? (stats.birthtimeMs / 1000) : (stats.mtimeMs / 1000),
                             status: status,
                             sizeBytes: stats.size,
-                            format: "video+audio"
+                            format: file.endsWith('.mp3') ? 'audio' : 'video+audio'
                         });
                     } catch(e) {}
                 }
@@ -590,6 +602,10 @@ class CameraController {
             return res.status(404).json({ error: 'File not found' });
         }
         
+        if (safe.endsWith('.mp3')) {
+            return res.download(filePath, safe);
+        }
+        
         const audioName = safe.replace('.mp4', '.mp3');
         const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
         
@@ -600,8 +616,13 @@ class CameraController {
             '-i', filePath,
             '-vn', '-c:a', 'libmp3lame', '-b:a', '128k', '-ar', '44100', '-ac', '2', '-f', 'mp3', 'pipe:1'
         ]);
+        
+        res.on('error', () => proc.kill());
+        req.on('close', () => proc.kill());
+        
         proc.stdout.pipe(res);
         proc.stderr.on('data', (d) => { console.log('FFmpeg Audio Error:', d.toString()); });
+        proc.stdout.on('error', () => { if (!res.writableEnded) res.end(); });
     }
 
     async deleteRecording(req, res) {
