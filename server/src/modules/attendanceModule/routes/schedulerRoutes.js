@@ -12,6 +12,8 @@ const { attendanceRoleAccess } = require('../middleware/attendanceAccess');
 router.post('/run-all', ...attendanceRoleAccess, ctrl.runAll);
 router.post('/run-room', ...attendanceRoleAccess, ctrl.runRoomOne);
 router.get('/preview', ctrl.preview);
+router.get('/ledger', ctrl.ledger);
+router.get('/ledger/dates', ctrl.ledgerDates);
 router.get('/live-status', ctrl.liveStatus);
 router.get('/working-day', ctrl.workingDayCheck);
 router.get('/non-working-days', ctrl.nonWorkingDaysList);

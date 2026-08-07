@@ -112,6 +112,7 @@ describe("GET /subjects", () => {
       department: "Computer Science Engineering",
       semester: "B.Tech-CSE-5",
       abbreviation: "OS(CSE)",
+      att_groups: ["1", "2", "3", "4", "5"],
     });
   });
 
@@ -175,14 +176,103 @@ describe("GET /subjects", () => {
     expect(row._id).toBeNull();
     expect(row.hasSubjectRecord).toBe(false);
     expect(row.subName).toBe("OS(CSE)");
-    // A complete ERP request, built entirely from timetable data.
+    // A complete ERP request, built entirely from timetable data — plus the
+    // attendance groups the roster fetch sweeps (the ERP serves one group per
+    // request, so all of them are asked for and the rolls unioned).
     expect(row.erpLookup).toEqual({
       degree: "B.Tech",
       department: "Computer Science Engineering",
       semester: "B.Tech-CSE-5",
       abbreviation: "OS(CSE)",
+      att_groups: ["1", "2", "3", "4", "5"],
     });
     expect(res.body.diagnostics.timetableCodes).toEqual(["CSE26"]);
+  });
+
+  // The page was showing the same subject several times over. Subject records
+  // are created once per timetable import and keep that import's code, so a
+  // subject taught across sessions has one document per session — and
+  // collectSubjectsForDept matches Subject.code against the department's
+  // timetables in every session, so all of them come back.
+  it("collapses Subject records that describe the same ERP class into one row", async () => {
+    const TimeTable = require("../../src/models/timetable");
+    const LockSem = require("../../src/models/locksem");
+    const Subject = require("../../src/models/subject");
+
+    const current = await TimeTable.create({
+      name: "CSE 2026", dept: "Computer_Science_Engineering",
+      session: "2026-27", code: "CSE26", currentSession: true,
+    });
+    await TimeTable.create({
+      name: "CSE 2025", dept: "Computer_Science_Engineering",
+      session: "2025-26", code: "CSE25", currentSession: false,
+    });
+    await LockSem.create({
+      day: "Monday", slot: "1", sem: "B.Tech-CSE-5", code: "CSE26", timetable: current._id,
+      slotData: [{ subject: "OS(CSE)", faculty: "Dr. A", room: "L1" }],
+    });
+
+    // Last session's copy and this session's copy of the same subject.
+    await Subject.create({
+      subjectFullName: "Operating Systems", type: "theory", subCode: "CSPC-501",
+      subName: "OS(CSE)", studentCount: 60, sem: "B.Tech-CSE-5", degree: "B.Tech",
+      dept: "Computer_Science_Engineering", code: "CSE25",
+    });
+    await Subject.create({
+      subjectFullName: "Operating Systems", type: "theory", subCode: "CSPC-501",
+      subName: "OS(CSE)", studentCount: 60, sem: "B.Tech-CSE-5", degree: "B.Tech",
+      dept: "Computer_Science_Engineering", code: "CSE26",
+    });
+
+    const res = await request(app)
+      .get(`${BASE}/subjects?dept=Computer_Science_Engineering&sem=B.Tech-CSE-5`)
+      .set("Cookie", authCookie());
+
+    expect(res.status).toBe(200);
+    expect(res.body.subjects).toHaveLength(1);
+    const [row] = res.body.subjects;
+    // The collapse is reported, not hidden — the page badges it.
+    expect(row.duplicateCount).toBe(1);
+    expect(res.body.diagnostics.duplicateRowsCollapsed).toBe(1);
+    // The survivor is the current session's copy — the collapsed one is last
+    // session's, which is what the duplicates entry names.
+    expect(row.duplicates[0].code).toBe("CSE25");
+  });
+
+  // The .pkl is named {sem}_{subject}.pkl, so these two fields ARE the
+  // embedding's identity. This page has to pick them the same way the Manual
+  // Generation tab does or it writes a second, orphaned file.
+  it("reports the Manual-Generation identity a subject would be generated under", async () => {
+    const TimeTable = require("../../src/models/timetable");
+    const LockSem = require("../../src/models/locksem");
+    const Subject = require("../../src/models/subject");
+
+    const tt = await TimeTable.create({
+      name: "CSE 2026", dept: "Computer_Science_Engineering",
+      session: "2026-27", code: "CSE26", currentSession: true,
+    });
+    await LockSem.create({
+      day: "Monday", slot: "1", sem: "B.Tech-CSE-5", code: "CSE26", timetable: tt._id,
+      slotData: [{ subject: "OS(CSE)", faculty: "Dr. A", room: "L1" }],
+    });
+    await Subject.create({
+      subjectFullName: "Operating Systems", type: "theory", subCode: "CSPC-501",
+      subName: "OS(CSE)", studentCount: 60, sem: "B.Tech-CSE-5", degree: "B.Tech",
+      dept: "Computer_Science_Engineering", code: "CSE26",
+    });
+
+    const res = await request(app)
+      .get(`${BASE}/subjects?dept=Computer_Science_Engineering&sem=B.Tech-CSE-5`)
+      .set("Cookie", authCookie());
+
+    const [row] = res.body.subjects;
+    // The ABBREVIATION and the locked timetable's semester — NOT the full
+    // subject name, which is what this page used to send.
+    expect(row.generation).toEqual({
+      sem: "B.Tech-CSE-5",
+      subject: "OS(CSE)",
+      subjectCode: "CSPC-501",
+    });
   });
 
   it("rejects a fetch that names neither a subject nor a timetable class", async () => {

@@ -337,6 +337,12 @@ function GenerateTab({ departments, deptLoading, deptError, prefill, onPrefillCo
     // third way to fill it, alongside typing and Upload .xlsx. The server also
     // persists what it fetched onto the Subject record, exactly as the ERP
     // Sync page's Fetch does, so both pages show the same roster.
+    //
+    // The ERP addresses one ATTENDANCE GROUP at a time, so the server asks for
+    // every group (1–5) and returns the combined, deduplicated roster — that
+    // union is what lands in the textarea. data.groups carries the per-group
+    // breakdown, reported in the toast so a subject whose students came from
+    // several groups is visibly that rather than a mystery total.
     const fetchRollsFromErp = async () => {
         if (!subjectId) { showToast('Select a subject first', 'error'); return; }
         setErpFetching(true);
@@ -357,18 +363,35 @@ function GenerateTab({ departments, deptLoading, deptError, prefill, onPrefillCo
 
             const fetched = data.rollNos || [];
             if (fetched.length === 0) {
-                showToast('ERP returned no roll numbers for this subject', 'error');
+                showToast('ERP returned no roll numbers for this subject '
+                    + '(no attendance group returned any students)', 'error');
                 return;
             }
+            const contributing = (data.groups || []).filter((g) => g.added > 0);
             // Same "you are about to replace something" courtesy the Generate
-            // button extends when an embedding already exists.
+            // button extends when an embedding already exists — plus, when the
+            // server diffed against a stored roster, exactly which roll
+            // numbers this fetch would add and drop. A count alone does not
+            // show a class that gained five students and lost five others.
+            const d = data.diff;
+            const diffText = d && (d.added?.length || d.removed?.length)
+                ? `\n\nAgainst the saved roster: ${d.added.length} added`
+                  + `${d.added.length ? ` (${d.added.slice(0, 10).join(', ')}${d.added.length > 10 ? '…' : ''})` : ''}`
+                  + `, ${d.removed.length} removed`
+                  + `${d.removed.length ? ` (${d.removed.slice(0, 10).join(', ')}${d.removed.length > 10 ? '…' : ''})` : ''}.`
+                : '';
             if (rollInput.trim() && !window.confirm(
                 `The roll number box already has ${rollNos.length} entr${rollNos.length === 1 ? 'y' : 'ies'}.\n\n`
                 + `Replace them with the ${fetched.length} roll numbers fetched from the ERP?`
+                + diffText
             )) return;
 
             setRollInput(fetched.join('\n'));
             showToast(`Loaded ${fetched.length} roll numbers from ERP`
+                + (contributing.length
+                    ? ` (attendance group${contributing.length > 1 ? 's' : ''} `
+                      + `${contributing.map((g) => `${g.attGroup}: ${g.added}`).join(', ')})`
+                    : '')
                 + (data.missedCount ? ` — ${data.missedCount} missing ground truth` : ''));
         } catch (err) {
             showToast('ERP fetch failed: ' + err.message, 'error');
@@ -833,8 +856,12 @@ function ViewTab({ departments, deptLoading, deptError, onUpdate, fixedDepartmen
                 };
             });
 
-            // Sort: incomplete (missing > 0) first, then by sem ascending
+            // Sort: no-roster first (these silently match the whole batch, so
+            // they outrank missing ground truth), then incomplete, then by sem.
             enriched.sort((a, b) => {
+                const aNoRoster = a.rosterCount == null || a.rosterCount === 0;
+                const bNoRoster = b.rosterCount == null || b.rosterCount === 0;
+                if (aNoRoster !== bNoRoster) return aNoRoster ? -1 : 1;
                 const aMissing = (a.missedRollNos || []).length > 0;
                 const bMissing = (b.missedRollNos || []).length > 0;
                 if (aMissing !== bMissing) return aMissing ? -1 : 1;
@@ -869,7 +896,10 @@ function ViewTab({ departments, deptLoading, deptError, onUpdate, fixedDepartmen
     };
 
     const handleDelete = async (file) => {
-        setDeletingFile(file.filename);
+        // Keyed on relPath throughout — filenames repeat across sessions and
+        // across ERP batch folders, so filtering by one would drop sibling rows.
+        const key = file.relPath || file.filename;
+        setDeletingFile(key);
         try {
             const res  = await fetch(`${EMB_BASE}/file`, {
                 method: 'DELETE',
@@ -878,8 +908,8 @@ function ViewTab({ departments, deptLoading, deptError, onUpdate, fixedDepartmen
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || 'Delete failed');
-            showToast(`Deleted embedding for ${file.subject || file.filename}`);
-            setPklFiles(prev => prev.filter(f => f.filename !== file.filename));
+            showToast(`Deleted embedding for ${file.displayName || file.filename}`);
+            setPklFiles(prev => prev.filter(f => (f.relPath || f.filename) !== key));
             setHistory(prev => prev.filter(h => h.embeddingFile !== file.filename));
         } catch (err) {
             showToast(err.message, 'error');
@@ -1051,13 +1081,29 @@ function ViewTab({ departments, deptLoading, deptError, onUpdate, fixedDepartmen
                                                     const missedSet    = new Set((file.missedRollNos || []).map(m => m.rollNo || m));
                                                     const presentRolls = (file.rollNos || []).filter(r => !missedSet.has(r));
                                                     const missedRolls  = (file.missedRollNos || []).map(m => m.rollNo || m);
-                                                    const isExpanded   = expandedRow === file.filename;
-                                                    const isDeleting   = deletingFile === file.filename;
+                                                    // relPath, not filename: every ERP batch store is called
+                                                    // "embeddings_db.pkl", and subject files are "{subjectId}.pkl"
+                                                    // in per-session folders, so filenames are not unique in this
+                                                    // list — sharing one collapsed two rows into one identity.
+                                                    const rowKey       = file.relPath || file.filename;
+                                                    const isExpanded   = expandedRow === rowKey;
+                                                    const isDeleting   = deletingFile === rowKey;
                                                     const health       = missedRolls.length === 0 ? 'good' : presentRolls.length === 0 ? 'bad' : 'partial';
-                                                    const healthColor  = health === 'good' ? theme.success : health === 'bad' ? theme.danger : theme.warning;
+                                                    // Subject.enrolledRollNos — NOT the .pkl's own roll list. This is
+                                                    // what attendance actually matches against; when it is empty the
+                                                    // ML service falls back to the whole batch. rosterCount is null
+                                                    // when no Subject row could be joined to this file at all, which
+                                                    // is a different (and equally broken) state from an empty roster.
+                                                    const rosterRolls   = file.rosterRollNos || [];
+                                                    const rosterUnknown = file.rosterCount == null;
+                                                    const rosterEmpty   = file.rosterCount === 0;
+                                                    const rosterBroken  = rosterUnknown || rosterEmpty;
+                                                    const healthColor  = rosterBroken ? theme.warning
+                                                        : health === 'good' ? theme.success
+                                                        : health === 'bad' ? theme.danger : theme.warning;
 
                                                     return (
-                                                        <div key={file.filename} style={{
+                                                        <div key={rowKey} style={{
                                                             borderRadius: 9,
                                                             border: `1px solid ${theme.border}`,
                                                             overflow: 'hidden',
@@ -1070,10 +1116,12 @@ function ViewTab({ departments, deptLoading, deptError, onUpdate, fixedDepartmen
                                                                 {/* Health bar */}
                                                                 <div style={{ width: 4, background: healthColor, flexShrink: 0 }} />
 
-                                                                {/* Subject - narrower fixed width */}
+                                                                {/* Name — displayName is the generation record's subject, falling
+                                                                    back to the linked Subject record for files whose record is
+                                                                    missing. Only a file with neither is truly unnamed. */}
                                                                 <div style={{ width: 160, padding: '12px 14px', display: 'flex', flexDirection: 'column', justifyContent: 'center', overflow: 'hidden' }}>
-                                                                    <div style={{ fontSize: '12px', fontWeight: 700, color: theme.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={file.subject}>
-                                                                        {file.subject || <span style={{ color: theme.textMuted, fontStyle: 'italic' }}>Unknown</span>}
+                                                                    <div style={{ fontSize: '12px', fontWeight: 700, color: theme.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={file.displayName || file.filename}>
+                                                                        {file.displayName || <span style={{ color: theme.textMuted, fontStyle: 'italic' }}>Unnamed</span>}
                                                                     </div>
                                                                 </div>
 
@@ -1094,7 +1142,23 @@ function ViewTab({ departments, deptLoading, deptError, onUpdate, fixedDepartmen
                                                                 {/* Stat: Total */}
                                                                 <div style={{ width: 68, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '8px 0', borderLeft: `1px solid ${theme.border}` }}>
                                                                     <div style={{ fontSize: '19px', fontWeight: 700, color: theme.text, lineHeight: 1 }}>{(file.rollNos || []).length}</div>
-                                                                    <div style={{ fontSize: '10px', color: theme.textMuted, marginTop: 2 }}>Total</div>
+                                                                    <div style={{ fontSize: '10px', color: theme.textMuted, marginTop: 2 }}>In File</div>
+                                                                </div>
+
+                                                                {/* Stat: Roster (Subject.enrolledRollNos) — the field attendance reads */}
+                                                                <div
+                                                                    title={
+                                                                        rosterUnknown
+                                                                            ? 'No Subject record is linked to this file, so no roster could be read'
+                                                                            : rosterEmpty
+                                                                                ? 'This subject has no enrolled roll numbers — attendance will match against the whole batch'
+                                                                                : `${file.rosterCount} roll number${file.rosterCount !== 1 ? 's' : ''} enrolled for this subject`
+                                                                    }
+                                                                    style={{ width: 76, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '8px 0', borderLeft: `1px solid ${theme.border}`, background: rosterBroken ? theme.warningDim : 'transparent' }}>
+                                                                    <div style={{ fontSize: '19px', fontWeight: 700, color: rosterBroken ? theme.warning : theme.text, lineHeight: 1 }}>
+                                                                        {rosterUnknown ? '—' : file.rosterCount}
+                                                                    </div>
+                                                                    <div style={{ fontSize: '10px', color: rosterBroken ? theme.warning : theme.textMuted, marginTop: 2, fontWeight: rosterBroken ? 700 : 400 }}>Roster</div>
                                                                 </div>
 
                                                                 {/* Last updated */}
@@ -1136,7 +1200,7 @@ function ViewTab({ departments, deptLoading, deptError, onUpdate, fixedDepartmen
 
                                                                     {/* View Roll Nos - colored */}
                                                                     <button
-                                                                        onClick={() => setExpandedRow(isExpanded ? null : file.filename)}
+                                                                        onClick={() => setExpandedRow(isExpanded ? null : rowKey)}
                                                                         disabled={isDeleting}
                                                                         style={{
                                                                             flex: 1, padding: '7px 8px', borderRadius: 6, whiteSpace: 'nowrap',
@@ -1172,6 +1236,43 @@ function ViewTab({ departments, deptLoading, deptError, onUpdate, fixedDepartmen
                                                                 </div>
                                                             </div>
 
+                                                            {/* Roster warning — the .pkl can look perfectly healthy while
+                                                                the subject has no roster, so say it on the row itself
+                                                                rather than only inside the expanded panel. */}
+                                                            {rosterBroken && (
+                                                                <div style={{
+                                                                    display: 'flex', alignItems: 'flex-start', gap: 8,
+                                                                    padding: '8px 14px',
+                                                                    borderTop: `1px solid ${theme.warning}33`,
+                                                                    background: theme.warningDim,
+                                                                    fontSize: '11px', color: theme.warning, lineHeight: 1.5,
+                                                                }}>
+                                                                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0, marginTop: 1 }}>
+                                                                        <path d="M8 1.5 15 14H1L8 1.5z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round"/>
+                                                                        <path d="M8 6v3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+                                                                        <circle cx="8" cy="11.6" r="0.8" fill="currentColor"/>
+                                                                    </svg>
+                                                                    <span>
+                                                                        {rosterUnknown ? (
+                                                                            <>
+                                                                                <strong>No subject record linked to this file.</strong>{' '}
+                                                                                Attendance reads its roster from the Subject record, so it cannot
+                                                                                find one for this .pkl. Re-generate from the subject dropdown so the
+                                                                                file is linked.
+                                                                            </>
+                                                                        ) : (
+                                                                            <>
+                                                                                <strong>No roster saved for this subject.</strong>{' '}
+                                                                                The {(file.rollNos || []).length} roll number{(file.rollNos || []).length !== 1 ? 's' : ''} above
+                                                                                {' '}are only what this file was built from — attendance will match against
+                                                                                every student in the batch, not this class. Upload a roster, sync from the
+                                                                                ERP, or re-generate with an explicit roll list.
+                                                                            </>
+                                                                        )}
+                                                                    </span>
+                                                                </div>
+                                                            )}
+
                                                             {/* Expanded roll chips */}
                                                             {isExpanded && (
                                                                 <div style={{ borderTop: `1px solid ${theme.border}`, background: theme.bg, padding: '14px 20px' }}>
@@ -1192,6 +1293,25 @@ function ViewTab({ departments, deptLoading, deptError, onUpdate, fixedDepartmen
                                                                                 ? <span style={{ fontSize: '12px', color: theme.success }}>All present</span>
                                                                                 : <RollChips rolls={missedRolls} color={theme.danger} bg={theme.dangerDim} border={`${theme.danger}44`} />}
                                                                         </div>
+                                                                    </div>
+
+                                                                    {/* Subject roster — shown separately from the file's own roll
+                                                                        list because the two answer different questions and are
+                                                                        allowed to differ (a student on the roster with no ground
+                                                                        truth photos is absent from the file by design). */}
+                                                                    <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${theme.border}` }}>
+                                                                        <div style={{ fontSize: '11px', fontWeight: 700, color: rosterBroken ? theme.warning : theme.accent, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                                                                            Subject Roster {rosterUnknown ? '(unknown)' : `(${rosterRolls.length})`}
+                                                                        </div>
+                                                                        <div style={{ fontSize: '11px', color: theme.textMuted, marginBottom: 8 }}>
+                                                                            What attendance actually matches against, from the subject record
+                                                                            {file.subjectName ? ` "${file.subjectName}"` : ''}.
+                                                                        </div>
+                                                                        {rosterUnknown
+                                                                            ? <span style={{ fontSize: '12px', color: theme.warning }}>No subject record is linked to this file.</span>
+                                                                            : rosterRolls.length === 0
+                                                                                ? <span style={{ fontSize: '12px', color: theme.warning }}>Empty — matching falls back to the whole batch.</span>
+                                                                                : <RollChips rolls={rosterRolls} color={theme.accent} bg={theme.accentDim} border={`${theme.accent}44`} />}
                                                                     </div>
                                                                 </div>
                                                             )}

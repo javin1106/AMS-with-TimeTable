@@ -28,6 +28,7 @@ const { resolveEmbeddingFile } = require('./embeddingPathResolver');
 // one-way dependency — see runRoomOne for why the manual trigger reuses the
 // cron's runSlotAttendance rather than this file's runRoom.
 const { runSlotAttendance, isRunInProgress } = require('./autoAttendanceScheduler');
+const SchedulerLedger = require('../../../models/attendanceModule/schedulerLedger');
 
 const ML_URL = process.env.ML_SERVICE_URL || 'http://localhost:8500';
 // Embedding .pkl paths come from embeddingPathResolver — see that file for why
@@ -661,10 +662,88 @@ exports.runRoomOne = async (req, res) => {
       date,
       periodInfo: { startMin, endMin },
       config,
+      // Recorded on its own ledger row (task 'manualRun') so pressing this
+      // button neither satisfies nor blocks the cron's claim for the period,
+      // and so `resume` stays off: an operator asking for a run wants a run,
+      // not "all checks already saved, nothing to do".
+      trigger: 'manual',
     });
     res.json(result);
   } catch (err) {
     console.error('[SchedulerController] runRoomOne error:', err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ── GET /attendancemodule/scheduler/ledger?date=YYYY-MM-DD ────────────────
+// What the scheduler actually did on a given day, per period per room: which
+// pre-flight checks passed, why a room was skipped, how many checks ran, what
+// was claimed and by whom, and what was interrupted.
+//
+// Before the ledger existed the only trace of any of this was a console.warn
+// on the server, so "why did P3 in LH-204 produce nothing?" was unanswerable
+// after the fact — the answer had scrolled away, or the process that logged it
+// had been restarted since.
+//
+// `full=1` includes each attempt's step trail. Without it the steps are
+// dropped and only counts/outcomes come back, which is all the summary table
+// needs — a day across every room is a lot of narration to send when nothing
+// is expanded yet.
+exports.ledger = async (req, res) => {
+  try {
+    const date = req.query.date || todayStr();
+    const full = req.query.full === '1' || req.query.full === 'true';
+
+    const query = SchedulerLedger.find({ date }).sort({ periodKey: 1, room: 1 });
+    if (!full) query.select('-attempts.steps');
+
+    const rows = await query.lean();
+
+    // Period windows come from the ledger row where present (captured at claim
+    // time) and from the live config otherwise, so a day rendered after the
+    // period times were edited still shows the times that were in force.
+    const config = await AcquisitionControl.findOne({ profileName: 'default' })
+      .select('periods')
+      .lean();
+    const periodTimes = {};
+    for (const p of config?.periods || []) {
+      periodTimes[p.periodKey] = { startTime: p.startTime, endTime: p.endTime };
+    }
+
+    res.json({
+      date,
+      // Lets the page distinguish "no rows because nothing was scheduled" from
+      // "no rows because the server was down all day" — if the day is over and
+      // periods were configured, empty means the latter.
+      periods: config?.periods || [],
+      serverNowMin: nowMinIST(),
+      rows: rows.map((r) => ({
+        ...r,
+        startTime: r.startTime || periodTimes[r.periodKey]?.startTime || null,
+        endTime: r.endTime || periodTimes[r.periodKey]?.endTime || null,
+      })),
+    });
+  } catch (err) {
+    console.error('[SchedulerController] ledger error:', err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ── GET /attendancemodule/scheduler/ledger/dates ──────────────────────────
+// Which days have any ledger history at all, newest first — the date picker
+// needs to know which dates are worth opening.
+exports.ledgerDates = async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 30, 120);
+    const dates = await SchedulerLedger.aggregate([
+      { $group: { _id: '$date', rows: { $sum: 1 } } },
+      { $sort: { _id: -1 } },
+      { $limit: limit },
+      { $project: { _id: 0, date: '$_id', rows: 1 } },
+    ]);
+    res.json({ dates });
+  } catch (err) {
+    console.error('[SchedulerController] ledgerDates error:', err);
     res.status(500).json({ error: err.message });
   }
 };

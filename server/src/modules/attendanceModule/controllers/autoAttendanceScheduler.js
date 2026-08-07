@@ -27,6 +27,13 @@ const {
   todayIST,
 } = require("./timeWindowGuard");
 const { resolveClassContext } = require("./classContextResolver");
+const {
+  claimSchedulerWork,
+  heartbeatSchedulerWork,
+  releaseSchedulerWork,
+  beginAttempt,
+  updateAttempt,
+} = require("./schedulerClaims");
 const { reportQuery, roomKey } = require("./reportKey");
 const { findSubjectForSlot } = require("./subjectLookup");
 const { resolveEmbeddingFile } = require("./embeddingPathResolver");
@@ -620,6 +627,80 @@ function listActiveRuns() {
   return Array.from(activeRuns.values());
 }
 
+// ── Shutdown ────────────────────────────────────────────────────────────────
+// A deploy or a `docker stop` kills in-flight runs exactly as a crash does:
+// the period's remaining checks vanish, and the end-of-period faculty mail —
+// which only fires after the last check — never goes. Most restarts are
+// planned, so most of that loss is avoidable: stop claiming new periods, let
+// the run loop finish the check it is on and break, and its normal end-of-run
+// path (mail, ledger release) still executes.
+let shuttingDown = false;
+let cronTask = null;
+
+function isShuttingDown() {
+  return shuttingDown;
+}
+
+async function shutdownAutoScheduler({ timeoutMs = 90000, pollMs = 500 } = {}) {
+  shuttingDown = true;
+  if (cronTask) {
+    cronTask.stop();
+    cronTask = null;
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (activeRuns.size > 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  const pending = listActiveRuns();
+  if (pending.length) {
+    console.warn(
+      `[AutoScheduler] Shutdown timed out with ${pending.length} run(s) still active: ` +
+        pending.map((r) => `${r.slot}/${r.room}`).join(", "),
+    );
+  } else {
+    console.log("[AutoScheduler] Shutdown complete — no runs in flight");
+  }
+  return { drained: pending.length === 0, pending };
+}
+
+// Sleep in short slices, beating the run's claim as it goes and bailing out
+// the moment a shutdown starts. Resolves true if the full duration elapsed,
+// false if it was cut short.
+const HEARTBEAT_SLICE_MS = 60 * 1000;
+
+async function sleepWithHeartbeat(totalMs, onProgress, checksSaved) {
+  const until = Date.now() + totalMs;
+  while (Date.now() < until) {
+    if (isShuttingDown()) return false;
+    const slice = Math.min(HEARTBEAT_SLICE_MS, until - Date.now());
+    await new Promise((r) => setTimeout(r, slice));
+    if (onProgress) {
+      await Promise.resolve(onProgress(checksSaved)).catch(() => {});
+    }
+  }
+  return !isShuttingDown();
+}
+
+// ── Where to resume a period ────────────────────────────────────────────────
+// saveCheckResult labels its rows `${slot}-check${n}`. The highest n already
+// saved is how far the previous holder of this period got, so a resumed run
+// continues from n+1 instead of relabelling rows that already exist.
+//
+// Falls back to the row count for anything unparseable — the live-session path
+// writes `check-N` into the same report — so a resume can only ever start
+// past the existing rows, never on top of them.
+function nextCheckIndex(slotResults = [], slot) {
+  const pattern = new RegExp(
+    `^${String(slot).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-check(\\d+)$`,
+  );
+  let maxIdx = 0;
+  for (const sr of slotResults) {
+    const m = pattern.exec(sr?.slot || "");
+    if (m) maxIdx = Math.max(maxIdx, Number(m[1]));
+  }
+  return Math.max(maxIdx, slotResults.length) + 1;
+}
+
 // ── Run all checks for one room+slot — steps 2–5 for that room ──────────────
 async function runSlotAttendance({
   room,
@@ -628,27 +709,79 @@ async function runSlotAttendance({
   date,
   periodInfo,
   config,
+  // Cron-only. A manual "run this room" is an explicit request for another
+  // run, so it must start at check 1 even for a period that already completed;
+  // only the scheduler's own retry of an interrupted period resumes.
+  resume = false,
+  // 'cron' | 'manual' | 'resume' — recorded on the ledger attempt so the
+  // Scheduler Ledger page can tell them apart.
+  trigger = "cron",
+  // Called after each saved check with the running total, so the caller can
+  // keep its ledger claim's heartbeat alive.
+  onProgress = null,
 }) {
-  // Every step records into `log` as well as the console. The cron ignores the
-  // return value, but the manual POST /scheduler/run-room trigger renders this
-  // trail — previously the only record of why a room did not run was a
-  // console.warn on the server, invisible to whoever pressed the button.
+  // Every step records into `log`, the console, AND the scheduler ledger. The
+  // cron ignores the return value and the manual POST /scheduler/run-room
+  // trigger renders it, but neither survived the request — so the only record
+  // of why a room did not run was a console.warn nobody reads. Persisting the
+  // trail is what makes a period's history answerable after the fact.
   const log = [];
+  // Row this attempt is recorded under. Manual runs get their own task so they
+  // can never satisfy or block the cron's claim for the same period.
+  const ledgerKey = {
+    date,
+    periodKey: slot,
+    room,
+    task: trigger === "manual" ? "manualRun" : "run",
+  };
+  let attemptIdx = null;
+  let stepsDirty = false;
   const push = (msg, warn = false) => {
-    log.push({ t: Date.now(), msg });
+    log.push({ t: Date.now(), msg, warn });
+    stepsDirty = true;
     (warn ? console.warn : console.log)(`[AutoScheduler] ${msg}`);
   };
+  // Flushed at each checkpoint rather than per line: the trail is written
+  // several times during a run so a crash still leaves the pre-flight
+  // reasoning on disk, but a run makes ~20 log lines and they do not each
+  // deserve a round trip.
+  const flushSteps = async (extra = {}) => {
+    if (attemptIdx == null) return;
+    if (!stepsDirty && Object.keys(extra).length === 0) return;
+    stepsDirty = false;
+    await updateAttempt(ledgerKey, attemptIdx, {
+      steps: log.map((l) => ({ at: new Date(l.t), msg: l.msg, warn: !!l.warn })),
+      ...extra,
+    });
+  };
+  // Close the attempt out. Every exit from here goes through it, so the page
+  // never shows a run stuck at "running" that actually returned.
+  const finish = async (status, reason = null, extra = {}) => {
+    await flushSteps({ status, reason, finishedAt: new Date(), ...extra });
+  };
 
-  push(`Starting slot=${slot} room=${room} date=${date}`);
+  attemptIdx = await beginAttempt(ledgerKey, {
+    trigger,
+    targetRuns: config.globalNumRuns ?? 1,
+  });
+
+  push(`Starting slot=${slot} room=${room} date=${date} (${trigger})`);
 
   // Step 3: slot data
   const ctx = await resolveContext(room, slot, date, config);
   if (!ctx) {
     const reason = `No timetable context for room=${room} slot=${slot}`;
     push(`${reason} — skipping`, true);
+    await finish("skipped", reason);
     return { room, status: "skipped", reason, log };
   }
   push(`Class resolved: ${ctx.batch} — ${ctx.subject || "(no subject)"}`);
+  await flushSteps({
+    batch: ctx.batch || null,
+    subject: ctx.subject || null,
+    faculty: ctx.faculty || null,
+    semester: ctx.sem != null ? String(ctx.sem) : null,
+  });
 
   // Step 4: embeddings for the subject
   const { subjectMeta, roster, pkl, pklMissingReason } = await resolveSubjectAndPkl(
@@ -681,6 +814,7 @@ async function runSlotAttendance({
   if (!cameras.cam1) {
     const reason = `No active camera for room=${room}`;
     push(`${reason} — skipping`, true);
+    await finish("skipped", reason);
     return { room, status: "skipped", reason, ctx, log };
   }
   push(`Camera resolved (${cameras.source}): cam2=${cameras.cam2 ? "yes" : "no"}`);
@@ -694,7 +828,10 @@ async function runSlotAttendance({
     1,
     periodInfo.endMin - Math.max(nowMin(), periodInfo.startMin),
   );
-  const checkIntervalMin =
+  // Reassigned once the resume point is known: a run picking up at check 3 of 4
+  // has one check left, not four, and pacing it over minutesLeft/numRuns would
+  // finish the period with time to spare for no reason.
+  let checkIntervalMin =
     numRuns > 1 ? Math.max(1, Math.floor(minutesLeft / numRuns)) : 0;
 
   const t = config.attendanceThresholds || {};
@@ -713,10 +850,8 @@ async function runSlotAttendance({
     middleRunIndex: Math.ceil(numRuns / 2),
   };
 
-  push(
-    `Plan: ${numRuns} run(s), ${runDurationSec}s each, ${checkIntervalMin}min apart, ` +
-      `present if seen in >=${minRunsPresent}/${numRuns}`,
-  );
+  // Plan is pushed after the resume point is resolved, below — it is not the
+  // same plan for a run that is picking up half a period in.
 
   // Registered before the remaining work, which includes a network call to the
   // ML service: that could hold the card on "Waiting" for the pipeline-config
@@ -740,6 +875,7 @@ async function runSlotAttendance({
         `No enrollment for ${ctx.batch}: ground truth has no cached embeddings, ` +
         `and ${pklMissingReason}`;
       push(`${reason} — skipping`, true);
+      await finish("skipped", reason);
       return { room, status: "skipped", reason, ctx, log };
     }
 
@@ -748,16 +884,60 @@ async function runSlotAttendance({
     // reading "finalized" — then push the rewritten result to the ERP. The
     // other two run paths refuse this; the cron never did, and the manual
     // run-room trigger made it reachable on demand.
+    //
+    // slotResults.slot is projected alongside status because the same document
+    // answers the resume question below; the labels are a few bytes each,
+    // whereas the students arrays are not.
     const existing = await AttendanceReport.findOne(
       reportQuery({ batch: ctx.batch, date, timeSlot: slot, room }),
     )
-      .select("status")
+      .select("status slotResults.slot")
       .lean();
     if (existing?.status === "finalized") {
       const reason = `Report for ${ctx.batch} ${slot} on ${date} is already finalized`;
       push(`${reason} — skipping`, true);
+      await finish("skipped", reason);
       return { room, status: "skipped", reason, ctx, log };
     }
+
+    // Where to pick up. A crash — or a deploy — part way through a period
+    // leaves a report holding some of its checks. Before this, the next tick
+    // saw "a report exists" and wrote the period off as already fired, so the
+    // remaining checks were lost for good; and re-running from check 1 would
+    // have duplicated the rows that survived.
+    let startIndex = 1;
+    if (resume && existing) {
+      startIndex = nextCheckIndex(existing.slotResults || [], slot);
+      if (startIndex > numRuns) {
+        const reason = `All ${numRuns} check(s) already saved for ${ctx.batch} ${slot}`;
+        push(`${reason} — nothing to resume`);
+        await finish("done", reason, { runsCompleted: 0, targetRuns: numRuns });
+        return {
+          room,
+          status: "done",
+          reason,
+          ctx,
+          log,
+          runsCompleted: 0,
+          targetRuns: numRuns,
+        };
+      }
+      if (startIndex > 1) {
+        push(
+          `Resuming after an interrupted run — ${startIndex - 1}/${numRuns} check(s) already saved`,
+          true,
+        );
+      }
+    }
+
+    const remainingRuns = numRuns - startIndex + 1;
+    checkIntervalMin =
+      remainingRuns > 1 ? Math.max(1, Math.floor(minutesLeft / remainingRuns)) : 0;
+    push(
+      `Plan: check ${startIndex}–${numRuns} (${remainingRuns} to run), ${runDurationSec}s each, ` +
+        `${checkIntervalMin}min apart, present if seen in >=${minRunsPresent}/${numRuns}`,
+    );
+    await flushSteps({ startedAtCheck: startIndex, targetRuns: numRuns });
 
     // Now that the run is going ahead, find out which optional dicts it needs
     // and rebuild only if the answer adds any. Re-read per check below, so a
@@ -784,10 +964,34 @@ async function runSlotAttendance({
     }
 
     const outcomes = [];
-    for (let i = 1; i <= numRuns; i++) {
-      if (i > 1) {
+    let stoppedEarly = null;
+    for (let i = startIndex; i <= numRuns; i++) {
+      // A planned restart should cost the period its remaining checks, not its
+      // faculty mail and not its ledger entry — break out and fall through to
+      // the normal end-of-run path below.
+      if (isShuttingDown()) {
+        stoppedEarly = `Server shutting down — stopped before check ${i}/${numRuns}`;
+        push(stoppedEarly, true);
+        break;
+      }
+      if (i > startIndex) {
         push(`Waiting ${checkIntervalMin} min before check ${i}/${numRuns} (room=${room})`);
-        await new Promise((r) => setTimeout(r, checkIntervalMin * 60 * 1000));
+        // Not a bare sleep. On a 2-run period the gap between checks is half
+        // the class — far longer than the claim's staleness window — so a run
+        // that only beat after each check would be declared abandoned and
+        // taken over by the next tick while it sat here waiting. Beating
+        // through the wait also lets a shutdown interrupt it in seconds
+        // instead of holding the drain open for the full interval.
+        const woke = await sleepWithHeartbeat(
+          checkIntervalMin * 60 * 1000,
+          onProgress,
+          startIndex - 1 + outcomes.filter((o) => o?.ok).length,
+        );
+        if (!woke) {
+          stoppedEarly = `Server shutting down — stopped during the wait before check ${i}/${numRuns}`;
+          push(stoppedEarly, true);
+          break;
+        }
         // Cheap GET; the dicts are only rebuilt if the answer actually changed.
         // Without this, a shadow toggled on mid-period would be missing its
         // enrolled dict on the middle check and silently not run.
@@ -815,12 +1019,26 @@ async function runSlotAttendance({
       } else {
         push(`Check ${i}/${numRuns} failed: ${outcome?.error || "unknown error"}`, true);
       }
+      // Two jobs: keep the claim's heartbeat fresh so no other tick decides
+      // this run is abandoned and takes the period over mid-flight, and put
+      // the trail on disk while there is still a process to write it.
+      const savedSoFar = startIndex - 1 + outcomes.filter((o) => o?.ok).length;
+      await flushSteps({ runsCompleted: savedSoFar });
+      if (onProgress) {
+        // Bookkeeping must never be able to fail an otherwise good run.
+        await Promise.resolve(onProgress(savedSoFar)).catch((err) =>
+          console.warn(`[AutoScheduler] progress callback failed: ${err.message}`),
+        );
+      }
     }
 
     const okRuns = outcomes.filter((o) => o?.ok);
     const lastOk = okRuns[okRuns.length - 1] || null;
+    const savedTotal = startIndex - 1 + okRuns.length;
     push(
-      `Slot ${slot} room ${room} — all ${numRuns} checks done (${okRuns.length} saved)`,
+      stoppedEarly
+        ? `Slot ${slot} room ${room} — stopped early with ${savedTotal}/${numRuns} check(s) saved`
+        : `Slot ${slot} room ${room} — all ${numRuns} checks done (${savedTotal} saved)`,
       okRuns.length === 0,
     );
 
@@ -843,20 +1061,53 @@ async function runSlotAttendance({
       push(`Faculty summary failed: ${err.message}`, true);
     }
 
+    // Judged on what THIS attempt achieved, not on savedTotal: a resumed run
+    // whose every check failed must not read "done" just because the checks
+    // from before the crash are still on the report.
+    const status = okRuns.length > 0 ? "done" : "error";
+    // The ledger keeps the finer distinction; callers only branch on done/error
+    // (see runRoomOne and the Attendance Live page), so don't hand them a third
+    // value they have never had to handle.
+    const ledgerStatus =
+      okRuns.length === 0 && outcomes.length === 0 && stoppedEarly
+        ? "interrupted"
+        : status;
+    const reason =
+      okRuns.length > 0
+        ? stoppedEarly
+        : stoppedEarly ||
+          outcomes.find((o) => o?.error)?.error ||
+          "All ML runs failed";
+    const summary = lastOk?.summary || null;
+    await finish(ledgerStatus, reason, {
+      runsCompleted: savedTotal,
+      targetRuns: numRuns,
+      reportId: lastOk?.reportId || null,
+      summary: {
+        present: summary?.present ?? null,
+        absent: summary?.absent ?? null,
+        review: summary?.review ?? null,
+        totalStudents: summary?.totalStudents ?? null,
+      },
+    });
+
     return {
       room,
-      status: okRuns.length > 0 ? "done" : "error",
-      reason:
-        okRuns.length > 0
-          ? null
-          : outcomes.find((o) => o?.error)?.error || "All ML runs failed",
+      status,
+      reason,
       ctx,
       reportId: lastOk?.reportId || null,
-      summary: lastOk?.summary || null,
-      runsCompleted: okRuns.length,
+      summary,
+      runsCompleted: savedTotal,
       targetRuns: numRuns,
       log,
     };
+  } catch (err) {
+    // Previously a throw here left the attempt reading "running" forever —
+    // the page would show a period apparently still in flight days later.
+    push(`Run threw: ${err.message}`, true);
+    await finish("error", err.message);
+    throw err;
   } finally {
     // finally, not a trailing delete: a throw anywhere in the loop would
     // otherwise strand the key and leave the card claiming a run forever.
@@ -929,8 +1180,11 @@ function startAutoScheduler() {
     "[AutoScheduler] Starting — running cron every minute (DB-driven: rooms, periods, embeddings)",
   );
 
-  let triggeredToday = new Set();
-  let triggeredForDate = null;
+  // Fast path only. The durable answer to "has this already fired?" is the
+  // SchedulerLedger; this set just stops a tick re-asking the database about
+  // work this process already knows it has claimed or seen finished.
+  let seenToday = new Set();
+  let seenForDate = null;
 
   // Every tick that decides "nothing to do" used to return silently, so a
   // scheduler that was switched off, holidayed out, or looking at periods that
@@ -949,7 +1203,11 @@ function startAutoScheduler() {
     if (msg) console.log(`[AutoScheduler] ${msg}`);
   };
 
-  cron.schedule("* * * * *", async () => {
+  cronTask = cron.schedule("* * * * *", async () => {
+    // A shutdown in progress must not start anything new, even if the cron
+    // task's own stop() has not taken effect yet.
+    if (shuttingDown) return;
+
     const date = todayStr();
     const curMin = nowMin();
 
@@ -957,36 +1215,14 @@ function startAutoScheduler() {
     // 00:00 — a single missed or delayed tick used to keep yesterday's keys
     // forever, which silently suppressed every period the next day.
     //
-    // Rebuilt from the database, not just emptied: this set is the only record
-    // that a period already fired, and it lives in memory, so a restart used to
-    // make every period of the day eligible again through the mid-period
-    // catch-up branch. Any period that already produced a saved run is treated
-    // as fired. A period that fired and saved nothing stays eligible, which is
-    // what you want — there is nothing to duplicate.
-    if (triggeredForDate !== date) {
-      triggeredToday = new Set();
-      triggeredForDate = date;
-      try {
-        const ran = await AttendanceReport.find({
-          date,
-          "slotResults.0": { $exists: true },
-        })
-          .select("timeSlot")
-          .lean();
-        for (const r of ran) {
-          if (r.timeSlot) triggeredToday.add(`${date}_${r.timeSlot}`);
-        }
-        if (triggeredToday.size) {
-          console.log(
-            `[AutoScheduler] Restored ${triggeredToday.size} already-run period(s) for ${date} from saved reports`,
-          );
-        }
-      } catch (err) {
-        // Fail open: an empty set only risks a duplicate run, never a missed one.
-        console.warn(
-          `[AutoScheduler] Could not restore fired periods for ${date}: ${err.message}`,
-        );
-      }
+    // No longer rebuilt from saved reports: the SchedulerLedger is now the
+    // record of what fired, so an empty set after a restart costs one extra
+    // claim attempt per room rather than losing the day's history. The old
+    // reconstruction could not tell a period that finished all its runs from
+    // one that crashed after run 1, and wrote both off.
+    if (seenForDate !== date) {
+      seenToday = new Set();
+      seenForDate = date;
     }
 
     let config;
@@ -1060,27 +1296,23 @@ function startAutoScheduler() {
         continue;
       }
 
-      // Fire once per period. Normally that's at the period's start minute,
-      // but we also catch up if we are already inside the period and have not
-      // run it yet — that's the case when acquisition is switched on (or the
-      // server restarts) part-way through a class. Requires enough of the
-      // period left to complete one run, so we never start a run that would
-      // outlast the class.
+      // "Due, and there is still time to finish a run."
+      //
+      // This used to be an equality window — `curMin <= startMin + 1` — with a
+      // separate catch-up branch behind it, and the whole thing guarded by an
+      // in-memory Set. A tick that did not land in that two-minute window (a
+      // restart, a long GC pause, a clock jump) lost the period's start, and
+      // once-per-period was enforced by memory that a restart erased. Now the
+      // window is the whole period and once-per-period is enforced by the
+      // ledger claim below, which survives both.
       const runDurationMin = Math.ceil((config.globalRunDurationSec ?? 120) / 60);
-      const insideWithTimeLeft =
-        curMin > startMin && curMin + runDurationMin <= endMin;
+      const numRuns = config.globalNumRuns ?? 1;
 
-      if ((curMin >= startMin && curMin <= startMin + 1) || insideWithTimeLeft) {
-        const key = `${date}_${period.periodKey}`;
-        if (triggeredToday.has(key)) {
-          notes.push(`${period.periodKey}: already fired today`);
-          continue;
-        }
-
-        // Step 1: rooms from DB — resolved *before* the period is marked as
-        // fired. With no enabled room there is nothing to run, and marking it
-        // would burn the period for the rest of the day, so a camera enabled
-        // mid-class could never be picked up.
+      if (curMin >= startMin && curMin + runDurationMin <= endMin) {
+        // Step 1: rooms from DB — resolved *before* anything is claimed. With
+        // no enabled room there is nothing to run, and claiming would burn the
+        // period for the rest of the day, so a camera enabled mid-class could
+        // never be picked up.
         const enabledRooms = await getEnabledRooms(config);
         if (enabledRooms.length === 0) {
           skip(
@@ -1090,32 +1322,76 @@ function startAutoScheduler() {
           continue;
         }
 
-        triggeredToday.add(key);
-        active();
-
-        if (curMin > startMin + 1) {
-          console.log(
-            `[AutoScheduler] Catching up ${period.periodKey} — ${endMin - curMin} min left in the period`,
-          );
-        }
-
         const overrideMap = {};
         (config.includedRooms || []).forEach((r) => {
           if (r.room) overrideMap[r.room.toUpperCase()] = r;
         });
 
+        // Claimed per room, not per period. A room whose run threw used to
+        // take the whole period down with it — the period was marked fired
+        // before any room had started, so nothing could be retried. Now each
+        // room stands or falls on its own, and a room interrupted mid-period
+        // is picked up again by a later tick and resumed.
+        const started = [];
+        const held = [];
+        for (const { room } of enabledRooms) {
+          const localKey = `${date}_${period.periodKey}_${room.toUpperCase()}`;
+          if (seenToday.has(localKey)) continue;
+
+          const claim = await claimSchedulerWork({
+            date,
+            periodKey: period.periodKey,
+            room,
+            targetRuns: numRuns,
+          }).catch((err) => {
+            console.error(`[AutoScheduler] Claim failed for ${room}: ${err.message}`);
+            return { claimed: false, reason: err.message };
+          });
+
+          if (!claim.claimed) {
+            // Finished work never comes back today, so stop asking about it.
+            // A claim held by a run that is still alive stays queryable — if
+            // that run dies, a later tick must be able to take it over.
+            if (claim.reason !== "held by a live run") seenToday.add(localKey);
+            held.push(`${room} (${claim.reason})`);
+            continue;
+          }
+
+          seenToday.add(localKey);
+          if (claim.resumed) {
+            console.log(
+              `[AutoScheduler] Taking over ${period.periodKey}/${room} from an abandoned run`,
+            );
+          }
+          started.push({ room, resumed: !!claim.resumed });
+        }
+
+        if (started.length === 0) {
+          notes.push(
+            `${period.periodKey}: nothing to claim` +
+              (held.length ? ` — ${held.join(", ")}` : ""),
+          );
+          continue;
+        }
+
+        active();
+        if (curMin > startMin + 1) {
+          console.log(
+            `[AutoScheduler] Catching up ${period.periodKey} — ${endMin - curMin} min left in the period`,
+          );
+        }
         console.log(
-          `[AutoScheduler] Period ${period.periodKey} starting — firing ${enabledRooms.length} room(s) in parallel`,
+          `[AutoScheduler] Period ${period.periodKey} starting — firing ${started.length} room(s) in parallel`,
         );
 
-        // Step 5: acquire — all enabled rooms in parallel.
+        // Step 5: acquire — all claimed rooms in parallel.
         // allSettled never rejects, so the old .catch() here could not fire and
         // every per-room throw was discarded unlogged — with the period already
         // marked as fired, that looked exactly like a scheduler that never ran.
-        // Report each rejection instead.
-        const roomsToRun = enabledRooms.map(({ room }) => room);
+        // Report each rejection instead, and release the claim either way so a
+        // room that died is not left looking busy until its heartbeat expires.
         Promise.allSettled(
-          roomsToRun.map((room) =>
+          started.map(({ room, resumed }) =>
             runSlotAttendance({
               room,
               roomOverride: overrideMap[room.toUpperCase()],
@@ -1123,15 +1399,47 @@ function startAutoScheduler() {
               date,
               periodInfo: { startMin, endMin },
               config,
+              resume: true,
+              trigger: resumed ? "resume" : "cron",
+              onProgress: (checksSaved) =>
+                heartbeatSchedulerWork({
+                  date,
+                  periodKey: period.periodKey,
+                  room,
+                  checksSaved,
+                }),
             }),
           ),
         ).then((results) => {
           results.forEach((r, i) => {
+            const { room } = started[i];
             if (r.status === "rejected") {
               console.error(
-                `[AutoScheduler] Room ${roomsToRun[i]} threw during ${period.periodKey}:`,
+                `[AutoScheduler] Room ${room} threw during ${period.periodKey}:`,
                 r.reason?.stack || r.reason?.message || r.reason,
               );
+            }
+            releaseSchedulerWork({
+              date,
+              periodKey: period.periodKey,
+              room,
+              // 'done' closes the period for the day. A run that threw, or one
+              // cut short by a shutdown, is left interrupted-but-reclaimable so
+              // a later tick inside the period can resume it.
+              state:
+                r.status === "rejected" || r.value?.status === "error"
+                  ? "claimed"
+                  : "done",
+              checksSaved: r.value?.runsCompleted,
+              error:
+                r.status === "rejected"
+                  ? r.reason?.message || String(r.reason)
+                  : r.value?.reason || null,
+            });
+            if (r.status === "rejected" || r.value?.status === "error") {
+              // Let this process re-ask the database next tick; the claim's
+              // heartbeat decides whether a retry is actually allowed.
+              seenToday.delete(`${date}_${period.periodKey}_${room.toUpperCase()}`);
             }
           });
         });
@@ -1145,11 +1453,49 @@ function startAutoScheduler() {
         notes.push(`${period.periodKey}: not started (starts ${period.startTime})`);
       }
 
-      // Missed-class check ~5 min after period ends
-      if (curMin === endMin + 5) {
-        checkMissedClasses(period.periodKey, date, config).catch((err) =>
-          console.error(`[ClassBunkCheck] Error: ${err.message}`),
-        );
+      // Missed-class check, from ~5 min after the period ends.
+      //
+      // This was `curMin === endMin + 5` — a single-minute target. Miss that
+      // one tick and the period never got its alert, which is exactly what
+      // happened whenever the server was down or busy at that moment. Since
+      // an outage is the case where "no report was saved" most needs saying,
+      // the check that reports it must not be the one thing an outage can
+      // silently skip. Now it is due from endMin+5 onward and the ledger, not
+      // the clock, is what keeps it to one send.
+      if (curMin >= endMin + 5) {
+        const bunkKey = `${date}_${period.periodKey}_bunk`;
+        if (!seenToday.has(bunkKey)) {
+          const claim = await claimSchedulerWork({
+            date,
+            periodKey: period.periodKey,
+            room: "*",
+            task: "bunkCheck",
+          }).catch((err) => {
+            console.error(`[ClassBunkCheck] Claim failed: ${err.message}`);
+            return { claimed: false, reason: err.message };
+          });
+
+          if (claim.claimed) {
+            seenToday.add(bunkKey);
+            checkMissedClasses(period.periodKey, date, config)
+              .catch((err) => {
+                console.error(`[ClassBunkCheck] Error: ${err.message}`);
+                return err.message;
+              })
+              .then((error) =>
+                releaseSchedulerWork({
+                  date,
+                  periodKey: period.periodKey,
+                  room: "*",
+                  task: "bunkCheck",
+                  state: "done",
+                  error: typeof error === "string" ? error : null,
+                }),
+              );
+          } else if (claim.reason !== "held by a live run") {
+            seenToday.add(bunkKey);
+          }
+        }
       }
     }
 
@@ -1164,6 +1510,8 @@ function startAutoScheduler() {
 
 module.exports = {
   startAutoScheduler,
+  shutdownAutoScheduler,
+  isShuttingDown,
   runSlotAttendance,
   checkMissedClasses,
   saveCheckResult,
@@ -1173,4 +1521,5 @@ module.exports = {
   timeStrToMin,
   safeSubject,
   currentSession,
+  nextCheckIndex,
 };

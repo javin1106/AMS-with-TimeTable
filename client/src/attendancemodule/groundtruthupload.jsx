@@ -705,16 +705,6 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
         }
     };
 
-    const handleReplaceFailedPhoto = (batch, failedRollNo) => {
-        const selected = parseBatch(batch);
-        setDegree(selected.degree);
-        setDepartment(selected.dept);
-        setBatchYear(selected.year);
-        setRollNo(failedRollNo);
-        setStudentPhoto(null);
-        setActiveTab('upload');
-    };
-
     // ── Render ────────────────────────────────────────────────────────
     return (
         <div style={{ ...styles.page, padding: 'clamp(16px,3vw,32px)' }}>
@@ -1099,35 +1089,35 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
                                                             <span className="status-pill no" style={{ marginBottom: 5 }}>
                                                                 {row.faceNotDetectedCount} student{row.faceNotDetectedCount !== 1 ? 's' : ''}
                                                             </span>
-                                                            <select
-                                                                value=""
-                                                                aria-label={`Face not detected roll numbers for ${row.batch}`}
-                                                                onChange={(event) => {
-                                                                    if (event.target.value) {
-                                                                        handleReplaceFailedPhoto(row.batch, event.target.value);
-                                                                    }
-                                                                }}
-                                                                style={{
-                                                                    display: 'block',
-                                                                    width: '100%',
-                                                                    padding: '5px 7px',
-                                                                    borderRadius: 6,
-                                                                    border: `1px solid ${T.danger}55`,
-                                                                    background: T.surface,
-                                                                    color: T.danger,
-                                                                    fontFamily: T.fontMono,
-                                                                    fontSize: 10,
-                                                                    fontWeight: 700,
-                                                                    cursor: 'pointer',
-                                                                }}
-                                                            >
-                                                                <option value="">Select roll no.</option>
-                                                                {failedRollNos.map((failedRollNo) => (
-                                                                    <option key={failedRollNo} value={failedRollNo}>
-                                                                        {failedRollNo}
-                                                                    </option>
-                                                                ))}
-                                                            </select>
+                                                            {failedRollNos.length > 0 && (
+                                                                <div
+                                                                    aria-label={`Face not detected roll numbers for ${row.batch}`}
+                                                                    style={{
+                                                                        display: 'flex',
+                                                                        flexWrap: 'wrap',
+                                                                        justifyContent: 'center',
+                                                                        gap: 4,
+                                                                        fontFamily: T.fontMono,
+                                                                        fontSize: 10,
+                                                                        fontWeight: 700,
+                                                                        color: T.danger,
+                                                                    }}
+                                                                >
+                                                                    {failedRollNos.map((failedRollNo) => (
+                                                                        <span
+                                                                            key={failedRollNo}
+                                                                            style={{
+                                                                                border: `1px solid ${T.danger}55`,
+                                                                                borderRadius: 6,
+                                                                                padding: '2px 6px',
+                                                                                background: T.surface,
+                                                                            }}
+                                                                        >
+                                                                            {failedRollNo}
+                                                                        </span>
+                                                                    ))}
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     ) : (
                                                         <span className="status-pill ok">0</span>
