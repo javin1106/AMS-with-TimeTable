@@ -406,13 +406,24 @@ class CameraController {
                 },
             });
 
+            if (req.destroyed || res.destroyed || res.writableEnded) {
+                result.data.destroy();
+                return;
+            }
+
             res.setHeader('Content-Type', result.headers['content-type'] || 'multipart/x-mixed-replace; boundary=frame');
             res.setHeader('Cache-Control', 'no-cache');
             res.setHeader('X-Accel-Buffering', 'no');
+            
+            res.on('error', () => {
+                result.data.destroy();
+            });
+
             result.data.pipe(res);
             result.data.on('error', () => { if (!res.writableEnded) res.end(); });
             req.on('close', () => result.data.destroy());
         } catch (error) {
+            if (req.destroyed || res.destroyed) return;
             return sendKnownError(res, error);
         }
     }
@@ -605,8 +616,13 @@ class CameraController {
             '-i', filePath,
             '-vn', '-c:a', 'libmp3lame', '-b:a', '128k', '-ar', '44100', '-ac', '2', '-f', 'mp3', 'pipe:1'
         ]);
+        
+        res.on('error', () => proc.kill());
+        req.on('close', () => proc.kill());
+        
         proc.stdout.pipe(res);
         proc.stderr.on('data', (d) => { console.log('FFmpeg Audio Error:', d.toString()); });
+        proc.stdout.on('error', () => { if (!res.writableEnded) res.end(); });
     }
 
     async deleteRecording(req, res) {
