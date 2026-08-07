@@ -23,6 +23,7 @@ import {
 import lmApi from '../api/lmApi';
 import { EmptyState, ErrorState, Loading, SectionCard } from '../components/common';
 import { formatDateTime, relativeTime } from '../format';
+import { githubIssueUrl } from '../githubIssue';
 
 /**
  * "Something is broken" — or "this would be better if".
@@ -60,7 +61,7 @@ const KIND_COPY = {
   },
 };
 
-function ReportForm({ classes, pointsPerReport, onSent }) {
+function ReportForm({ classes, pointsPerReport, onSent, canUseGithub }) {
   const [kind, setKind] = useState('bug');
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -127,6 +128,27 @@ function ReportForm({ classes, pointsPerReport, onSent }) {
         <Button colorScheme="purple" onClick={submit} isLoading={saving} isDisabled={!title.trim()}>
           Send
         </Button>
+        {/* Only for people who can actually reach the tracker — the repository
+            is private, so a student following this link lands on a 404 that
+            reads as the app being broken. Sending here is the route for
+            everyone else, and it is the one that pays points. */}
+        {canUseGithub && (
+          <Button
+            as="a"
+            variant="outline"
+            href={githubIssueUrl({
+              kind,
+              title,
+              description,
+              pageUrl: window.location.href,
+              className: classes.find((klass) => klass._id === classId)?.name || '',
+            })}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Raise on GitHub ↗
+          </Button>
+        )}
         <Text fontSize="xs" color="gray.500">
           {pointsPerReport} points once an administrator approves it — and a badge if it was in one
           of your classes.
@@ -265,6 +287,26 @@ function AdminQueue({ reports, counts, onReviewed }) {
               <Button size="xs" variant="ghost" colorScheme="red" onClick={() => decide(report, 'rejected')}>
                 Reject
               </Button>
+              {/* Escalation, not a decision: it opens a prefilled issue and
+                  leaves the report's own status alone, so approving it (and
+                  paying the reporter) is still a separate, deliberate click. */}
+              <Button
+                as="a"
+                size="xs"
+                variant="outline"
+                colorScheme="purple"
+                href={githubIssueUrl({
+                  kind: report.kind,
+                  title: report.title,
+                  description: report.description,
+                  pageUrl: report.pageUrl,
+                  className: report.className,
+                })}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Raise on GitHub ↗
+              </Button>
             </HStack>
           </Box>
         ))
@@ -312,7 +354,15 @@ export default function BugReports() {
       title="Bug / Suggestion"
       subtitle="Found something broken, or thought of something better? Tell us and we will look."
     >
-      <ReportForm classes={classes} pointsPerReport={mine.pointsPerReport} onSent={load} />
+      <ReportForm
+        classes={classes}
+        pointsPerReport={mine.pointsPerReport}
+        onSent={load}
+        // The same signal the page already uses to decide whether to show the
+        // queue: a non-null admin payload means the API let this account read
+        // it, which is the closest thing here to "works on the repository".
+        canUseGithub={Boolean(queue)}
+      />
     </SectionCard>
   );
 
