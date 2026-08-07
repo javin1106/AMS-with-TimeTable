@@ -222,7 +222,14 @@ function RoomCard({ r, onClickReport, pastPeriod }) {
   const isSkipped   = r.status === 'skipped';
   const isPending   = r.status === 'pending';
   const isFinalized = r.status === 'finalized';
-  const isDone      = !isFinalized && r.runsCompleted >= r.targetRuns && r.targetRuns > 0;
+  // `inProgress` comes from the scheduler's in-flight registry, not from the
+  // report — the report row does not exist until the first check saves, so for
+  // the whole of that first capture there is nothing in the database to read.
+  // With globalNumRuns at 1 that is the entire run, which is why the card used
+  // to go straight from "Waiting" to "Completed" without ever showing that a
+  // run was happening.
+  const isInProgress = !!r.inProgress;
+  const isDone      = !isFinalized && !isInProgress && r.runsCompleted >= r.targetRuns && r.targetRuns > 0;
   // "Running" only makes sense for an ongoing period; past periods with partial runs = "Partial"
   const isRunning   = !pastPeriod && !isSkipped && !isPending && !isDone && !isFinalized && r.runsCompleted > 0;
   const isPartial   = pastPeriod  && !isSkipped && !isPending && !isDone && !isFinalized && r.runsCompleted > 0;
@@ -234,6 +241,7 @@ function RoomCard({ r, onClickReport, pastPeriod }) {
 
   const accentColor =
     isFinalized              ? '#10b981' :
+    isInProgress             ? '#6366f1' :
     isDone                   ? '#10b981' :
     isRunning                ? '#6366f1' :
     isPartial                ? theme.border :
@@ -244,6 +252,7 @@ function RoomCard({ r, onClickReport, pastPeriod }) {
 
   const badgeLabel  =
     isFinalized ? 'Finalized' :
+    isInProgress? 'In Progress' :
     isDone      ? 'Completed' :
     isRunning   ? 'Running'   :
     isPartial   ? 'Partial'   :
@@ -253,6 +262,7 @@ function RoomCard({ r, onClickReport, pastPeriod }) {
 
   const badgeColor  =
     isFinalized ? '#10b981' :
+    isInProgress? '#6366f1' :
     isDone      ? '#10b981' :
     isRunning   ? '#6366f1' :
     isPartial   ? theme.textMuted :
@@ -329,7 +339,21 @@ function RoomCard({ r, onClickReport, pastPeriod }) {
             </div>
           )}
 
-          {isPending ? (
+          {/* in-progress is tested before pending: during the first capture no
+              report row exists yet, so status is still 'pending' and testing it
+              first would show "Waiting" for the very run we are trying to
+              indicate. */}
+          {isInProgress ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11, color: '#6366f1', fontWeight: 700 }}>
+                <Dot color="#6366f1" blink />
+                {r.runsCompleted > 0
+                  ? `Run in progress — ${r.runsCompleted} of ${r.targetRuns} check${r.targetRuns === 1 ? '' : 's'} saved`
+                  : 'Run in progress — capturing the first check…'}
+              </div>
+              <RunProgress completed={r.runsCompleted} target={r.targetRuns} />
+            </div>
+          ) : isPending ? (
             <div style={{ fontSize: 11, color: theme.textMuted, fontStyle: 'italic' }}>
               {noRun ? 'No attendance recorded for this period.' : 'Waiting for attendance run to start…'}
             </div>
@@ -407,12 +431,17 @@ export default function LiveReportPage() {
   const slot       = data?.slot;
   const pastPeriod = isPeriodPast(selSlot || slot, selDate, periods);
 
+  // Same rule the cards use: a room mid-capture is never "done", however many
+  // checks have already landed.
+  const isLiveRoom = r => !!r.inProgress;
+
   const partialFilter = r =>
-    !['skipped','pending','finalized'].includes(r.status) && r.runsCompleted > 0 && r.runsCompleted < r.targetRuns;
+    !['skipped','pending','finalized'].includes(r.status) && !isLiveRoom(r) &&
+    r.runsCompleted > 0 && r.runsCompleted < r.targetRuns;
 
   const stats = {
-    done:    rooms.filter(r => r.status === 'finalized' || (r.runsCompleted >= r.targetRuns && r.targetRuns > 0)).length,
-    running: !pastPeriod ? rooms.filter(partialFilter).length : 0,
+    done:    rooms.filter(r => r.status === 'finalized' || (!isLiveRoom(r) && r.runsCompleted >= r.targetRuns && r.targetRuns > 0)).length,
+    running: !pastPeriod ? rooms.filter(r => isLiveRoom(r) || partialFilter(r)).length : 0,
     partial: pastPeriod  ? rooms.filter(partialFilter).length : 0,
     noRun:   pastPeriod  ? rooms.filter(r => r.status === 'pending' && !!r.ctx).length : 0,
     waiting: !pastPeriod ? rooms.filter(r => r.status === 'pending' && !!r.ctx).length : 0,

@@ -11,7 +11,7 @@ const {
     batchBelongsToDepartment,
     batchBelongsToAnyDepartment,
 } = require('../middleware/attendanceAccess');
-const { reconcileAfterPhotoDelete } = require('./groundTruthPhotoOps');
+const { reconcileAfterPhotoDelete, reconcileAfterFolderAssign } = require('./groundTruthPhotoOps');
 
 const ML_SERVICE_URL   = process.env.ML_SERVICE_URL || 'http://localhost:8500';
 const GROUND_TRUTH_DIR = path.join(__dirname, '..', '..', '..', '..', 'ml-data', 'ground_truth');
@@ -876,51 +876,17 @@ class RollAssignController {
                 }
             }
 
-            // ── Update _info.json in the final folder ─────────────────
-            const EMBED_N    = 5;
+            // ── Update _info.json in the final folder + resync vectors ─
             const folderPath = path.join(GROUND_TRUTH_DIR, batch, finalRollNo);
-            const infoPath   = path.join(folderPath, '_info.json');
 
-            if (fs.existsSync(folderPath)) {
-                const dirFiles = await fsPromises.readdir(folderPath);
-                const allFiles = dirFiles.filter(f => /\.(jpg|jpeg|png|webp)$/i.test(f));
-
-                let info = { embedding_files: [], backup_files: [], approved_files: [], scores: {} };
-                if (fs.existsSync(infoPath)) {
-                    try { info = JSON.parse(await fsPromises.readFile(infoPath, 'utf8')); } catch (_) {}
-                }
-
-                if (mergedIntoExisting) {
-                    const approvedSet = new Set(info.approved_files || []);
-                    imageFiles.forEach(f => approvedSet.add(f));
-                    info.approved_files = [...approvedSet];
-
-                    const existingEmbeds  = (info.embedding_files || []).filter(f => allFiles.includes(f));
-                    const existingBackups = (info.backup_files    || []).filter(f => allFiles.includes(f));
-                    const embedSlots      = EMBED_N - existingEmbeds.length;
-
-                    if (embedSlots > 0) {
-                        const addToEmbed  = imageFiles.slice(0, embedSlots);
-                        const addToBackup = imageFiles.slice(embedSlots);
-                        info.embedding_files = [...existingEmbeds, ...addToEmbed];
-                        info.backup_files    = [...existingBackups, ...addToBackup];
-                    } else {
-                        info.backup_files = [...existingBackups, ...imageFiles];
-                    }
-                } else {
-                    if (!info.embedding_files?.length) {
-                        const dbEmbeds = (record.embeddingFiles || []).filter(f => allFiles.includes(f));
-                        info.embedding_files = dbEmbeds.length > 0 ? dbEmbeds
-                            : allFiles.length <= EMBED_N ? [...allFiles] : allFiles.slice(0, EMBED_N);
-                        info.backup_files = allFiles.filter(f => !info.embedding_files.includes(f));
-                    }
-                    if (!info.approved_files?.length) {
-                        info.approved_files = [...allFiles];
-                    }
-                }
-
-                await fsPromises.writeFile(infoPath, JSON.stringify(info, null, 2));
-            }
+            await reconcileAfterFolderAssign({
+                batch,
+                rollNo:           finalRollNo,
+                folderPath,
+                newFiles:         imageFiles,
+                merged:           mergedIntoExisting,
+                dbEmbeddingFiles: record.embeddingFiles || [],
+            });
             // ── Update DB record by ObjectId ──────────────────────────
             if (mergedIntoExisting) {
                 const allFinalFiles = fs.existsSync(folderPath) ? (await fsPromises.readdir(folderPath)).filter(f => /\.(jpg|jpeg|png|webp)$/i.test(f)).sort() : [];

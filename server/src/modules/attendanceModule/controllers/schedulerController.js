@@ -20,8 +20,14 @@ const {
   buildEnrolledEmbeddingsAdafaceTopK,
 } = require('./embeddingSyncHelper');
 const { checkAttendanceRunAllowed, nowMinIST, todayIST } = require('./timeWindowGuard');
-const { resolveClassContext, escapeRegex } = require('./classContextResolver');
+const { resolveClassContext } = require('./classContextResolver');
+const { findSubjectForSlot } = require('./subjectLookup');
+const { reportQuery, roomKey } = require('./reportKey');
 const { resolveEmbeddingFile } = require('./embeddingPathResolver');
+// autoAttendanceScheduler does not require this file back, so this stays a
+// one-way dependency — see runRoomOne for why the manual trigger reuses the
+// cron's runSlotAttendance rather than this file's runRoom.
+const { runSlotAttendance, isRunInProgress } = require('./autoAttendanceScheduler');
 
 const ML_URL = process.env.ML_SERVICE_URL || 'http://localhost:8500';
 // Embedding .pkl paths come from embeddingPathResolver — see that file for why
@@ -138,21 +144,19 @@ async function getEnabledRooms(config) {
 // authoritative pointer. We read it directly rather than fuzzy-guessing a
 // filename, and never touch ground_truth/ or roll numbers from here at all.
 async function resolveSubjectAndPkl(subjectText, sem, dept, session) {
-  // See autoAttendanceScheduler.resolveSubjectAndPkl — the subject name must be
-  // escaped before it becomes a $regex, or names like "FPGA(DE/GE)" never match
-  // themselves.
-  const subj = await Subject.findOne({
-    subjectFullName: { $regex: escapeRegex((subjectText || '').trim()), $options: 'i' },
+  // Shared with autoAttendanceScheduler — see subjectLookup.js. This copy also
+  // compared `sem` with plain equality while the scheduler used a
+  // case-insensitive regex, so the two could disagree about the same slot.
+  const { subject: subj, reason: lookupReason } = await findSubjectForSlot({
+    subject: subjectText,
     sem,
-  }).lean();
+  });
 
   if (!subj) {
     return {
       subjectMeta: null,
       pkl: null,
-      pklMissingReason:
-        `No Subject matches subjectFullName "${subjectText}" with sem "${sem}" — ` +
-        `check the Subject exists and its sem matches the timetable exactly`,
+      pklMissingReason: lookupReason,
     };
   }
 
@@ -175,6 +179,7 @@ async function resolveSubjectAndPkl(subjectText, sem, dept, session) {
     session: session || currentSession(),
     dept: dept || subj.dept,
     filename: subj.embeddingFile,
+    relPath: subj.embeddingRelPath,
   });
   if (!fullPath) {
     return { subjectMeta, pkl: null, pklMissingReason: reason };
@@ -200,7 +205,7 @@ async function resolveSubjectAndPkl(subjectText, sem, dept, session) {
 //
 // Read-only and deliberately cheap: the PKL is stat'd, never read into memory
 // (the live page polls every 15s), and the ML service is not contacted.
-async function buildPreflight({ room, slot, date, config, cameraInfo, runsCompleted, resolved }) {
+async function buildPreflight({ room, slot, date, config, cameraInfo, runsCompleted, resolved, inProgress }) {
   const checks = [];
   const add = (key, label, ok, detail) => checks.push({ key, label, ok, detail });
 
@@ -224,27 +229,35 @@ async function buildPreflight({ room, slot, date, config, cameraInfo, runsComple
   // 2. Subject — matched on name AND semester. A sem mismatch between the
   //    timetable row and the Subject document is the most common silent skip,
   //    so both values are named when it fails.
-  const subjectPattern = escapeRegex((ctx.subject || '').trim());
-  const subj = await Subject.findOne({
-    subjectFullName: { $regex: subjectPattern, $options: 'i' },
+  // Uses the shared lookup, so this checklist reports on exactly the match the
+  // run will make. It previously ran its own subjectFullName regex, which could
+  // pass here and then fail (or match a different subject) during the run.
+  const { subject: subj, matchedBy } = await findSubjectForSlot({
+    subject: ctx.subject,
     sem: ctx.sem,
-  }).lean();
+  });
 
   if (!subj) {
-    const byNameOnly = await Subject.findOne({
-      subjectFullName: { $regex: subjectPattern, $options: 'i' },
-    }).lean();
+    // Retry without the semester to tell "wrong sem" apart from "no such
+    // subject" — the two need different fixes.
+    const { subject: byNameOnly } = await findSubjectForSlot({ subject: ctx.subject });
     add(
       'subject',
       'Subject matched',
       false,
       byNameOnly
-        ? `Semester mismatch — timetable says sem "${ctx.sem}", Subject "${byNameOnly.subjectFullName}" is sem "${byNameOnly.sem}"`
-        : `No Subject whose subjectFullName matches "${ctx.subject}"`,
+        ? `Semester mismatch — timetable says sem "${ctx.sem}", Subject "${byNameOnly.subName || byNameOnly.subjectFullName}" is sem "${byNameOnly.sem}"`
+        : `No Subject whose subName (or subjectFullName) is exactly "${ctx.subject}" — ` +
+          `the timetable stores the subject abbreviation`,
     );
     return { ctx, checks };
   }
-  add('subject', 'Subject matched', true, `${subj.subjectFullName}${subj.subCode ? ` (${subj.subCode})` : ''}`);
+  add(
+    'subject',
+    'Subject matched',
+    true,
+    `${subj.subName || subj.subjectFullName}${subj.subCode ? ` (${subj.subCode})` : ''} — matched on ${matchedBy}`,
+  );
   add('sem', 'Semester matched', true, `sem ${subj.sem} — matches the timetable`);
 
   // 3. Roster — empty is not fatal, but it silently widens the run to the
@@ -269,6 +282,7 @@ async function buildPreflight({ room, slot, date, config, cameraInfo, runsComple
     session: ctx.session || currentSession(),
     dept: ctx.dept || subj.dept,
     filename: subj.embeddingFile,
+    relPath: subj.embeddingRelPath,
   });
   let stat = null;
   if (pklPath) {
@@ -298,10 +312,14 @@ async function buildPreflight({ room, slot, date, config, cameraInfo, runsComple
       (cameraInfo?.status === 'offline' ? ' — but the camera is offline' : '') +
       (cams.cam2 ? ' · cam2 present' : ''));
 
-  // 6. Outcome.
-  add('running', 'Attendance running', runsCompleted > 0,
-    runsCompleted > 0 ? `${runsCompleted} run(s) recorded`
-                      : 'No run recorded yet for this period');
+  // 6. Outcome. A run mid-capture passes this even with nothing recorded yet —
+  //    it used to report only "has a run finished", so the whole of the first
+  //    capture read as a failing check.
+  add('running', 'Attendance running', inProgress || runsCompleted > 0,
+    inProgress
+      ? `Run in progress${runsCompleted > 0 ? ` — ${runsCompleted} check(s) saved so far` : ' — capturing the first check'}`
+      : runsCompleted > 0 ? `${runsCompleted} run(s) recorded`
+                          : 'No run recorded yet for this period');
 
   return { ctx, checks };
 }
@@ -474,7 +492,9 @@ async function runRoom({ room, roomOverride, slot, date, config }) {
     primaryFallback: runPrimaryFallback,
   };
 
-  let report = await AttendanceReport.findOne({ batch: ctx.batch, date, timeSlot: slot });
+  let report = await AttendanceReport.findOne(
+    reportQuery({ batch: ctx.batch, date, timeSlot: slot, room }),
+  );
   if (report) {
     if (report.status === 'finalized') {
       return { room, status: 'error', reason: 'Report already finalized', ctx, log };
@@ -487,7 +507,8 @@ async function runRoom({ room, roomOverride, slot, date, config }) {
       semester: ctx.sem,
       subject: ctx.subject,
       faculty: ctx.faculty,
-      room,
+      // Part of the report key — see reportKey.js.
+      room: roomKey(room),
       date,
       timeSlot: slot,
       locksemId: ctx.locksemId,
@@ -567,6 +588,83 @@ exports.runAll = async (req, res) => {
     res.json({ slot, date, summary, rooms });
   } catch (err) {
     console.error('[SchedulerController] runAll error:', err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ── POST /attendancemodule/scheduler/run-room ─────────────────────────────
+// Body: { room, slot, date?, rtspUrl1?, rtspUrl2? }
+//
+// Single-room manual trigger running autoAttendanceScheduler's own
+// runSlotAttendance() — the same code the cron executes, not a copy.
+//
+// Deliberately NOT this file's runRoom(): that one omits autoThreshold and
+// reviewThreshold from the ML payload (so the service falls back to 0.40/0.20
+// instead of the configured auto_present_threshold/review_threshold), omits
+// enrolledRollNos (so matching covers the whole batch rather than the subject
+// roster), writes a single merged slotResult at the end instead of a report
+// per run, and skips the ERP push, unknown-face capture, daily-data write,
+// duplicate alerts and faculty summary entirely.
+//
+// Holds the request open for the whole run (numRuns × runDurationSec plus the
+// waits between them) and answers once. Each check is saved to the report as
+// it completes, so the report is queryable while this is still in flight.
+exports.runRoomOne = async (req, res) => {
+  try {
+    const { room, slot, rtspUrl1, rtspUrl2 } = req.body;
+    const date = req.body.date || todayStr();
+    if (!room) return res.status(400).json({ error: 'room is required' });
+    if (!slot) return res.status(400).json({ error: 'slot is required' });
+
+    // Optional 08:30–17:30 IST restriction (admin toggle, default off).
+    const runGate = await checkAttendanceRunAllowed();
+    if (!runGate.allowed) return res.status(403).json({ error: runGate.reason });
+
+    const config = await AcquisitionControl.findOne({ profileName: 'default' }).lean();
+    if (!config) return res.status(404).json({ error: 'AcquisitionControl config not found' });
+
+    // An RTSP URL typed on the page beats the registry, so the operator can
+    // still run a room whose camera is not registered (or is registered with a
+    // stale URL) — that was possible on the old start-session path and would
+    // otherwise be lost. resolveCameras() treats this the same as an
+    // includedRooms override.
+    let roomOverride = null;
+    if (rtspUrl1 && rtspUrl1.trim()) {
+      roomOverride = {
+        room,
+        enabled: true,
+        rtspUrl1: rtspUrl1.trim(),
+        rtspUrl2: (rtspUrl2 || '').trim(),
+      };
+    } else {
+      const enabledRooms = await getEnabledRooms(config);
+      roomOverride =
+        enabledRooms.find((r) => (r.room || '').toUpperCase() === room.toUpperCase()) || null;
+    }
+
+    // runSlotAttendance spaces its runs over the time left in the period, so it
+    // needs the period window. Without a configured period there is nothing to
+    // space against — reject rather than run with a bogus window.
+    const periodCfg = (config.periods || []).find((p) => p.periodKey === slot);
+    const startMin = timeStrToMin(periodCfg?.startTime);
+    const endMin = timeStrToMin(periodCfg?.endTime);
+    if (startMin == null || endMin == null) {
+      return res.status(400).json({
+        error: `No start/end time configured for ${slot} — set it in Scheduler → Period Settings before running.`,
+      });
+    }
+
+    const result = await runSlotAttendance({
+      room: roomOverride?.room || room,
+      roomOverride,
+      slot,
+      date,
+      periodInfo: { startMin, endMin },
+      config,
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[SchedulerController] runRoomOne error:', err);
     res.status(500).json({ error: err.message });
   }
 };
@@ -675,7 +773,13 @@ exports.liveStatus = async (req, res) => {
 
     const enabledRooms = await getEnabledRooms(config);
     const periodCfg = (config.periods || []).find((p) => p.periodKey === slot) || {};
-    const targetRuns = periodCfg.numRuns ?? config.globalNumRuns ?? 1;
+    // Must match what actually executes. Both run paths (autoAttendanceScheduler
+    // and runRoomAttendance above) read globalNumRuns and ignore periodCfg.numRuns
+    // entirely, so reading the per-period value here made the page disagree with
+    // the scheduler: periodCfg.numRuns is never undefined (schema default 1, and
+    // defaultPeriods() seeds it), so `??` never reached globalNumRuns and the
+    // target stayed pinned at 1 however the global setting was changed.
+    const targetRuns = config.globalNumRuns ?? 1;
 
     // ── Period window, in campus (IST) minutes ─────────────────────────────
     // Sent to the client so the card can say when the period starts and ends
@@ -784,13 +888,19 @@ exports.liveStatus = async (req, res) => {
           }
         }
 
+        // Mid-capture right now? The report row cannot answer this — it does
+        // not exist until the first check saves — so it comes from the
+        // scheduler's own in-flight registry.
+        const inProgress = isRunInProgress({ room, slot, date });
+
         const { checks } = await buildPreflight({
-          room, slot, date, config, cameraInfo, runsCompleted, resolved,
+          room, slot, date, config, cameraInfo, runsCompleted, resolved, inProgress,
         });
 
         return {
           room,
           status: reportStatus,
+          inProgress,
           runsCompleted,
           targetRuns,
           ctx,

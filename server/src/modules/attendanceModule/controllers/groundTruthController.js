@@ -363,13 +363,17 @@ res.json({ message: `Removed ${filename}` });
         const embeddingSet = new Set(info.embedding_files || []);
         const backupSet    = new Set(info.backup_files    || []);
         
-        const hadEmbedding = embeddingSet.size > 0;
         let embeddingChanged = false;
 
         for (const f of validFiles) {
             if (embeddingSet.has(f) || backupSet.has(f)) continue;
-            
-            if (!hadEmbedding && embeddingSet.size < embed_n) {
+
+            // Top up to embed_n whatever the student currently sits at. This
+            // used to be gated on the student having no embedding photos at
+            // all, so anyone who had dropped to 2 or 3 (photo deletes are the
+            // usual way) stayed there permanently no matter how much was
+            // approved afterwards.
+            if (embeddingSet.size < embed_n) {
                 embeddingSet.add(f);
                 embeddingChanged = true;
             } else {

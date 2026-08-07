@@ -27,6 +27,16 @@ ensureDir(EMBEDDINGS_DIR);
 function safeSubject(raw) {
     return (raw || '').trim().replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/, '');
 }
+
+// NOT mongoose.isValidObjectId: that accepts ANY 12-character string, because
+// 12 raw bytes is a legal ObjectId encoding. The subject dropdown falls back to
+// using the subject NAME as _id when no Subject document exists, and plenty of
+// names are 12 characters — "FPGA (DE/GE)" is exactly 12, and casts to the
+// ObjectId 46504741202844452f474529, i.e. the bytes of the name. Anything
+// keyed on that check would treat a display name as a document id.
+function isObjectIdHex(value) {
+    return /^[0-9a-fA-F]{24}$/.test(String(value ?? ''));
+}
 // Returns academic session string, e.g. "2025-26"
 function currentSession() {
     const now   = new Date();
@@ -37,14 +47,37 @@ function currentSession() {
 }
 
 // Builds folder path + filename: EMBEDDINGS_DIR/{session}/{deptSafe}/{subCode}_{subjectSafe}_{session}.pkl
-function buildEmbeddingPath(sem, subject, dept, subjectCode) {
+// The filename is the Subject's _id whenever we have one.
+//
+// The old name, {subCode}_{safeSubject(subject)}_{session}.pkl, was derived from
+// the display name through a lossy sanitizer: safeSubject collapses every run of
+// non-alphanumerics to "_", so "FPGA (DE/GE)", "FPGA-DE-GE" and "FPGA DE GE" all
+// produce "FPGA_DE_GE". With subCode absent it falls back to sem, so two
+// same-semester subjects differing only in punctuation resolved to the SAME
+// filename — the second generation overwrote the first, both Subject rows
+// pointed at one file, and one class silently ran on the other's embeddings.
+// An _id cannot collide and never needs sanitizing.
+//
+// The {session}/{dept} folders are kept because the embeddings browser groups
+// and filters by them, but they are no longer how the file is FOUND: the caller
+// stores the returned relPath on the Subject and lookups use it verbatim.
+function buildEmbeddingPath(sem, subject, dept, subjectCode, subjectId) {
     const session      = currentSession();
-    const subjectSafeStr = safeSubject(subject);
     const deptSafe     = safeSubject(dept || 'UNKNOWN');
-    const subCodeSafe  = safeSubject(subjectCode || sem.toString());
-    const filename     = `${subCodeSafe}_${subjectSafeStr}_${session}.pkl`;
-    const folder       = path.join(EMBEDDINGS_DIR, session, deptSafe);
-    return { filename, folder, fullPath: path.join(folder, filename), session };
+
+    // Falls back to the descriptive name only when there is no Subject document
+    // to key on — the subject dropdown uses the raw name as _id in that case
+    // (see the isValidObjectId guard where embeddingFile is saved).
+    const useId = isObjectIdHex(subjectId);
+    const filename = useId
+        ? `${String(subjectId)}.pkl`
+        : `${safeSubject(subjectCode || sem.toString())}_${safeSubject(subject)}_${session}.pkl`;
+
+    const folder  = path.join(EMBEDDINGS_DIR, session, deptSafe);
+    // Forward slashes: this is a stored identifier, not a live OS path, and it
+    // must resolve the same if the database moves between Windows and Linux.
+    const relPath = `${session}/${deptSafe}/${filename}`;
+    return { filename, folder, fullPath: path.join(folder, filename), session, relPath };
 }
 
 // ── Resolve which embedding .pkl to use for a given sem+subject ──────────────
@@ -501,7 +534,13 @@ uploadPkl() {
         // New file name format: {sem}_{subjectSafe}.pkl
         const semSafe = sem.toString().trim();
         const subjectCode = (req.body.subjectCode || '').trim();
-        const { filename: embeddingFile, folder: embFolder, fullPath: outputPath, session: sessionStr } = buildEmbeddingPath(semSafe, subject, dept, subjectCode);
+        const {
+            filename: embeddingFile,
+            folder: embFolder,
+            fullPath: outputPath,
+            session: sessionStr,
+            relPath: embeddingRelPath,
+        } = buildEmbeddingPath(semSafe, subject, dept, subjectCode, subjectId);
         ensureDir(embFolder);
 
         // For GT lookup we still need a batch-like folder path.
@@ -515,6 +554,7 @@ uploadPkl() {
     subject:         subject.trim(),
     dept:            (dept || '').trim().toUpperCase(),
     embeddingFile,
+    embeddingRelPath,
     session:         sessionStr,
     subjectCode,
     rollNos,
@@ -688,11 +728,22 @@ try {
         //
         // The subject dropdown falls back to using the subject NAME as _id
         // when no Subject document exists, so validate before casting.
-        if (subjectId && mongoose.isValidObjectId(subjectId)) {
+        // isObjectIdHex, not mongoose.isValidObjectId — the latter passes any
+        // 12-character string, so a 12-character subject NAME arriving here as
+        // subjectId (the dropdown's fallback) used to clear this guard and hit
+        // findByIdAndUpdate with a name cast to bytes. That matched no document,
+        // updated nothing, and skipped the "could not be saved" warning below,
+        // so embeddings looked linked when the Subject row was never touched.
+        if (isObjectIdHex(subjectId)) {
             try {
                 const Subject = require('../../../models/subject');
                 await Subject.findByIdAndUpdate(subjectId, {
                     embeddingFile,
+                    // Recorded so the scheduler never has to rebuild the
+                    // {session}/{dept} folders from timetable values that may
+                    // punctuate the department differently, or from a session
+                    // that has since rolled over.
+                    embeddingRelPath,
                     embeddingUpdatedAt: new Date(),
                     missedGroundTruth: missedRollNos.map(m => m.rollNo),
                     ...(rosterSupplied
