@@ -18,6 +18,7 @@ const REPORT_API = `${apiUrl}/attendancemodule/reports`;
 const REPORT_DELETE_SETTINGS_API = `${apiUrl}/attendancemodule/settings/report-deletion`;
 const USER_API = `${apiUrl}/user/getuser`;
 const ML_API = `${apiUrl}/ml`;
+const SCHEDULER_API = `${apiUrl}/attendancemodule/scheduler`;
 const OTHER_CONTROLS_API = `${apiUrl}/attendancemodule/settings/other-controls`;
 const pct = (a, b) => (b > 0 ? Math.round((a / b) * 100) : 0);
 
@@ -604,11 +605,6 @@ export default function AttendanceReport() {
       return;
     }
 
-    const effectiveBatch = derivedCtx?.batch || manualBatch;
-    if (!effectiveBatch) {
-      showToast('Batch not found — fill in Degree/Dept/Year', 'error');
-      return;
-    }
     // ── Camera inactive/none warning gate ────────────────────
     if (
       (cameraStatus === 'inactive' || cameraStatus === 'none') &&
@@ -619,49 +615,69 @@ export default function AttendanceReport() {
       return;
     }
 
+    // Batch, subject, faculty and roster are all resolved server-side by
+    // runRoom()'s own resolveClassContext, so nothing is sent from here. That
+    // also drops the old `derivedCtx?.batch || manualBatch` fallback, which
+    // could quietly substitute a batch string assembled from the Degree/Dept/
+    // Year dropdowns when the timetable did not match — and a batch that does
+    // not match the enrolled data is what produced the opaque 422s. A
+    // timetable that does not resolve now comes back as an explicit
+    // "skipped" with its reason instead.
+    setSessionActive(true);
+    setSessionChecks(0);
+    setProcessing(true);
+    setStreamLog([]);
+    setActiveCam(rtspUrl2.trim() ? 1 : null);
+    activeCamRef.current = rtspUrl2.trim() ? 1 : null;
+    setCamSwitchAt(Date.now());
+    setCamCountdown(camSwitchSec);
+    rtspUrl2Ref.current = rtspUrl2.trim();
+
     try {
-      const res = await fetch(`${REPORT_API}/start-session`, {
+      // Holds open for the whole run — see the note on POST /scheduler/run-room.
+      const res = await fetch(`${SCHEDULER_API}/run-room`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           room,
           slot,
           date,
-          rtspUrl: rtspUrl.trim(),
+          rtspUrl1: rtspUrl.trim(),
           rtspUrl2: rtspUrl2.trim(),
-          durationSec: duration,
-          checkIntervalMin,
-          batch: effectiveBatch,
-          department: derivedCtx?.dept || department,
-          subject: derivedCtx?.subject || '',
-          faculty: derivedCtx?.faculty || '',
-          semester: derivedCtx?.sem || '',
-          locksemId: derivedCtx?.locksemId || '',
-          // Same roster as the one-shot run above; startSession falls back to
-          // resolving it server-side when this is empty.
-          enrolledRollNos: derivedCtx?.enrolledRollNos || [],
         }),
       });
       const data = await res.json();
-      if (data.error) {
-        showToast(data.error, 'error');
+
+      // runRoom reports its own outcome in `log` whether it succeeded, skipped
+      // or errored, so surface it before branching on status.
+      if (Array.isArray(data.log)) {
+        setStreamLog(data.log.map((l) => l.msg));
+      }
+
+      if (!res.ok || data.error) {
+        showToast(data.error || `Server error ${res.status}`, 'error');
         return;
       }
-      setSessionReportId(data.reportId);
-      setSessionActive(true);
-      setActiveCam(rtspUrl2.trim() ? 1 : null);
-      activeCamRef.current = rtspUrl2.trim() ? 1 : null;
-      setCamSwitchAt(Date.now());
-      setCamCountdown(camSwitchSec);
-      rtspUrl2Ref.current = rtspUrl2.trim();
-      setSessionChecks(0);
-      const stopNote = data.autoStopAt
-        ? ` — auto-stops at ${new Date(data.autoStopAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
-        : '';
-      showToast(`Session started — checks every ${checkIntervalMin} min${stopNote}`);
-      openDetail(data.reportId);
+      if (data.status === 'skipped' || data.status === 'error') {
+        showToast(`${data.room}: ${data.reason || data.status}`, 'error');
+        return;
+      }
+
+      if (data.reportId) {
+        setSessionReportId(data.reportId);
+        openDetail(data.reportId);
+      }
+      const s = data.summary;
+      showToast(
+        s ? `Run complete — P:${s.present} A:${s.absent} R:${s.review}` : 'Run complete',
+      );
     } catch (e) {
-      showToast('Failed to start session: ' + e.message, 'error');
+      showToast('Failed to run: ' + e.message, 'error');
+    } finally {
+      setSessionActive(false);
+      setProcessing(false);
+      setActiveCam(null);
+      activeCamRef.current = null;
     }
   };
 
@@ -1252,8 +1268,9 @@ export default function AttendanceReport() {
               </div>
             </div>
 
-            {/* Live stream log while processing */}
-            {processing && streamLog.length > 0 && (
+            {/* Run log — kept visible after the run ends, since a run-room
+                call reports its preflight trail only in its final response */}
+            {streamLog.length > 0 && (
               <div
                 style={{
                   marginTop: 14,

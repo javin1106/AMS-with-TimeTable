@@ -12,6 +12,17 @@ const studentEmbeddingSchema = new mongoose.Schema({
     subject:         { type: String, default: '' },
     subjectCode:     { type: String, default: '' },
     embeddingFile:   { type: String, default: null },
+    // Where that file was written, relative to ml-data/embeddings —
+    // "2026-27/ELECTRONICS_.../64f0a1c9....pkl".
+    //
+    // embeddingFile stopped being unique on its own once files were named after
+    // the Subject _id: the session used to be baked into the filename, so the
+    // same subject in 2025-26 and 2026-27 produced two distinct names, whereas
+    // now both are "{id}.pkl" in different session folders. Consumers that hunt
+    // for a bare filename under ml-data/embeddings (rebuildSubjectPklsForStudent)
+    // would otherwise take whichever session's copy they happened to walk into
+    // first and rebuild the wrong one. Null on pre-existing records.
+    embeddingRelPath: { type: String, default: null },
     // AdaFace's independent embedding .pkl for this subject (separate folder,
     // server/ml-data/embeddings_adaface/...) — null until an AdaFace ONNX
     // model is loaded and generation produces AdaFace data for at least one

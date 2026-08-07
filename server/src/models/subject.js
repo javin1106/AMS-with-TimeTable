@@ -70,6 +70,23 @@ const subjectSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
+  // Exact location of the .pkl, relative to ml-data/embeddings, recorded when
+  // it was generated — e.g. "2026-27/ELECTRONICS_.../64f0a1c9....pkl".
+  //
+  // embeddingFile alone was not enough to find the file again: the lookup had
+  // to rebuild the {session}/{dept} folders from the timetable's own dept and
+  // the CURRENT session, so a dept written "Electronics & Communication Engg."
+  // at generation and read as "ELECTRONICS_AND_COMMUNICATION_ENGINEERING" from
+  // the timetable pointed at different folders ("&" drops, "and" does not), and
+  // every file silently became unreachable when the session rolled over in
+  // August. Storing the path removes the derivation entirely.
+  //
+  // Null on rows generated before this field existed — resolveEmbeddingFile
+  // falls back to the old derivation for those, so no migration is required.
+  embeddingRelPath: {
+    type: String,
+    default: null,
+  },
   embeddingUpdatedAt: {
     type: Date,
     default: null,

@@ -17,12 +17,7 @@ const AttendanceReport = require("../../../models/attendanceReport");
 const { saveAttendanceDailyData } = require("./attendanceDailyDataSaver");
 const { saveUnknownFaces } = require("./unknownFaceWriter");
 const { saveFrameSnapshots } = require("./frameSnapshotWriter");
-const {
-  buildEnrolledEmbeddings,
-  buildEnrolledEmbeddingsTopK,
-  buildEnrolledEmbeddingsAdaface,
-  buildEnrolledEmbeddingsAdafaceTopK,
-} = require("./embeddingSyncHelper");
+const { buildAllEnrolledEmbeddings } = require("./embeddingSyncHelper");
 const alertNotifier = require("./alertNotifier");
 const { sendFacultyAttendanceSummary } = require("./facultyAttendanceMailer");
 const { pushAttendanceToErp } = require("./erpAttendancePushController");
@@ -31,7 +26,9 @@ const {
   nowMinIST,
   todayIST,
 } = require("./timeWindowGuard");
-const { resolveClassContext, escapeRegex } = require("./classContextResolver");
+const { resolveClassContext } = require("./classContextResolver");
+const { reportQuery, roomKey } = require("./reportKey");
+const { findSubjectForSlot } = require("./subjectLookup");
 const { resolveEmbeddingFile } = require("./embeddingPathResolver");
 const {
   rosterFromSubject,
@@ -130,34 +127,20 @@ async function resolveContext(room, slot, date, config = {}) {
 // read from the same Subject document — see subjectRoster.js for why the
 // roster has to travel with the request.
 async function resolveSubjectAndPkl(subjectText, sem, dept, session) {
-  // escapeRegex is not optional here: a subject like "FPGA(DE/GE)" used raw as
-  // a $regex reads "(DE/GE)" as a capture group, so the pattern matches
-  // "FPGADE/GE" and never the subject's own name. That returned null and the
-  // room was skipped as "No Subject.embeddingFile set" — blaming the embedding
-  // file for a lookup that never found the subject at all.
-  const flexSubject = escapeRegex((subjectText || "").trim())
-    .replace(/\\\(/g, "\\s*\\(\\s*")
-    .replace(/\\\)/g, "\\s*\\)\\s*")
-    .replace(/-/g, "\\s*-\\s*")
-    .replace(/\s+/g, "\\s+");
-
-  const flexSem = escapeRegex((sem || "").trim())
-    .replace(/-/g, "\\s*-\\s*")
-    .replace(/\s+/g, "\\s+");
-
-  const subj = await Subject.findOne({
-    subjectFullName: { $regex: new RegExp(flexSubject, "i") },
-    sem: { $regex: new RegExp(`^${flexSem}$`, "i") },
-  }).lean();
+  // Matched on subName first — see subjectLookup.js for why the old
+  // unanchored subjectFullName regex both missed real subjects and silently
+  // matched wrong ones.
+  const { subject: subj, reason: lookupReason } = await findSubjectForSlot({
+    subject: subjectText,
+    sem,
+  });
 
   if (!subj) {
     return {
       subjectMeta: null,
       roster: [],
       pkl: null,
-      pklMissingReason:
-        `No Subject matches subjectFullName "${subjectText}" with sem "${sem}" — ` +
-        `check the Subject exists and its sem matches the timetable exactly`,
+      pklMissingReason: lookupReason,
     };
   }
 
@@ -190,6 +173,7 @@ async function resolveSubjectAndPkl(subjectText, sem, dept, session) {
     session: session || currentSession(),
     dept: dept || subj.dept,
     filename: subj.embeddingFile,
+    relPath: subj.embeddingRelPath,
   });
   if (!fullPath) {
     return { subjectMeta, roster, pkl: null, pklMissingReason: reason };
@@ -332,12 +316,19 @@ async function saveCheckResult({
     primaryFallback: !!mlResult.metadata?.primary_fallback,
   };
 
-  let report = await AttendanceReport.findOne({
-    batch: ctx.batch,
-    date,
-    timeSlot: slot,
-  });
+  let report = await AttendanceReport.findOne(
+    reportQuery({ batch: ctx.batch, date, timeSlot: slot, room }),
+  );
   if (report) {
+    // Backstop for the window between runSlotAttendance's check and this save:
+    // a long run can be finalized mid-flight. Appending would rewrite
+    // finalReport/summary under the sign-off while status still reads
+    // "finalized", and re-push the rewritten result to the ERP.
+    if (report.status === "finalized") {
+      throw new Error(
+        `Report for ${ctx.batch} ${slot} on ${date} was finalized during the run — check ${checkIndex} discarded`,
+      );
+    }
     report.slotResults.push(slotResult);
   } else {
     report = new AttendanceReport({
@@ -346,7 +337,8 @@ async function saveCheckResult({
       semester: ctx.sem,
       subject: ctx.subject,
       faculty: ctx.faculty,
-      room,
+      // Normalised, because it is now part of the report's identity.
+      room: roomKey(room),
       date,
       timeSlot: slot,
       locksemId: ctx.locksemId || null,
@@ -481,7 +473,9 @@ async function runOneCheck({
   subjectMeta,
   roster = [],
   cameras,
-  pkl,
+  // Both resolved once per period by runSlotAttendance — see the notes there.
+  enrolledDicts = {},
+  pklFallback = null,
   runConfig,
   checkIndex,
 }) {
@@ -502,29 +496,18 @@ async function runOneCheck({
       // the run to whoever is in the batch's embedding store — every student
       // in the year, not this class (see subjectRoster.js).
       enrolledRollNos: roster,
-      embeddingsPklData: pkl.pklData, // stateless — see resolveSubjectAndPkl; decoded
-      // Python-side as a fallback enrollment source
-      // when enrolledEmbeddings is empty (see rtsp_routes.py)
+      // Only when ground truth yielded nothing: the ML service reads this
+      // solely under `if not enrolled`, so sending it next to a populated
+      // dict was base64 over the wire, every check, discarded unread.
+      ...(pklFallback ? { embeddingsPklData: pklFallback } : {}),
       autoThreshold: runConfig.auto_present_threshold,
       reviewThreshold: runConfig.review_threshold,
       cameraSwitchSec: runConfig.camera_switch_sec,
-      // All enrolled dicts ship on EVERY run — which model uses them is
-      // decided Python-side by state.pipeline_config (Model Pipeline card),
-      // and Node can't know which primary is selected there. ~100-200KB per
-      // 60 students — trivial.
-      enrolledEmbeddings: buildEnrolledEmbeddings(GROUND_TRUTH_DIR, ctx.batch),
-      enrolledEmbeddingsTopK: buildEnrolledEmbeddingsTopK(
-        GROUND_TRUTH_DIR,
-        ctx.batch,
-      ),
-      enrolledEmbeddingsAdaface: buildEnrolledEmbeddingsAdaface(
-        GROUND_TRUTH_DIR,
-        ctx.batch,
-      ),
-      enrolledEmbeddingsAdafaceTopK: buildEnrolledEmbeddingsAdafaceTopK(
-        GROUND_TRUTH_DIR,
-        ctx.batch,
-      ),
+      // Built once for the whole period by runSlotAttendance, and narrowed to
+      // what the ML service's pipeline_config can actually use. Was four
+      // directory walks plus 4×N JSON.parse per check, for files that cannot
+      // change mid-period.
+      ...enrolledDicts,
     };
     // Shadow comparisons fire only on the one check nearest the middle of
     // this period — which models actually run is decided Python-side by the
@@ -539,7 +522,7 @@ async function runOneCheck({
       { timeout: 300000 },
     );
 
-    await saveCheckResult({
+    const report = await saveCheckResult({
       ctx,
       subjectMeta,
       roster,
@@ -551,11 +534,90 @@ async function runOneCheck({
       alertConfidence: runConfig.alertConfidence,
       minRunsPresent: runConfig.minRunsPresent,
     });
+
+    // Reported back so runSlotAttendance can tell a caller how many checks
+    // actually landed, rather than every outcome looking alike from outside.
+    return {
+      ok: true,
+      reportId: report?._id ? String(report._id) : null,
+      summary: report?.summary || null,
+    };
   } catch (err) {
+    // The ML service answers 422 with the pipeline's own text in `detail`
+    // ("Cannot open RTSP stream: …", "No enrolled students found for batch
+    // …", "No faces detected during the recording."). Logging only
+    // err.message reduced every one of those to "status code 422".
+    const detail = err.response?.data?.detail;
+    const message = detail ? `${err.message} — ${detail}` : err.message;
     console.error(
-      `[AutoScheduler] Check ${checkIndex} failed for ${slot} room ${room}: ${err.message}`,
+      `[AutoScheduler] Check ${checkIndex} failed for ${slot} room ${room}: ${message}`,
     );
+    return { ok: false, error: message };
   }
+}
+
+// ── Which enrolled dicts this period actually needs ─────────────────────────
+// Which model decides attendance lives in the ML service (state.pipeline_config,
+// Model Pipeline card), so Node asks rather than shipping all four dicts on the
+// chance one is wanted. At top_k=3 the top-K dict is ~75% of the InsightFace
+// payload, and with primary "mean" and its shadow off it is read from disk,
+// serialised, sent and discarded on every single check.
+//
+// Fails open: any error, timeout, or unreadable answer means send everything,
+// which is the old behaviour. Omitting a dict the pipeline turns out to want
+// does not fail loudly — it silently downgrades that model to mean matching
+// (see the fallback chain in _attendance_pipeline), so guessing is not safe.
+async function resolveNeededEmbeddingDicts() {
+  const all = { topK: true, adaface: true, reason: "defaulted to all" };
+  try {
+    const { data } = await axios.get(`${ML_URL}/pipeline-config`, { timeout: 5000 });
+    if (!data || typeof data !== "object") return all;
+
+    const primary = data.primary || "mean";
+    // Shadows fire on one check per period, so if a shadow is enabled at all
+    // its dict has to travel — the middle check needs it.
+    const topK = primary === "max_k" || data.shadow_max_k === true;
+    const adaface =
+      (primary === "adaface" || data.shadow_adaface === true) &&
+      data.adaface_model_loaded !== false;
+
+    return {
+      topK,
+      adaface,
+      reason: `pipeline primary=${primary}, shadow_max_k=${!!data.shadow_max_k}, shadow_adaface=${!!data.shadow_adaface}`,
+    };
+  } catch (err) {
+    return { ...all, reason: `pipeline-config unreadable (${err.message}) — sending all` };
+  }
+}
+
+// ── In-flight run registry ──────────────────────────────────────────────────
+// Which room+slot+date runs are mid-capture right now, for the live page.
+//
+// A report row only appears once the FIRST check has finished and saved, so
+// between "the scheduler fired" and "check 1 landed" — a full runDurationSec,
+// 120s by default — there was nothing in the database to look at and the card
+// showed "Waiting", indistinguishable from a period that never started. With
+// globalNumRuns at 1 that covers the entire run: the card went straight from
+// "Waiting" to "Completed" and never once indicated that a run was happening.
+//
+// Presentation only, and deliberately in-memory: the report remains the record
+// of what actually ran, so a restart clearing this loses nothing but the
+// spinner. Shared by the cron and the manual POST /scheduler/run-room trigger
+// because both call runSlotAttendance in this process.
+const activeRuns = new Map();
+
+const runKeyFor = ({ room, slot, date }) =>
+  `${date}_${slot}_${String(room || "").toUpperCase()}`;
+
+// True while runSlotAttendance is between its first and last check for this
+// room+slot+date.
+function isRunInProgress({ room, slot, date }) {
+  return activeRuns.has(runKeyFor({ room, slot, date }));
+}
+
+function listActiveRuns() {
+  return Array.from(activeRuns.values());
 }
 
 // ── Run all checks for one room+slot — steps 2–5 for that room ──────────────
@@ -567,18 +629,26 @@ async function runSlotAttendance({
   periodInfo,
   config,
 }) {
-  console.log(
-    `[AutoScheduler] Starting slot=${slot} room=${room} date=${date}`,
-  );
+  // Every step records into `log` as well as the console. The cron ignores the
+  // return value, but the manual POST /scheduler/run-room trigger renders this
+  // trail — previously the only record of why a room did not run was a
+  // console.warn on the server, invisible to whoever pressed the button.
+  const log = [];
+  const push = (msg, warn = false) => {
+    log.push({ t: Date.now(), msg });
+    (warn ? console.warn : console.log)(`[AutoScheduler] ${msg}`);
+  };
+
+  push(`Starting slot=${slot} room=${room} date=${date}`);
 
   // Step 3: slot data
   const ctx = await resolveContext(room, slot, date, config);
   if (!ctx) {
-    console.warn(
-      `[AutoScheduler] No timetable context for room=${room} slot=${slot} — skipping`,
-    );
-    return;
+    const reason = `No timetable context for room=${room} slot=${slot}`;
+    push(`${reason} — skipping`, true);
+    return { room, status: "skipped", reason, log };
   }
+  push(`Class resolved: ${ctx.batch} — ${ctx.subject || "(no subject)"}`);
 
   // Step 4: embeddings for the subject
   const { subjectMeta, roster, pkl, pklMissingReason } = await resolveSubjectAndPkl(
@@ -587,20 +657,33 @@ async function runSlotAttendance({
     ctx.dept,
     ctx.session,
   );
-  if (!pkl) {
-    console.warn(
-      `[AutoScheduler] Skipping room=${room} slot=${slot} — ${pklMissingReason}`,
-    );
-    return;
-  }
+  // Deliberately NOT skipping on a missing .pkl here. The ML service reads it
+  // only under `if not enrolled` — ground truth is the primary source — so a
+  // room with a full ground-truth batch and no generated .pkl used to be
+  // skipped for a file the run would never have opened, told to "generate
+  // embeddings for this subject" to fix a problem it did not have. The real
+  // question is whether ANY enrollment exists, and that is answered below,
+  // once the ground-truth dicts have been built.
+  push(
+    pkl
+      ? `Embeddings found: ${pkl.filename}`
+      : `No subject .pkl (${pklMissingReason}) — ground truth must supply enrollment`,
+    !pkl,
+  );
+  push(
+    roster.length
+      ? `Subject roster: ${roster.length} roll no(s)`
+      : `No subject roster resolved — matching will cover the whole batch`,
+    !roster.length,
+  );
 
   const cameras = await resolveCameras(room, roomOverride);
   if (!cameras.cam1) {
-    console.warn(
-      `[AutoScheduler] No active camera for room=${room} — skipping`,
-    );
-    return;
+    const reason = `No active camera for room=${room}`;
+    push(`${reason} — skipping`, true);
+    return { room, status: "skipped", reason, ctx, log };
   }
+  push(`Camera resolved (${cameras.source}): cam2=${cameras.cam2 ? "yes" : "no"}`);
 
   const numRuns = config.globalNumRuns ?? 1;
   const runDurationSec = config.globalRunDurationSec ?? 120;
@@ -630,50 +713,154 @@ async function runSlotAttendance({
     middleRunIndex: Math.ceil(numRuns / 2),
   };
 
-  for (let i = 1; i <= numRuns; i++) {
-    if (i > 1) {
-      console.log(
-        `[AutoScheduler] Waiting ${checkIntervalMin} min before check ${i}/${numRuns} (room=${room})`,
-      );
-      await new Promise((r) => setTimeout(r, checkIntervalMin * 60 * 1000));
-    }
-    await runOneCheck({
-      room,
-      slot,
-      date,
-      ctx,
-      subjectMeta,
-      roster,
-      cameras,
-      pkl,
-      runConfig,
-      checkIndex: i,
-    });
-  }
-
-  console.log(
-    `[AutoScheduler] Slot ${slot} room ${room} — all ${numRuns} checks done`,
+  push(
+    `Plan: ${numRuns} run(s), ${runDurationSec}s each, ${checkIntervalMin}min apart, ` +
+      `present if seen in >=${minRunsPresent}/${numRuns}`,
   );
 
-  // The period is over for this room — mail the faculty their attendance.
-  // Gated by the Email Notifications toggles and idempotent, so the manual
-  // "stop session" path ending the same period cannot double-send.
+  // Registered before the remaining work, which includes a network call to the
+  // ML service: that could hold the card on "Waiting" for the pipeline-config
+  // timeout before anything indicated a run had begun. Everything from here is
+  // inside the try, so the finally still clears the key on the skip paths.
+  const runKey = runKeyFor({ room, slot, date });
+  activeRuns.set(runKey, { room, slot, date, startedAt: Date.now(), targetRuns: numRuns });
   try {
-    const report = await AttendanceReport.findOne({
-      batch: ctx.batch,
-      date,
-      timeSlot: slot,
-    });
-    if (report) {
-      const outcome = await sendFacultyAttendanceSummary(report);
-      if (!outcome.sent) {
-        console.log(
-          `[AutoScheduler] Faculty summary not sent for ${slot} room ${room}: ${outcome.reason}`,
-        );
+    // Ground-truth enrollment, needed before any skip decision can be made.
+    // Built without the optional dicts so it costs one directory walk and does
+    // not wait on the ML service — whether top-K/AdaFace are wanted is a
+    // separate question, asked only once we know the run is going ahead.
+    let want = { topK: false, adaface: false, reason: "enrollment probe" };
+    let enrolledDicts = buildAllEnrolledEmbeddings(GROUND_TRUTH_DIR, ctx.batch, want);
+    const enrolledCount = Object.keys(enrolledDicts.enrolledEmbeddings).length;
+
+    // The real gate: no ground truth AND no .pkl means the ML service has
+    // nothing to match against and would answer 422. Either one alone is fine.
+    if (enrolledCount === 0 && !pkl) {
+      const reason =
+        `No enrollment for ${ctx.batch}: ground truth has no cached embeddings, ` +
+        `and ${pklMissingReason}`;
+      push(`${reason} — skipping`, true);
+      return { room, status: "skipped", reason, ctx, log };
+    }
+
+    // A finalized report is signed off. Appending to it would recompute
+    // finalReport and summary underneath that sign-off — and leave status
+    // reading "finalized" — then push the rewritten result to the ERP. The
+    // other two run paths refuse this; the cron never did, and the manual
+    // run-room trigger made it reachable on demand.
+    const existing = await AttendanceReport.findOne(
+      reportQuery({ batch: ctx.batch, date, timeSlot: slot, room }),
+    )
+      .select("status")
+      .lean();
+    if (existing?.status === "finalized") {
+      const reason = `Report for ${ctx.batch} ${slot} on ${date} is already finalized`;
+      push(`${reason} — skipping`, true);
+      return { room, status: "skipped", reason, ctx, log };
+    }
+
+    // Now that the run is going ahead, find out which optional dicts it needs
+    // and rebuild only if the answer adds any. Re-read per check below, so a
+    // pipeline change mid-period is picked up rather than frozen at run start.
+    const applyWant = async () => {
+      const next = await resolveNeededEmbeddingDicts();
+      if (next.topK === want.topK && next.adaface === want.adaface) return false;
+      want = next;
+      enrolledDicts = buildAllEnrolledEmbeddings(GROUND_TRUTH_DIR, ctx.batch, want);
+      return true;
+    };
+    await applyWant();
+
+    push(
+      `Enrollment: ${enrolledCount} student(s) from ground truth` +
+        `${want.topK ? " +topK" : ""}${want.adaface ? " +adaface" : ""} (${want.reason})`,
+    );
+    // The .pkl travels only when ground truth came up empty — the ML service
+    // reads it solely under `if not enrolled`, so sending it alongside a
+    // populated dict was base64 over the wire every check, discarded unread.
+    const pklFallback = enrolledCount === 0 ? pkl.pklData : null;
+    if (pklFallback) {
+      push(`No ground-truth embeddings for ${ctx.batch} — falling back to ${pkl.filename}`, true);
+    }
+
+    const outcomes = [];
+    for (let i = 1; i <= numRuns; i++) {
+      if (i > 1) {
+        push(`Waiting ${checkIntervalMin} min before check ${i}/${numRuns} (room=${room})`);
+        await new Promise((r) => setTimeout(r, checkIntervalMin * 60 * 1000));
+        // Cheap GET; the dicts are only rebuilt if the answer actually changed.
+        // Without this, a shadow toggled on mid-period would be missing its
+        // enrolled dict on the middle check and silently not run.
+        if (await applyWant()) {
+          push(`Pipeline changed — enrolled dicts rebuilt (${want.reason})`);
+        }
+      }
+      const outcome = await runOneCheck({
+        room,
+        slot,
+        date,
+        ctx,
+        subjectMeta,
+        roster,
+        cameras,
+        enrolledDicts,
+        pklFallback,
+        runConfig,
+        checkIndex: i,
+      });
+      outcomes.push(outcome);
+      if (outcome?.ok) {
+        const s = outcome.summary || {};
+        push(`Check ${i}/${numRuns} saved — P:${s.present} A:${s.absent} R:${s.review}`);
+      } else {
+        push(`Check ${i}/${numRuns} failed: ${outcome?.error || "unknown error"}`, true);
       }
     }
-  } catch (err) {
-    console.error("[AutoScheduler] Faculty summary failed:", err.message);
+
+    const okRuns = outcomes.filter((o) => o?.ok);
+    const lastOk = okRuns[okRuns.length - 1] || null;
+    push(
+      `Slot ${slot} room ${room} — all ${numRuns} checks done (${okRuns.length} saved)`,
+      okRuns.length === 0,
+    );
+
+    // The period is over for this room — mail the faculty their attendance.
+    // Gated by the Email Notifications toggles and idempotent, so the manual
+    // "stop session" path ending the same period cannot double-send.
+    try {
+      const report = await AttendanceReport.findOne(
+        reportQuery({ batch: ctx.batch, date, timeSlot: slot, room }),
+      );
+      if (report) {
+        const mailOutcome = await sendFacultyAttendanceSummary(report);
+        push(
+          mailOutcome.sent
+            ? `Faculty summary sent for ${slot} room ${room}`
+            : `Faculty summary not sent for ${slot} room ${room}: ${mailOutcome.reason}`,
+        );
+      }
+    } catch (err) {
+      push(`Faculty summary failed: ${err.message}`, true);
+    }
+
+    return {
+      room,
+      status: okRuns.length > 0 ? "done" : "error",
+      reason:
+        okRuns.length > 0
+          ? null
+          : outcomes.find((o) => o?.error)?.error || "All ML runs failed",
+      ctx,
+      reportId: lastOk?.reportId || null,
+      summary: lastOk?.summary || null,
+      runsCompleted: okRuns.length,
+      targetRuns: numRuns,
+      log,
+    };
+  } finally {
+    // finally, not a trailing delete: a throw anywhere in the loop would
+    // otherwise strand the key and leave the card claiming a run forever.
+    activeRuns.delete(runKey);
   }
 }
 
@@ -687,11 +874,9 @@ async function checkMissedClasses(slotKey, date, config) {
       const ctx = await resolveContext(room, slotKey, date, config);
       if (!ctx) continue;
 
-      const report = await AttendanceReport.findOne({
-        batch: ctx.batch,
-        date,
-        timeSlot: slotKey,
-      });
+      const report = await AttendanceReport.findOne(
+        reportQuery({ batch: ctx.batch, date, timeSlot: slotKey, room }),
+      );
 
       if (!report) {
         try {
@@ -771,9 +956,37 @@ function startAutoScheduler() {
     // Reset on date change rather than on the tick that lands exactly at
     // 00:00 — a single missed or delayed tick used to keep yesterday's keys
     // forever, which silently suppressed every period the next day.
+    //
+    // Rebuilt from the database, not just emptied: this set is the only record
+    // that a period already fired, and it lives in memory, so a restart used to
+    // make every period of the day eligible again through the mid-period
+    // catch-up branch. Any period that already produced a saved run is treated
+    // as fired. A period that fired and saved nothing stays eligible, which is
+    // what you want — there is nothing to duplicate.
     if (triggeredForDate !== date) {
       triggeredToday = new Set();
       triggeredForDate = date;
+      try {
+        const ran = await AttendanceReport.find({
+          date,
+          "slotResults.0": { $exists: true },
+        })
+          .select("timeSlot")
+          .lean();
+        for (const r of ran) {
+          if (r.timeSlot) triggeredToday.add(`${date}_${r.timeSlot}`);
+        }
+        if (triggeredToday.size) {
+          console.log(
+            `[AutoScheduler] Restored ${triggeredToday.size} already-run period(s) for ${date} from saved reports`,
+          );
+        }
+      } catch (err) {
+        // Fail open: an empty set only risks a duplicate run, never a missed one.
+        console.warn(
+          `[AutoScheduler] Could not restore fired periods for ${date}: ${err.message}`,
+        );
+      }
     }
 
     let config;
@@ -954,6 +1167,8 @@ module.exports = {
   runSlotAttendance,
   checkMissedClasses,
   saveCheckResult,
+  isRunInProgress,
+  listActiveRuns,
   // Exposed for unit tests
   timeStrToMin,
   safeSubject,

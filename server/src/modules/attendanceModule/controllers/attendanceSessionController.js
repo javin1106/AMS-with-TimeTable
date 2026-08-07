@@ -18,6 +18,7 @@ const {
     buildEnrolledEmbeddingsAdafaceTopK,
 } = require('./embeddingSyncHelper');
 const { pklPath } = require('./erpEmbeddingSyncHelper');
+const { reportQuery, roomKey } = require('./reportKey');
 const { sendFacultyAttendanceSummaryById } = require('./facultyAttendanceMailer');
 const {
     resolveSubjectRoster,
@@ -383,7 +384,13 @@ async function runOneCheck(reportId, checkIndex, config) {
             .catch(err => console.error(`${tag} Session clustering failed: ${err.message}`));
 
     } catch (err) {
-        console.error(`${tag} ❌ Failed: ${err.message}`);
+        // The ML service returns 422 with the pipeline's own error text in
+        // `detail` ("Cannot open RTSP stream: …", "No enrolled students found
+        // for batch …", "No faces detected during the recording."). Logging
+        // only err.message reduced all of those to "status code 422", which
+        // says nothing about which one actually happened.
+        const detail = err.response?.data?.detail;
+        console.error(`${tag} ❌ Failed: ${err.message}${detail ? ` — ${detail}` : ''}`);
         // Don't stop the session — next check may succeed
     }
 }
@@ -422,7 +429,9 @@ async function startSession(config) {
     const intervalMin = checkIntervalMin || 5;
 
     // 1. Upsert: reuse existing report for this batch+date+slot if it exists
-let report = await AttendanceReport.findOne({ batch, date, timeSlot: slot });
+let report = await AttendanceReport.findOne(
+    reportQuery({ batch, date, timeSlot: slot, room }),
+);
 if (report) {
     if (report.status === 'finalized') {
         throw new Error('A finalized report already exists for this slot. Cannot start a new session.');
@@ -442,7 +451,8 @@ if (report) {
         semester:   semester   || '',
         subject:    subject    || '',
         faculty:    faculty    || '',
-        room,
+        // Part of the report key — see reportKey.js.
+        room:       roomKey(room),
         date,
         timeSlot:   slot,
         locksemId:  locksemId || null,

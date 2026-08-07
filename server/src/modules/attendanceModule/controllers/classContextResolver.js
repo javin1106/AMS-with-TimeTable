@@ -79,24 +79,14 @@ function deriveBatch(tt, rec) {
 // matching deriveBatch's own default).
 async function deriveBatchForExtraClass(extra) {
   try {
-    const Subject = require("../../../models/subject");
-    const flexSubject = escapeRegex(String(extra.subject).trim())
-      .replace(/\\\(/g, "\\s*\\(\\s*")
-      .replace(/\\\)/g, "\\s*\\)\\s*")
-      .replace(/-/g, "\\s*-\\s*")
-      .replace(/\s+/g, "\\s+");
-
-    let query = {
-      subjectFullName: { $regex: new RegExp(flexSubject, "i") },
-    };
-    if (extra.semester) {
-      const flexSem = escapeRegex(String(extra.semester).trim())
-        .replace(/-/g, "\\s*-\\s*")
-        .replace(/\s+/g, "\\s+");
-      query.sem = { $regex: new RegExp(`^${flexSem}$`, "i") };
-    }
-
-    const subj = await Subject.findOne(query).lean();
+    // The Extra Class form stores subName (`<option value={s.subName}>`), so
+    // this is the same abbreviation-vs-full-name mismatch the attendance paths
+    // had — see subjectLookup.js.
+    const { findSubjectForSlot } = require("./subjectLookup");
+    const { subject: subj } = await findSubjectForSlot({
+      subject: extra.subject,
+      sem: extra.semester,
+    });
     const dept = (subj?.dept || "").trim().toUpperCase().replace(/\s+/g, "_");
     if (!dept) return { batch: "", dept: "" };
 

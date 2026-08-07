@@ -72,6 +72,9 @@ describe("checkMissedClasses with a resolvable room+slot context", () => {
       // sessionStartYear 2026, yearOfStudy ceil(5/2)=3 -> 2026-(3-1) = 2024.
       batch: "BTECH_CSE_2024",
       department: "CSE",
+      // Room is part of the report key (see reportKey.js), so a report that
+      // omits it is not the report for this room.
+      room: ROOM,
       date: DATE,
       timeSlot: SLOT,
       finalReport: [{ rollNo: "21CS001", finalStatus: "P" }],
@@ -91,6 +94,9 @@ describe("checkMissedClasses with a resolvable room+slot context", () => {
       // sessionStartYear 2026, yearOfStudy ceil(5/2)=3 -> 2026-(3-1) = 2024.
       batch: "BTECH_CSE_2024",
       department: "CSE",
+      // Room is part of the report key (see reportKey.js), so a report that
+      // omits it is not the report for this room.
+      room: ROOM,
       date: DATE,
       timeSlot: SLOT,
       finalReport: [{ rollNo: "21CS001", finalStatus: "A" }],

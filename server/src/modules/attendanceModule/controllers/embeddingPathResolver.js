@@ -66,7 +66,30 @@ function resolveEntry(parent, name, wantDir) {
  * @returns {{path: string|null, reason: string}} `reason` is set only on failure
  *   and names the directory that was actually searched.
  */
-function resolveEmbeddingFile({ session, dept, filename }) {
+function resolveEmbeddingFile({ session, dept, filename, relPath }) {
+  // Preferred path: exactly where generation put the file, recorded on the
+  // Subject at that moment. Nothing is re-derived, so a department punctuated
+  // differently in the timetable than in the generation request, or a session
+  // that has rolled over since, cannot move the target.
+  if (relPath) {
+    const parts = String(relPath).split("/").filter(Boolean);
+    let cursor = EMBEDDINGS_DIR;
+    for (let i = 0; i < parts.length; i++) {
+      // Still case-insensitive per segment: the recorded path and the on-disk
+      // name can differ in case across a Windows→Linux move.
+      cursor = resolveEntry(cursor, parts[i], i < parts.length - 1);
+      if (!cursor) {
+        return {
+          path: null,
+          reason: `recorded embedding path "${relPath}" is missing at segment "${parts[i]}"`,
+        };
+      }
+    }
+    return { path: cursor, reason: "" };
+  }
+
+  // Legacy rows written before embeddingRelPath existed: rebuild the folders
+  // the old way. Kept so no migration is needed, not because it is reliable.
   const deptSafe = safeSubject(dept || "UNKNOWN");
   const sessionDir = path.join(EMBEDDINGS_DIR, String(session || ""));
 

@@ -217,6 +217,76 @@ function buildEnrolledEmbeddingsTopK(groundTruthDir, batch) {
 }
 
 /**
+ * All four enrolled dicts from ONE pass over the batch directory.
+ *
+ * The four builders above are each called per attendance check, and each does
+ * its own readdirSync plus its own JSON.parse of every student's _info.json —
+ * four directory walks and 4×N parses per check, for the same N files, with no
+ * caching. For a 60-student batch that is 240 reads and parses per check, per
+ * room, repeated for every run in the period.
+ *
+ * `want` skips dicts the run cannot use. Which model decides attendance lives
+ * in the ML service's pipeline_config, so the caller reads that first (see
+ * GET /pipeline-config) — with everything on by default, since omitting a dict
+ * the pipeline turns out to want silently downgrades it to mean matching.
+ * top-K is the expensive one: at top_k=3 it is ~75% of the InsightFace payload.
+ *
+ * The individual builders are kept — other callers still use them, and they are
+ * the readable definition of what each dict contains.
+ *
+ * @param {object} [want]
+ * @param {boolean} [want.topK=true]     include enrolledEmbeddingsTopK
+ * @param {boolean} [want.adaface=true]  include both AdaFace dicts
+ */
+function buildAllEnrolledEmbeddings(groundTruthDir, batch, want = {}) {
+    const { topK = true, adaface = true } = want;
+    const batchDir = path.join(groundTruthDir, batch);
+    const out = {
+        enrolledEmbeddings: {},
+        enrolledEmbeddingsTopK: {},
+        enrolledEmbeddingsAdaface: {},
+        enrolledEmbeddingsAdafaceTopK: {},
+    };
+    if (!fs.existsSync(batchDir)) return out;
+
+    for (const entry of fs.readdirSync(batchDir, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.name.startsWith('_')) continue;
+        if (/^person_\d+$/i.test(entry.name)) continue;
+
+        const info = readInfoJson(path.join(batchDir, entry.name));
+        const roll = entry.name;
+        const hasMean = Array.isArray(info.mean_embedding) && info.mean_embedding.length > 0;
+
+        // Always built: it is the primary enrollment source, and the ML service
+        // errors out when it arrives empty with no .pkl to fall back on.
+        if (hasMean) out.enrolledEmbeddings[roll] = info.mean_embedding;
+
+        if (topK) {
+            // Same K=1-from-mean fallback buildEnrolledEmbeddingsTopK applies,
+            // so students not yet regenerated are still covered.
+            if (Array.isArray(info.top_k_embeddings) && info.top_k_embeddings.length > 0) {
+                out.enrolledEmbeddingsTopK[roll] = info.top_k_embeddings;
+            } else if (hasMean) {
+                out.enrolledEmbeddingsTopK[roll] = [info.mean_embedding];
+            }
+        }
+
+        if (adaface) {
+            // No cross-model fallback here — AdaFace is a different vector
+            // space, so a student without AdaFace data is omitted, matching
+            // buildEnrolledEmbeddingsAdaface.
+            if (Array.isArray(info.adaface_mean_embedding) && info.adaface_mean_embedding.length > 0) {
+                out.enrolledEmbeddingsAdaface[roll] = info.adaface_mean_embedding;
+            }
+            if (Array.isArray(info.adaface_top_k_embeddings) && info.adaface_top_k_embeddings.length > 0) {
+                out.enrolledEmbeddingsAdafaceTopK[roll] = info.adaface_top_k_embeddings;
+            }
+        }
+    }
+    return out;
+}
+
+/**
  * AdaFace equivalents of buildEnrolledEmbeddings/buildEnrolledEmbeddingsTopK —
  * entirely separate embedding space, read from the adaface_* keys in the
  * same _info.json. No K=1 mean fallback here (unlike buildEnrolledEmbeddingsTopK):
@@ -393,4 +463,5 @@ module.exports = {
     buildEnrolledEmbeddingsTopK,
     buildEnrolledEmbeddingsAdaface,
     buildEnrolledEmbeddingsAdafaceTopK,
+    buildAllEnrolledEmbeddings,
 };

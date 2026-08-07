@@ -1,6 +1,7 @@
 // server/src/modules/attendanceModule/controllers/attendanceReportController.js
 
 const AttendanceReport = require("../../../models/attendanceReport");
+const { reportQuery, roomKey } = require("./reportKey");
 const LockSem = require("../../../models/locksem");
 const Student = require("../../../models/student");
 const Subject = require("../../../models/subject");
@@ -377,11 +378,12 @@ class AttendanceReportController {
 
       // Upsert: ONE report per batch+date+timeSlot ──
       const slotKey = timeSlot || "";
-      let report = await AttendanceReport.findOne({
-        batch,
-        date,
-        timeSlot: slotKey,
-      });
+      // Room joined the key: two rooms running the same batch in one slot
+      // (split lab, elective across rooms) otherwise shared one document.
+      // See reportKey.js.
+      let report = await AttendanceReport.findOne(
+        reportQuery({ batch, date, timeSlot: slotKey, room }),
+      );
 
       if (report) {
         if (report.status === "finalized") {
@@ -400,7 +402,8 @@ class AttendanceReportController {
           semester,
           subject,
           faculty,
-          room,
+          // Part of the report key - see reportKey.js.
+          room: roomKey(room),
           date,
           timeSlot: slotKey,
           locksemId: locksemId || null,
