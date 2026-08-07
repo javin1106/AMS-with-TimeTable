@@ -198,7 +198,7 @@ export default function HealthDashboard() {
   };
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+    <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
 
       <ServiceButton
         label="Client"
