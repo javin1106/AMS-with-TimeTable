@@ -45,7 +45,7 @@ function elapsed(started, now = Date.now()) {
 
 function Toast({ toasts }) {
     return (
-        <div style={{
+        <div className="record-toast-stack" style={{
             position: 'fixed', top: 20, right: 20, zIndex: 9999,
             display: 'flex', flexDirection: 'column', gap: 8,
         }}>
@@ -466,6 +466,25 @@ async function handleSchedulerSubmit() {
         width: 100% !important; box-shadow: 0 20px 25px -5px rgba(0,0,0,.15) !important;
         animation: modalIn .2s cubic-bezier(.16,1,.3,1) both !important;
       }
+      .record-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-bottom: 20px; }
+      .record-grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-bottom: 20px; }
+      .record-format-options { display: flex; gap: 8px; flex-wrap: wrap; }
+      .record-history-item { display: flex; align-items: center; gap: 14px; }
+      .record-history-actions { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
+
+      @media (max-width: 760px) {
+        .record-grid-3, .record-grid-2 { grid-template-columns: 1fr !important; }
+        .record-toast-stack { left: 12px !important; right: 12px !important; top: 12px !important; }
+        .record-toast-stack > div { white-space: normal; }
+        .erp-modal-overlay { padding: 10px !important; }
+        .erp-modal-box { max-height: calc(100dvh - 20px); overflow-y: auto; padding: 18px !important; }
+        .record-modal-actions { display: grid !important; grid-template-columns: 1fr; }
+        .record-history-filter { align-items: stretch !important; flex-direction: column; }
+        .record-history-filter > div, .record-history-filter input, .record-history-filter button { width: 100% !important; }
+        .record-history-item { align-items: flex-start; flex-wrap: wrap; }
+        .record-history-actions { width: 100%; }
+        .record-history-actions button { flex: 1; min-width: 92px; }
+      }
 
     `;
     
@@ -486,7 +505,7 @@ async function handleSchedulerSubmit() {
                                 Are you sure you want to delete the recording <br /><strong>{deleteConfirm}</strong><br/>
                                 This action cannot be undone.
                             </div>
-                            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                            <div className="record-modal-actions" style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
                                 <button
                                     onClick={() => setDeleteConfirm(null)}
                                     disabled={deleting === deleteConfirm}
@@ -537,7 +556,7 @@ async function handleSchedulerSubmit() {
 
             {/* ── Selection Card ── */}
             <div style={{ ...styles.card, marginBottom: 24, opacity: isRecording ? 0.55 : 1, pointerEvents: isRecording ? 'none' : 'auto' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginBottom: 20 }}>
+                <div className="record-grid-3">
                     <div>
                         <label style={styles.label}>Degree</label>
                         <select value={degree} onChange={e => setDegree(e.target.value)} style={styles.select}>
@@ -561,7 +580,7 @@ async function handleSchedulerSubmit() {
                     </div>
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
+                <div className="record-grid-2">
                     <div>
                         <label style={styles.label}>Room</label>
                         {roomsLoading ? (
@@ -630,7 +649,7 @@ async function handleSchedulerSubmit() {
                 {/* Format selector */}
                 <div style={{ marginBottom: 14 }}>
                     <label style={styles.label}>Recording Format</label>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                    <div className="record-format-options" style={{ marginTop: 6 }}>
                         {[
                             { id: 'video+audio', label: '🎬 Video + Audio' },
                             { id: 'video',       label: '📹 Video Only' },
@@ -834,7 +853,7 @@ if (recDate !== today) return false;
             .reverse();
         return (
           <>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'end', marginBottom: 16 }}> 
+          <div className="record-history-filter" style={{ display: 'flex', gap: 8, alignItems: 'end', marginBottom: 16 }}>
               <div style={{flex: 0}}>
                 <label style={styles.label}>
                     Filter by Date
@@ -852,7 +871,7 @@ if (recDate !== today) return false;
         ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 400, overflowY: 'auto', paddingRight: 4 }}>
                         {filteredHistory.map((h, i) => (
-                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '10px 14px', background: T.bg, borderRadius: 8, border: `1px solid ${T.border}` }}>
+                    <div className="record-history-item" key={i} style={{ padding: '10px 14px', background: T.bg, borderRadius: 8, border: `1px solid ${T.border}` }}>
                         <span style={{ width: 8, height: 8, borderRadius: '50%', background: T.success, flexShrink: 0 }} />
                         <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ fontWeight: 700, fontSize: 12, color: T.text, wordBreak: 'break-all' }}>{h.label}</div>
@@ -863,7 +882,7 @@ if (recDate !== today) return false;
                             const fname = h.filename || 
                             recordings.find(r => r.label === h.label && r.status === 'done')?.filename;
                             return fname ? (
-                                <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                                <div className="record-history-actions">
                                     {h.format !== 'audio' && (
                                         <button onClick={() => handleDownload(`${REC_API}/download/${encodeURIComponent(fname)}`, fname, 'video')} style={{ padding: '5px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700, background: T.accentDim, color: T.accent, border: `1px solid ${T.accent}30`, cursor: 'pointer' }}>⬇ Video</button>
                                     )}
@@ -959,7 +978,7 @@ if (recDate !== today) return false;
                 {/* Format selector */}
                 <div style={{ marginBottom: 20 }}>
                     <label style={styles.label}>Recording Format</label>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                    <div className="record-format-options" style={{ marginTop: 6 }}>
                         {[
                             { id: 'video+audio', label: '🎬 Video + Audio' },
                             { id: 'video',       label: '📹 Video Only' },

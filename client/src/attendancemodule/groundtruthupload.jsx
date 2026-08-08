@@ -96,10 +96,24 @@ const CSS = `
     min-width: 1010px;
   }
 
+  .erp-upload-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+  .erp-progress-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+
   @media (max-width: 768px) {
     .batch-filter-grid { grid-template-columns: 1fr; }
+    .erp-upload-grid { grid-template-columns: 1fr; }
+    .erp-progress-grid { grid-template-columns: 1fr 1fr; }
+    .photo-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); padding: 14px; }
     .erp-toast { max-width: calc(100vw - 32px); white-space: normal; }
     .ams-tabs { overflow-x: auto; }
+    .erp-modal-overlay { padding: 10px !important; }
+    .erp-modal-box { max-height: calc(100dvh - 20px); overflow-y: auto; padding: 18px !important; }
+    .erp-modal-actions { display: grid !important; grid-template-columns: 1fr 1fr; }
+  }
+
+  @media (max-width: 420px) {
+    .erp-progress-grid { grid-template-columns: 1fr; }
+    .erp-modal-actions { grid-template-columns: 1fr; }
   }
 `;
 
@@ -233,7 +247,7 @@ function EmbeddingProgressPanel({ progress }) {
                 }} />
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginTop: 12 }}>
+            <div className="erp-progress-grid">
                 <div><strong>{progress.total}</strong><br /><span style={{ fontSize: 10 }}>Total photos</span></div>
                 <div><strong>{progress.completed}</strong><br /><span style={{ fontSize: 10 }}>Completed</span></div>
                 <div><strong>{progress.failed}</strong><br /><span style={{ fontSize: 10 }}>Face not detected</span></div>
@@ -742,7 +756,7 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
                 <>
                     <BatchSelector {...{ degree, setDegree, degrees, setDegrees, department, setDepartment, batchYear, setBatchYear, departments, deptLoading, deptError, batches, batchesLoading, batchName, photoCount: batchPhotoCount, fixedDepartment }} />
 
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+                    <div className="erp-upload-grid">
                         {/* ZIP Upload */}
                         <div className="erp-card">
                             <div className="erp-card-header">Batch ZIP Upload</div>
@@ -1170,7 +1184,7 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
                         <div style={{ fontSize: 13.5, color: T.textMuted, lineHeight: 1.55, marginBottom: 22, fontFamily: T.fontBody }}>
                             Uploading a new ZIP file will replace the existing ERP photos and embeddings for this batch. Do you want to continue?
                         </div>
-                        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                        <div className="erp-modal-actions" style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
                             <button
                                 onClick={() => setZipReplaceConfirm(false)}
                                 style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', color: '#475569', padding: '10px 16px', borderRadius: 8, fontWeight: 600, fontSize: 13, cursor: 'pointer', fontFamily: T.fontBody }}
@@ -1199,7 +1213,7 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
                             Are you sure you want to delete the photo for <strong style={{ color: T.text, fontFamily: T.fontMono }}>{pendingDelete.rollNo}</strong>?
                             This will also remove any associated embeddings. This action cannot be undone.
                         </div>
-                        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                        <div className="erp-modal-actions" style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
                             <button
                                 onClick={() => setPendingDelete(null)}
                                 style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', color: '#475569', padding: '10px 16px', borderRadius: 8, fontWeight: 600, fontSize: 13, cursor: 'pointer', fontFamily: T.fontBody }}
@@ -1228,7 +1242,7 @@ export default function GroundTruthUpload({ fixedDepartment = '' }) {
                             Are you sure you want to delete <strong style={{ color: '#ef4444' }}>all {photos.length} photo{photos.length === 1 ? '' : 's'}</strong> for <strong style={{ color: T.text, fontFamily: T.fontMono }}>{batchName}</strong>?
                             This will also remove all associated embeddings for this batch. This action cannot be undone.
                         </div>
-                        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                        <div className="erp-modal-actions" style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
                             <button
                                 onClick={() => setPendingDeleteAll(false)}
                                 style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', color: '#475569', padding: '10px 16px', borderRadius: 8, fontWeight: 600, fontSize: 13, cursor: 'pointer', fontFamily: T.fontBody }}

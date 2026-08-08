@@ -171,7 +171,7 @@ export default function InstituteGateIdentification() {
   };
 
   return (
-    <div style={{ padding: '24px', maxWidth: '1200px', margin: '0 auto' }}>
+    <div className="institute-page" style={{ padding: '24px', maxWidth: '1200px', margin: '0 auto' }}>
       <h1 style={{ fontSize: '24px', fontWeight: 'bold', color: T.text, marginBottom: '8px' }}>Institute Identification</h1>
       <p style={{ color: T.textMuted, marginBottom: '24px' }}>
         Identify students using every available model — FAISS index, Mean, Max-of-K and AdaFace
@@ -200,7 +200,7 @@ export default function InstituteGateIdentification() {
               style={{ display: 'none' }}
             />
             
-            <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', marginBottom: '16px' }}>
+            <div className="institute-mode-actions" style={{ display: 'flex', gap: '8px', justifyContent: 'center', marginBottom: '16px' }}>
               <button 
                 onClick={() => setUseStreamUrl(false)} 
                 disabled={processing}
@@ -243,7 +243,7 @@ export default function InstituteGateIdentification() {
                   <div>
                     <div style={{ fontWeight: '500', color: T.accent, marginBottom: '8px' }}>{file.name}</div>
                     <div style={{ fontSize: '12px', color: T.textMuted }}>{(file.size / (1024*1024)).toFixed(2)} MB</div>
-                    <div style={{ display: 'flex', gap: '12px', justifyContent: 'center', marginTop: '16px' }}>
+                    <div className="institute-file-actions" style={{ display: 'flex', gap: '12px', justifyContent: 'center', marginTop: '16px' }}>
                       <button 
                         onClick={(e) => { e.stopPropagation(); setShowPreview(true); }}
                         style={{ padding: '6px 12px', background: '#e0e7ff', color: '#4f46e5', border: 'none', borderRadius: '6px', fontSize: '13px', fontWeight: '600', cursor: 'pointer', transition: 'opacity 0.2s' }}
@@ -336,7 +336,7 @@ export default function InstituteGateIdentification() {
         {/* Right Column: Live View and Results */}
         <div style={{ flex: '2 1 600px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
           
-          <div style={{ background: '#0f172a', borderRadius: '12px', overflow: 'hidden', border: `1px solid ${T.border}`, position: 'relative', minHeight: '340px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div className="institute-live-panel" style={{ background: '#0f172a', borderRadius: '12px', overflow: 'hidden', border: `1px solid ${T.border}`, position: 'relative', minHeight: '340px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             {liveFrame ? (
               <div style={{ position: 'relative', width: '100%' }}>
                 <img src={liveFrame} alt="Live Tracking" style={{ width: '100%', height: 'auto', display: 'block' }} />
@@ -374,7 +374,7 @@ export default function InstituteGateIdentification() {
           <div style={{ background: '#fff', borderRadius: '12px', padding: '24px', border: `1px solid ${T.border}` }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', gap: '12px', flexWrap: 'wrap' }}>
               <h2 style={{ fontSize: '16px', fontWeight: '600' }}>Identified Students ({Object.keys(markedStudents).length})</h2>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div className="institute-result-actions" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                 <button
                   onClick={() => setShowModelResults((v) => !v)}
                   style={{
@@ -471,12 +471,27 @@ export default function InstituteGateIdentification() {
           50% { transform: scale(1.1); opacity: 1; }
           100% { transform: scale(0.95); opacity: 0.5; }
         }
+        .institute-mode-actions, .institute-file-actions, .institute-result-actions { flex-wrap: wrap; }
+        @media (max-width: 640px) {
+          .institute-page { padding: 12px !important; }
+          .institute-page > div { min-width: 0; }
+          .institute-page h1 { font-size: 21px !important; }
+          .institute-mode-actions, .institute-file-actions, .institute-result-actions { display: grid !important; grid-template-columns: 1fr; width: 100%; }
+          .institute-mode-actions button, .institute-file-actions button, .institute-result-actions button { width: 100%; }
+          .institute-live-panel { min-height: 230px !important; }
+          .institute-preview-overlay { padding: 8px !important; }
+          .institute-preview-shell { max-height: calc(100dvh - 16px); overflow-y: auto !important; }
+          .institute-preview-header { padding: 12px 14px !important; }
+          .institute-zoom-controls { top: 8px !important; left: 8px !important; right: 8px !important; flex-wrap: wrap; justify-content: center; }
+          .institute-zoom-controls button { flex: 1; min-width: 100px; padding: 8px !important; }
+          .institute-zoom-canvas { padding: 72px 8px 8px !important; }
+        }
       `}} />
 
       {showPreview && file && (
-        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,0.7)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' }}>
-          <div style={{ background: '#fff', borderRadius: '12px', overflow: 'hidden', width: '100%', maxWidth: '800px', boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 24px', borderBottom: `1px solid ${T.border}` }}>
+        <div className="institute-preview-overlay" style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,0.7)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' }}>
+          <div className="institute-preview-shell" style={{ background: '#fff', borderRadius: '12px', overflow: 'hidden', width: '100%', maxWidth: '800px', boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)' }}>
+            <div className="institute-preview-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 24px', borderBottom: `1px solid ${T.border}` }}>
               <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600' }}>Video Preview</h3>
               <button 
                 onClick={(e) => { e.stopPropagation(); setShowPreview(false); }}
@@ -497,13 +512,13 @@ export default function InstituteGateIdentification() {
       {zoomSnapshot && liveFrame && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,0.9)', zIndex: 9999, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
           
-          <div style={{ position: 'absolute', top: '24px', right: '24px', display: 'flex', gap: '12px', zIndex: 10000 }}>
+          <div className="institute-zoom-controls" style={{ position: 'absolute', top: '24px', right: '24px', display: 'flex', gap: '12px', zIndex: 10000 }}>
              <button onClick={() => setZoomLevel(z => Math.max(0.5, z - 0.25))} style={{ background: '#fff', color: '#000', border: 'none', borderRadius: '6px', padding: '8px 16px', cursor: 'pointer', fontWeight: 'bold' }}>- Zoom Out</button>
              <button onClick={() => setZoomLevel(z => Math.min(4, z + 0.25))} style={{ background: '#fff', color: '#000', border: 'none', borderRadius: '6px', padding: '8px 16px', cursor: 'pointer', fontWeight: 'bold' }}>+ Zoom In</button>
              <button onClick={() => setZoomSnapshot(false)} style={{ background: '#ef4444', color: '#fff', border: 'none', borderRadius: '6px', padding: '8px 16px', cursor: 'pointer', fontWeight: 'bold' }}>Close</button>
           </div>
 
-          <div style={{ overflow: 'auto', width: '100%', height: '100%', display: 'flex', alignItems: zoomLevel > 1 ? 'flex-start' : 'center', justifyContent: zoomLevel > 1 ? 'flex-start' : 'center', padding: '24px' }}>
+          <div className="institute-zoom-canvas" style={{ overflow: 'auto', width: '100%', height: '100%', display: 'flex', alignItems: zoomLevel > 1 ? 'flex-start' : 'center', justifyContent: zoomLevel > 1 ? 'flex-start' : 'center', padding: '24px' }}>
             <img src={liveFrame} alt="Zoomed Snapshot" style={{ width: `${zoomLevel * 100}%`, minWidth: `${zoomLevel * 100}%`, transition: 'width 0.2s, min-width 0.2s', objectFit: 'contain' }} />
           </div>
 

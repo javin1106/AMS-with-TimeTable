@@ -22,6 +22,36 @@ const SCHEDULER_API = `${apiUrl}/attendancemodule/scheduler`;
 const OTHER_CONTROLS_API = `${apiUrl}/attendancemodule/settings/other-controls`;
 const pct = (a, b) => (b > 0 ? Math.round((a / b) * 100) : 0);
 
+const RESPONSIVE_CSS = `
+  ${cssReset}
+  .report-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+  .report-grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .report-run-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 12px; align-items: end; }
+  .report-grid-3 > *, .report-grid-2 > *, .report-run-grid > * { min-width: 0; }
+  .report-stat-grid { display: grid; gap: 12px; margin-bottom: 16px; }
+  .report-table-scroll { overflow-x: auto !important; -webkit-overflow-scrolling: touch; }
+  .report-history-table { min-width: 860px; }
+  .report-attendance-table { min-width: 920px; }
+
+  @media (max-width: 900px) {
+    .report-grid-3, .report-run-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+    .report-run-actions { grid-column: 1 / -1; width: 100%; }
+    .report-run-actions > button { flex: 1; min-width: 0 !important; }
+    .report-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  }
+
+  @media (max-width: 600px) {
+    .report-page { overflow-x: hidden; }
+    .report-grid-2, .report-grid-3, .report-run-grid, .report-stat-grid { grid-template-columns: 1fr !important; }
+    .report-card { padding: 16px !important; }
+    .report-run-actions { display: grid !important; grid-template-columns: 1fr; }
+    .report-toast { left: 12px !important; right: 12px !important; transform: none !important; white-space: normal; }
+    .report-modal-overlay { padding: 10px !important; }
+    .report-modal-shell { width: 100% !important; max-height: calc(100dvh - 20px); overflow-y: auto; padding: 20px !important; }
+    .report-modal-actions { display: grid !important; grid-template-columns: 1fr; }
+  }
+`;
+
 // Current minutes-of-day (0–1439) in Asia/Kolkata, independent of the browser
 // timezone — mirrors the server-side timeWindowGuard.
 function nowMinIST() {
@@ -767,8 +797,8 @@ export default function AttendanceReport() {
   };
 
   return (
-    <div style={styles.page}>
-      <style>{cssReset}</style>
+    <div className="report-page" style={styles.page}>
+      <style>{RESPONSIVE_CSS}</style>
       {/* ── Camera warning modal ── */}
       <CameraWarningModal
         status={showCameraWarn ? cameraStatus : null}
@@ -788,6 +818,7 @@ export default function AttendanceReport() {
 
       {toast && (
         <div
+          className="report-toast"
           style={{
             position: 'fixed',
             top: 96,
@@ -843,13 +874,14 @@ export default function AttendanceReport() {
       {/* ════ RUN TAB ════ */}
       {tab === 'run' && (
         <div>
-          <div style={{ ...styles.card, marginBottom: 16 }}>
+          <div className="report-card" style={{ ...styles.card, marginBottom: 16 }}>
             <div style={{ ...styles.sectionTitle, marginBottom: 14 }}>
               Class Identification
             </div>
 
             {/* Room + Slot + Date */}
             <div
+              className="report-grid-3"
               style={{
                 display: 'grid',
                 gridTemplateColumns: '1fr 1fr 1fr',
@@ -1018,6 +1050,7 @@ export default function AttendanceReport() {
                 ▶ Batch override (if timetable lookup fails)
               </summary>
               <div
+                className="report-grid-3"
                 style={{
                   display: 'grid',
                   gridTemplateColumns: 'repeat(3,1fr)',
@@ -1105,6 +1138,7 @@ export default function AttendanceReport() {
 
             {/* Camera URLs + Interval + Duration + Run */}
             <div
+              className="report-grid-2"
               style={{
                 display: 'grid',
                 gridTemplateColumns: '1fr 1fr',
@@ -1150,6 +1184,7 @@ export default function AttendanceReport() {
               </div>
             )}
             <div
+              className="report-run-grid"
               style={{
                 display: 'grid',
                 gridTemplateColumns: '1fr 1fr auto',
@@ -1183,7 +1218,7 @@ export default function AttendanceReport() {
                   <option value={300}>300 seconds</option>
                 </select>
               </div>
-              <div style={{ display: 'flex', gap: 8 }}>
+              <div className="report-run-actions" style={{ display: 'flex', gap: 8 }}>
                 <button
                   onClick={runAttendance}
                   disabled={
@@ -1842,7 +1877,7 @@ export default function AttendanceReport() {
                   return acc;
                 }, {})
               ).map((group, idx) => (
-                <div key={idx} style={{ ...styles.card, padding: 0, overflow: 'hidden' }}>
+                <div className="report-table-scroll" key={idx} style={{ ...styles.card, padding: 0 }}>
                   <div style={{ padding: '16px 20px', background: theme.surfaceAlt, borderBottom: `1px solid ${theme.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div style={{ fontSize: '15px', fontWeight: 600, color: theme.text }}>
                       {filterDept ? (
@@ -1857,7 +1892,7 @@ export default function AttendanceReport() {
                       {group.items.length} report{group.items.length !== 1 ? 's' : ''}
                     </div>
                   </div>
-                  <table className="ams-table">
+                  <table className="ams-table report-history-table">
                     <thead>
                       <tr>
                         {[
@@ -2826,6 +2861,7 @@ function MultiRunTable({ report, readOnly, onOverride, theme, styles }) {
 function StatBar({ stats, theme, styles }) {
   return (
     <div
+      className="report-stat-grid"
       style={{
         display: 'grid',
         gridTemplateColumns: `repeat(${stats.length},1fr)`,
@@ -2876,6 +2912,7 @@ function CameraWarningModal({ status, room, onProceed, onCancel }) {
 
   return (
     <div
+      className="report-modal-overlay"
       style={{
         position: 'fixed',
         inset: 0,
@@ -2888,6 +2925,7 @@ function CameraWarningModal({ status, room, onProceed, onCancel }) {
       }}
     >
       <div
+        className="report-modal-shell"
         style={{
           background: '#ffffff',
           border: `1px solid ${isNone ? '#ef4444' : '#f59e0b'}`,
@@ -2935,7 +2973,7 @@ function CameraWarningModal({ status, room, onProceed, onCancel }) {
           Room: {room} &nbsp;·&nbsp; Status:{' '}
           {isNone ? 'No cameras registered' : 'Offline / Inactive'}
         </div>
-        <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
+        <div className="report-modal-actions" style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
           <button
             onClick={onCancel}
             style={{
@@ -2975,8 +3013,8 @@ function CameraWarningModal({ status, room, onProceed, onCancel }) {
 }
 function AttendanceTable({ rows, readOnly, onOverride, theme, styles }) {
   return (
-    <div style={{ ...styles.card, padding: 0, overflow: 'hidden' }}>
-      <table className="ams-table">
+    <div className="report-table-scroll" style={{ ...styles.card, padding: 0 }}>
+      <table className="ams-table report-attendance-table">
         <thead>
           <tr>
             {[

@@ -14,10 +14,18 @@ export default function ProxyModal({
 
   const CSS = `
     ${cssReset}
-    table, th, td {
-      border: 1px ${theme.border} solid;
+    .proxy-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .proxy-table { width: 100%; min-width: 520px; border-collapse: collapse; }
+    .proxy-table th, .proxy-table td { border: 0; border-bottom: 1px solid ${theme.border}; }
+    @media (max-width: 600px) {
+      .proxy-overlay { padding: 8px !important; align-items: flex-start !important; }
+      .proxy-shell { max-height: calc(100dvh - 16px) !important; }
+      .proxy-header, .proxy-body, .proxy-footer { padding: 14px !important; }
+      .proxy-header { align-items: flex-start !important; }
+      .proxy-student-header { align-items: flex-start !important; gap: 10px; flex-wrap: wrap; }
+      .proxy-footer button { width: 100%; }
     }
-  `
+  `;
 
   return (
     <>
@@ -25,6 +33,7 @@ export default function ProxyModal({
       {CSS}
     </style>
     <div
+      className="proxy-overlay"
       onClick={onClose}
       style={{
         position: "fixed",
@@ -39,6 +48,7 @@ export default function ProxyModal({
       }}
     >
       <div
+        className="proxy-shell"
         onClick={(e) => e.stopPropagation()}
         style={{
           width: "100%",
@@ -53,6 +63,7 @@ export default function ProxyModal({
       >
         {/* Header */}
         <div
+          className="proxy-header"
           style={{
             padding: "18px 22px",
             borderBottom: `1px solid ${theme.border}`,
@@ -99,7 +110,7 @@ export default function ProxyModal({
         </div>
 
         {/* Body */}
-        <div style={{ padding: 22 }}>
+        <div className="proxy-body" style={{ padding: 22 }}>
           {proxyStudents.length === 0 ? (
             <div
               style={{
@@ -123,6 +134,7 @@ export default function ProxyModal({
               >
                 {/* Student Header */}
                 <div
+                  className="proxy-student-header"
                   style={{
                     background: theme.warningDim,
                     padding: "12px 18px",
@@ -166,8 +178,8 @@ export default function ProxyModal({
                 </div>
 
                 {/* Reports */}
-                <div style={{ padding: 18 }}>
-                  <table style={{width: "100%", borderCollapse: "collapse"}}>
+                <div className="proxy-table-wrap" style={{ padding: 18 }}>
+                  <table className="proxy-table">
                     <thead>
                       <tr>
                         <th style={thStyle(theme)}>Room</th>
@@ -209,6 +221,7 @@ export default function ProxyModal({
 
         {/* Footer */}
         <div
+          className="proxy-footer"
           style={{
             padding: 18,
             borderTop: `1px solid ${theme.border}`,

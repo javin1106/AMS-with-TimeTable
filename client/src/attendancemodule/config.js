@@ -76,6 +76,9 @@ const theme = {
 const styles = {
     page: {
         minHeight: '100vh',
+        maxWidth: '100%',
+        overflowX: 'hidden',
+        boxSizing: 'border-box',
         background: theme.bg,
         color: theme.text,
         fontFamily: theme.fontBody,
@@ -244,7 +247,8 @@ const cssReset = `
     }
 
     /* ── Unified tab bar (segmented control) ── */
-    .ams-tabs { display: inline-flex; gap: 2px; background: #eef0f8; border-radius: 10px; padding: 4px; margin-bottom: 24px; }
+    .ams-tabs { display: inline-flex; gap: 2px; background: #eef0f8; border-radius: 10px; padding: 4px; margin-bottom: 24px; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; -ms-overflow-style: none; }
+    .ams-tabs::-webkit-scrollbar { display: none; width: 0; height: 0; }
     .ams-tab  { padding: 7px 20px; border: none; background: transparent; border-radius: 7px; font-size: 13px; font-weight: 600; color: #7b84ab; cursor: pointer; transition: background .15s, color .15s, box-shadow .15s; white-space: nowrap; font-family: inherit; line-height: 1.5; }
     .ams-tab:hover  { color: #1a1f3c; background: rgba(255,255,255,0.65); }
     .ams-tab.active { background: #ffffff; color: #6366f1; box-shadow: 0 1px 4px rgba(26,31,60,0.12); }

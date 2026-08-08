@@ -18,6 +18,91 @@ const fetch = (input, init = {}) => window.fetch(input, {
 const HIGH   = 0.62;
 const MEDIUM = 0.45;
 
+const RESPONSIVE_CSS = `
+    ${cssReset}
+
+    .roll-page { overflow-x: hidden; }
+    .roll-page .ams-tabs {
+        max-width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+    .roll-filter-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+        gap: 16px;
+        align-items: end;
+    }
+    .roll-filter-grid > *, .roll-page select { min-width: 0; }
+    .roll-summary-scroll {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-gutter: stable;
+    }
+    .roll-summary-table { min-width: 940px; }
+    .roll-summary-table th,
+    .roll-summary-table td {
+        border-left: 0 !important;
+        border-right: 0 !important;
+    }
+    .roll-modal-overlay { box-sizing: border-box; }
+    .roll-modal-shell { min-width: 0; }
+    .roll-modal-body { min-width: 0; }
+    .roll-modal-header, .roll-modal-footer, .roll-modal-actions { min-width: 0; }
+
+    @media (max-width: 1000px) {
+        .roll-filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .roll-filter-action { width: 100% !important; }
+        .roll-modal-body { grid-template-columns: minmax(0, 1fr) minmax(220px, 0.7fr) !important; }
+    }
+
+    @media (max-width: 700px) {
+        .roll-filter-grid { grid-template-columns: 1fr; gap: 12px; }
+        .roll-page-card { padding: 16px !important; }
+        .roll-card-grid { grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr)) !important; }
+        .roll-toast {
+            left: 12px !important;
+            right: 12px !important;
+            min-width: 0 !important;
+            max-width: none !important;
+            transform: none !important;
+        }
+        .roll-modal-overlay {
+            align-items: stretch !important;
+            padding: 8px !important;
+        }
+        .roll-modal-shell {
+            width: 100% !important;
+            max-width: none !important;
+            max-height: calc(100dvh - 16px) !important;
+            border-radius: 10px !important;
+        }
+        .roll-modal-body {
+            grid-template-columns: 1fr !important;
+            padding: 12px !important;
+            overflow-x: hidden !important;
+        }
+        .roll-modal-header, .roll-modal-footer {
+            padding: 10px 12px !important;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .roll-modal-header-main { min-width: 0; flex: 1 1 220px; flex-wrap: wrap; }
+        .roll-modal-footer { align-items: stretch !important; }
+        .roll-modal-footer > * { max-width: 100%; }
+        .roll-modal-actions { width: 100%; display: grid !important; grid-template-columns: 1fr 1fr; }
+        .roll-edit-modal { width: 100% !important; max-width: 420px; padding: 18px !important; }
+        .roll-photo-grid { grid-template-columns: repeat(auto-fill, minmax(95px, 1fr)) !important; }
+        .roll-section-heading { align-items: flex-start !important; gap: 8px; flex-wrap: wrap; }
+        .roll-section-actions { width: 100%; flex-wrap: wrap; }
+    }
+
+    @media (max-width: 420px) {
+        .roll-modal-actions { grid-template-columns: 1fr; }
+        .roll-page .ams-tab { padding-left: 16px; padding-right: 16px; }
+    }
+`;
+
 function NoEmbeddingBanner({ info, onDismiss }) {
     return (
         <div style={{
@@ -707,8 +792,8 @@ export default function RollAssign({ fixedDepartment = '' }) {
     };
 
     return (
-        <div style={styles.page}>
-            <style>{cssReset}</style>
+        <div className="roll-page" style={styles.page}>
+            <style>{RESPONSIVE_CSS}</style>
           {toast && !modal && !flagModal && (
                 <>
                 <style>{`
@@ -717,7 +802,7 @@ export default function RollAssign({ fixedDepartment = '' }) {
                         to   { opacity: 1; transform: translateX(-50%) translateY(0); }
                     }
                 `}</style>
-                <div style={{
+                <div className="roll-toast" style={{
                     position: 'fixed', top: 96, left: '50%', transform: 'translateX(-50%)',
                     zIndex: 9000, pointerEvents: 'none',
                     animation: 'slideDown 0.22s cubic-bezier(0.16,1,0.3,1)',
@@ -798,9 +883,9 @@ export default function RollAssign({ fixedDepartment = '' }) {
 
             {/* CHANGE 2: Edit Roll No modal */}
             {editRollModal && createPortal(
-                <div style={{ position: 'fixed', inset: 0, zIndex: 2000, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+                <div className="roll-modal-overlay" style={{ position: 'fixed', inset: 0, zIndex: 2000, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
                     onClick={e => { if (e.target === e.currentTarget) setEditRollModal(null); }}>
-                    <div style={{ background: theme.surface, border: `1px solid ${theme.border}`, borderRadius: 12, padding: 28, width: 340 }}>
+                    <div className="roll-edit-modal" style={{ background: theme.surface, border: `1px solid ${theme.border}`, borderRadius: 12, padding: 28, width: 340 }}>
                         <div style={{ fontWeight: 700, fontSize: '15px', marginBottom: 12 }}>Edit Roll Number</div>
                         <div style={{ marginBottom: 14, padding: '10px 12px', borderRadius: 8, background: '#fefce8', border: '1px solid #fbbf24', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
                             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0, marginTop: 1 }}>
@@ -843,13 +928,8 @@ export default function RollAssign({ fixedDepartment = '' }) {
             </div>
 
             {activeTab === 'assign' && (<>
-            <div style={{ ...styles.card, marginBottom: 20 }}>
-                <div style={{
-                    display: 'grid',
-                    gridTemplateColumns: '1fr 1fr 1fr auto',
-                    gap: 16,
-                    alignItems: 'end',
-                }}>
+            <div className="roll-page-card" style={{ ...styles.card, marginBottom: 20 }}>
+                <div className="roll-filter-grid">
                     <div>
                         <label style={styles.label}>Degree</label>
                         <select value={degree} onChange={e => setDegree(e.target.value)} style={styles.select}>
@@ -890,7 +970,7 @@ export default function RollAssign({ fixedDepartment = '' }) {
                                 : batchYears.map(y => <option key={y} value={y}>{y}</option>)}
                         </select>
                     </div>
-                    <button onClick={runAutoMatch} disabled={matching || !batchName || rematchable.length === 0 || (!erpStatus.loading && erpStatus.available === false)}
+                    <button className="roll-filter-action" onClick={runAutoMatch} disabled={matching || !batchName || rematchable.length === 0 || (!erpStatus.loading && erpStatus.available === false)}
                         style={{ ...styles.btnPrimary, padding: '9px 20px', fontSize: '13px', opacity: (matching || !batchName || rematchable.length === 0 || (!erpStatus.loading && erpStatus.available === false)) ? 0.5 : 1 }}>
                         {matching ? '🔄 Matching…' : `🔍 Match with ERP Photos${rematchable.length > 0 ? ` (${rematchable.length})` : ''}`}
                     </button>
@@ -1183,8 +1263,8 @@ function SummaryPanel({ summary, summaryLoading, summaryError, fixedDepartment }
                             <div style={{ fontWeight: 700, fontSize: '14px', color: theme.text }}>{dept.replace(/_/g, ' ')}</div>
                             <div style={{ fontSize: '12px', color: theme.textMuted }}>{rows.length} batch{rows.length !== 1 ? 'es' : ''}</div>
                         </div>
-                        <div style={{ overflowX: 'auto' }}>
-                            <table className="ams-table">
+                        <div className="roll-summary-scroll">
+                            <table className="ams-table roll-summary-table">
                                 <thead>
                                     <tr>
                                         <th>Batch</th>
@@ -1424,11 +1504,11 @@ function FlagResolveModal({ item, batchName, flagPhotoUrl, flagErpPhotoUrl, roll
     const navBtn = (enabled) => ({ padding: '3px 8px', borderRadius: 6, border: `1px solid ${theme.border}`, background: enabled ? theme.surface : 'transparent', color: enabled ? theme.text : theme.textMuted, cursor: enabled ? 'pointer' : 'default', fontSize: '13px', fontWeight: 700, opacity: enabled ? 1 : 0.3, lineHeight: 1 });
 
     return (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.82)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', paddingTop: 64, paddingLeft: 16, paddingRight: 16, paddingBottom: 16 }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+        <div className="roll-modal-overlay" style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.82)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', paddingTop: 64, paddingLeft: 16, paddingRight: 16, paddingBottom: 16 }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
             {toast && <InModalToast toast={toast} />}
-            <div style={{ background: theme.surface, border: `1px solid ${theme.border}`, borderRadius: 12, width: '100%', maxWidth: editMode ? 860 : 740, maxHeight: 'calc(100vh - 80px)', display: 'flex', flexDirection: 'column', overflow: 'hidden', transition: 'max-width 0.2s' }}>
+            <div className="roll-modal-shell" style={{ background: theme.surface, border: `1px solid ${theme.border}`, borderRadius: 12, width: '100%', maxWidth: editMode ? 860 : 740, maxHeight: 'calc(100vh - 80px)', display: 'flex', flexDirection: 'column', overflow: 'hidden', transition: 'max-width 0.2s' }}>
 
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', borderBottom: `1px solid ${theme.border}`, gap: 8 }}>
+                <div className="roll-modal-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', borderBottom: `1px solid ${theme.border}`, gap: 8 }}>
                     {!editMode && <button onClick={onPrev} disabled={!hasPrev || saving} style={navBtn(hasPrev && !saving)}>&#8592;</button>}
                     <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontWeight: 700, fontSize: '13px', color: theme.text, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -1474,10 +1554,10 @@ function FlagResolveModal({ item, batchName, flagPhotoUrl, flagErpPhotoUrl, roll
                         )}
                     </div>
                 ) : (
-                    <div style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', display: 'grid', gridTemplateColumns: '1fr 240px', gap: 16, alignItems: 'start' }}>
+                    <div className="roll-modal-body" style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', display: 'grid', gridTemplateColumns: '1fr 240px', gap: 16, alignItems: 'start' }}>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                             <div style={{ fontSize: '12px', fontWeight: 600, color: theme.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Extracted Face Images</div>
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+                            <div className="roll-photo-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
                                 {(item.imageFiles?.length > 0 ? item.imageFiles : item.previewFiles || []).map((f, i) => (
                                     <div key={f + i} style={{ position: 'relative' }}>
                                         <img src={flagPhotoUrl(batchName, folder, f)} alt="" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 6, border: `1px solid ${theme.border}`, display: 'block', opacity: deleting === f ? 0.2 : 1, transition: 'opacity 0.15s' }} onError={e => { e.target.style.opacity = '0.1'; }} />
@@ -1638,7 +1718,7 @@ function Section({ title, count, accentColor, children, emptyText, rightElement 
             </div>
             {open && (count === 0 && emptyText
                 ? <div style={{ padding: '14px 16px', borderRadius: 8, fontSize: '12px', color: theme.textMuted, background: theme.surface, border: `1px dashed ${theme.border}` }}>{emptyText}</div>
-                : <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 14 }}>{children}</div>
+                : <div className="roll-card-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 14 }}>{children}</div>
             )}
         </div>
     );
@@ -1968,12 +2048,12 @@ function GTModal({ rollNo, batchName, onClose, showToast, onMoved }) {
         const selectedCount = type === 'backup' ? Object.keys(selectedPhotos).filter(k => selectedPhotos[k]).length : 0;
         return (
             <div style={{ marginBottom: 20 }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, paddingBottom: 8, borderBottom: `1px solid ${color}33` }}>
+                <div className="roll-section-heading" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, paddingBottom: 8, borderBottom: `1px solid ${color}33` }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <span style={{ fontSize: '12px', fontWeight: 700, color, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{label}</span>
                         <span style={{ fontSize: '11px', padding: '1px 8px', borderRadius: 99, background: bg, color, fontWeight: 700 }}>{photos.length}</span>
                     </div>
-                    <div style={{ display: 'flex', gap: 8 }}>
+                    <div className="roll-section-actions" style={{ display: 'flex', gap: 8 }}>
                         {selectedCount > 0 && (
                             <button onClick={deleteSelectedBackups} disabled={doneSaving} style={{ fontSize: '11px', padding: '2px 8px', borderRadius: 6, border: `1px solid ${theme.danger}`, background: theme.danger, color: '#fff', cursor: doneSaving ? 'not-allowed' : 'pointer', opacity: doneSaving ? 0.5 : 1 }}>
                                 Delete Selected ({selectedCount})
@@ -1988,7 +2068,7 @@ function GTModal({ rollNo, batchName, onClose, showToast, onMoved }) {
                 </div>
                 {photos.length === 0
                     ? <div style={{ fontSize: '12px', color: theme.textMuted, padding: '10px 0' }}>{empty}</div>
-                    : <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: 10 }}>
+                    : <div className="roll-photo-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: 10 }}>
                         {photos.map(p => <PhotoCard key={p.filename} photo={p} type={type} />)}
                       </div>
                 }
@@ -1997,13 +2077,13 @@ function GTModal({ rollNo, batchName, onClose, showToast, onMoved }) {
     };
 
     return (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.80)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, paddingTop: 72 }}
+        <div className="roll-modal-overlay" style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.80)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, paddingTop: 72 }}
             onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-            <div style={{ background: theme.surface, border: `1px solid ${theme.border}`, borderRadius: 12, width: '100%', maxWidth: 960, maxHeight: '90vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div className="roll-modal-shell" style={{ background: theme.surface, border: `1px solid ${theme.border}`, borderRadius: 12, width: '100%', maxWidth: 960, maxHeight: '90vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
                 {/* Header */}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: `1px solid ${theme.border}`, flexShrink: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div className="roll-modal-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: `1px solid ${theme.border}`, flexShrink: 0 }}>
+                    <div className="roll-modal-header-main" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                         <span style={{ fontWeight: 700, fontSize: '15px' }}>Ground Truth — <span style={{ fontFamily: theme.fontMono }}>{rollNo}</span></span>
                         {student && (
                             <div style={{ display: 'flex', gap: 6 }}>
@@ -2017,7 +2097,7 @@ function GTModal({ rollNo, batchName, onClose, showToast, onMoved }) {
                 </div>
 
                 {/* Body */}
-                <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+                <div className="roll-modal-body" style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
                     {loading && <div style={{ textAlign: 'center', padding: '40px 0', color: theme.textMuted }}>Loading…</div>}
 
                     {!loading && totalCount === 0 && (
@@ -2042,11 +2122,11 @@ function GTModal({ rollNo, batchName, onClose, showToast, onMoved }) {
                 </div>
 
                {/* Footer */}
-                <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
+                <div className="roll-modal-footer" style={{ padding: '14px 20px', borderTop: `1px solid ${theme.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
                     <span style={{ fontSize: '12px', color: theme.textMuted }}>
                         {student ? `${embCount} embedding · ${backCount} backup` : ''}
                     </span>
-                    <div style={{ display: 'flex', gap: 10 }}>
+                    <div className="roll-modal-actions" style={{ display: 'flex', gap: 10 }}>
                         <button onClick={onClose} style={{ padding: '8px 20px', borderRadius: 7, border: `1px solid ${theme.border}`, background: 'transparent', color: theme.textMuted, fontSize: '13px', cursor: 'pointer' }}>Close</button>
                         <button onClick={handleDone} disabled={doneSaving || !student} style={{ padding: '8px 24px', borderRadius: 7, border: 'none', background: theme.success, color: '#000', fontSize: '13px', fontWeight: 700, cursor: (doneSaving || !student) ? 'not-allowed' : 'pointer', opacity: (doneSaving || !student) ? 0.5 : 1 }}>
                             {doneSaving ? 'Saving…' : '✓ Done'}
@@ -2069,7 +2149,7 @@ function InModalToast({ toast }) {
                 to   { opacity: 1; transform: translateX(-50%) translateY(0); }
             }
         `}</style>
-        <div style={{
+        <div className="roll-toast" style={{
            position: 'fixed', top: 96, left: '50%',
             zIndex: 9000, pointerEvents: 'none',
             animation: 'slideDown 0.22s cubic-bezier(0.16,1,0.3,1)',
@@ -2110,10 +2190,10 @@ function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRo
     }, [hasPrev, hasNext, saving, onPrev, onNext, onClose]);
     const navBtn = (enabled) => ({ padding: '3px 8px', borderRadius: 6, border: `1px solid ${theme.border}`, background: enabled ? theme.surface : 'transparent', color: enabled ? theme.text : theme.textMuted, cursor: enabled ? 'pointer' : 'default', fontSize: '13px', fontWeight: 700, opacity: enabled ? 1 : 0.3, lineHeight: 1 });
     return (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', paddingTop: 64, paddingLeft: 16, paddingRight: 16, paddingBottom: 16 }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+        <div className="roll-modal-overlay" style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', paddingTop: 64, paddingLeft: 16, paddingRight: 16, paddingBottom: 16 }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
             {toast && <InModalToast toast={toast} />}
-            <div style={{ background: theme.surface, border: `1px solid ${theme.border}`, borderRadius: 12, width: '100%', maxWidth: 720, maxHeight: 'calc(100vh - 80px)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', borderBottom: `1px solid ${theme.border}`, gap: 8, flexShrink: 0 }}>
+            <div className="roll-modal-shell" style={{ background: theme.surface, border: `1px solid ${theme.border}`, borderRadius: 12, width: '100%', maxWidth: 720, maxHeight: 'calc(100vh - 80px)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                <div className="roll-modal-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', borderBottom: `1px solid ${theme.border}`, gap: 8, flexShrink: 0 }}>
                     <button onClick={onPrev} disabled={!hasPrev || saving} style={navBtn(hasPrev && !saving)}>&#8592;</button>
                     <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontWeight: 700, fontSize: '13px', color: theme.text, display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -2125,10 +2205,10 @@ function VerifyModal({ item, match, batchName, photoUrl, erpPhotoUrl, overrideRo
                     <button onClick={onNext} disabled={!hasNext || saving} style={navBtn(hasNext && !saving)}>&#8594;</button>
                     <button onClick={onClose} style={{ background: 'none', border: 'none', color: theme.textMuted, fontSize: '18px', cursor: 'pointer', marginLeft: 2 }}>×</button>
                 </div>
-                <div style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', display: 'grid', gridTemplateColumns: '1fr 250px', gap: 16 }}>
+                <div className="roll-modal-body" style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', display: 'grid', gridTemplateColumns: '1fr 250px', gap: 16 }}>
                     <div>
                         <div style={{ fontSize: '11px', fontWeight: 600, color: theme.textMuted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Extracted Face Images</div>
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5 }}>
+                        <div className="roll-photo-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5 }}>
                             {(item.imageFiles?.length > 0 ? item.imageFiles : item.previewFiles || []).map((f, i) => (
                                 <img key={i} src={photoUrl(batchName, folderForPhoto, f)} alt="" style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 6, border: `1px solid ${theme.border}` }} onError={e => { e.target.style.display = 'none'; }} />
                             ))}

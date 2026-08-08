@@ -18,6 +18,29 @@ const FACULTY_API = `${apiUrl}/timetablemodule/faculty`;
 
 const DURATION_OPTIONS = [30, 60, 90, 120, 180, 300];
 
+export const SCHEDULER_RESPONSIVE_CSS = `
+  ${cssReset}
+  .scheduler-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .scheduler-grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .scheduler-action-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto; gap: 12px; align-items: end; }
+  .scheduler-table-wrap { overflow-x: auto !important; -webkit-overflow-scrolling: touch; }
+  .scheduler-table { min-width: 760px; }
+  @media (max-width: 760px) {
+    .scheduler-grid-3 { grid-template-columns: 1fr !important; }
+    .scheduler-grid-2 { grid-template-columns: 1fr !important; }
+    .scheduler-action-grid { grid-template-columns: 1fr 1fr !important; }
+    .scheduler-modal-overlay { padding: 10px !important; align-items: flex-start !important; }
+    .scheduler-modal-shell { max-height: calc(100dvh - 20px); overflow-y: auto; padding: 18px !important; }
+    .scheduler-modal-actions { display: grid !important; grid-template-columns: 1fr; }
+    .scheduler-modal-actions button { width: 100%; }
+    .scheduler-toast { left: 12px !important; right: 12px !important; top: 12px !important; max-width: none !important; }
+  }
+  @media (max-width: 480px) {
+    .scheduler-action-grid { grid-template-columns: 1fr !important; }
+    .scheduler-action-grid button { width: 100%; }
+  }
+`;
+
 // ── Shared UI atoms ──────────────────────────────────────────────────────────
 function Label({ children }) {
   return <div style={styles.label}>{children}</div>;
@@ -32,6 +55,7 @@ export function Toast({ toast }) {
   const icon = isErr ? '\u26a0\ufe0f' : isWarn ? '\u26a0\ufe0f' : '\u2705';
   return (
     <div
+      className="scheduler-toast"
       style={{
         position: 'fixed',
         top: 90,
@@ -171,6 +195,7 @@ export function ConflictModal({
   if (!open) return null;
   return (
     <div
+      className="scheduler-modal-overlay"
       onClick={onCancel}
       style={{
         position: 'fixed',
@@ -184,6 +209,7 @@ export function ConflictModal({
       }}
     >
       <div
+        className="scheduler-modal-shell"
         onClick={(e) => e.stopPropagation()}
         style={{
           background: theme.surface,
@@ -256,6 +282,7 @@ export function ConflictModal({
           </div>
         </div>
         <div
+          className="scheduler-modal-actions"
           style={{
             display: 'flex',
             gap: 10,
@@ -299,6 +326,7 @@ export function ConfirmModal({
   if (!open) return null;
   return (
     <div
+      className="scheduler-modal-overlay"
       onClick={onCancel}
       style={{
         position: 'fixed',
@@ -312,6 +340,7 @@ export function ConfirmModal({
       }}
     >
       <div
+        className="scheduler-modal-shell"
         onClick={(e) => e.stopPropagation()}
         style={{
           background: theme.surface,
@@ -368,7 +397,7 @@ export function ConfirmModal({
             </div>
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+        <div className="scheduler-modal-actions" style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
           <button onClick={onCancel} style={styles.btnGhost}>
             Cancel
           </button>
@@ -435,6 +464,7 @@ function PeriodCard({ period, onSave }) {
         />
       </div>
       <div
+        className="scheduler-grid-2"
         style={{
           display: 'grid',
           gridTemplateColumns: '1fr 1fr',
@@ -519,6 +549,7 @@ function GlobalEditor({ config, onSave }) {
         Per-period timing is in the Periods tab.
       </div>
       <div
+        className="scheduler-grid-2"
         style={{
           display: 'grid',
           gridTemplateColumns: '1fr 1fr',
@@ -723,6 +754,7 @@ export function ExtraClassForm({ onAdd, allRooms }) {
   return (
     <div style={{ ...styles.card, padding: 20, background: theme.surfaceAlt }}>
       <div
+        className="scheduler-grid-3"
         style={{
           display: 'grid',
           gridTemplateColumns: '1fr 1fr 1fr',
@@ -770,6 +802,7 @@ export function ExtraClassForm({ onAdd, allRooms }) {
         </div>
       </div>
       <div
+        className="scheduler-grid-3"
         style={{
           display: 'grid',
           gridTemplateColumns: '1fr 1fr 1fr',
@@ -828,6 +861,7 @@ export function ExtraClassForm({ onAdd, allRooms }) {
         </div>
       </div>
       <div
+        className="scheduler-action-grid"
         style={{
           display: 'grid',
           gridTemplateColumns: '1fr 1fr auto auto',
@@ -959,6 +993,7 @@ export function AlterClassForm({ onAdd }) {
   return (
     <div style={{ ...styles.card, padding: 20, background: theme.surfaceAlt }}>
       <div
+        className="scheduler-grid-3"
         style={{
           display: 'grid',
           gridTemplateColumns: '1fr 1fr 1fr',
@@ -1054,6 +1089,7 @@ export function AlterClassForm({ onAdd }) {
       )}
 
       <div
+        className="scheduler-grid-2"
         style={{
           display: 'grid',
           gridTemplateColumns: '1fr 1fr',
@@ -1222,7 +1258,7 @@ export default function SchedulerPage() {
 
   return (
     <div style={styles.page}>
-      <style>{cssReset}</style>
+      <style>{SCHEDULER_RESPONSIVE_CSS}</style>
       <Toast toast={toast} />
 
       {/* ── Header ───────────────────────────────────────────────────────── */}

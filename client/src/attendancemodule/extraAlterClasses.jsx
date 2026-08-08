@@ -9,7 +9,7 @@
 // source of truth for the add/edit UI.
 
 import { useState, useEffect, useCallback } from 'react';
-import { theme, styles, cssReset, formatSlotLabel } from './config';
+import { theme, styles, formatSlotLabel } from './config';
 import BackButton from './BackButton';
 import {
   AC_API,
@@ -20,6 +20,7 @@ import {
   ConfirmModal,
   ExtraClassForm,
   AlterClassForm,
+  SCHEDULER_RESPONSIVE_CSS,
 } from './SchedulerPage';
 
 // ── Shared data + action layer ──────────────────────────────────────────────
@@ -260,7 +261,7 @@ export function ExtraClassPage() {
 
   return (
     <div style={styles.page}>
-      <style>{cssReset}</style>
+      <style>{SCHEDULER_RESPONSIVE_CSS}</style>
       <Toast toast={toast} />
       <ConflictModal
         open={!!confirmDialog}
@@ -326,8 +327,9 @@ export function ExtraClassPage() {
           No extra classes scheduled yet.
         </div>
       ) : (
-        <div style={{ ...styles.card, padding: 0, overflow: 'hidden' }}>
+        <div className="scheduler-table-wrap" style={{ ...styles.card, padding: 0 }}>
           <table
+            className="scheduler-table"
             style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}
           >
             <thead>
@@ -481,7 +483,7 @@ export function AlterClassPage() {
 
   return (
     <div style={styles.page}>
-      <style>{cssReset}</style>
+      <style>{SCHEDULER_RESPONSIVE_CSS}</style>
       <Toast toast={toast} />
       <ConflictModal
         open={!!confirmDialog}
@@ -553,8 +555,9 @@ export function AlterClassPage() {
           No alterations scheduled yet.
         </div>
       ) : (
-        <div style={{ ...styles.card, padding: 0, overflow: 'hidden' }}>
+        <div className="scheduler-table-wrap" style={{ ...styles.card, padding: 0 }}>
           <table
+            className="scheduler-table"
             style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}
           >
             <thead>

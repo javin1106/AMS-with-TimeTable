@@ -20,6 +20,47 @@ const CAMERA_ROOMS_API = `${CAMERA_API}/rooms`;
 const OTHER_CONTROLS_API = `${_apiUrl}/attendancemodule/settings/other-controls`;
 const GT_CONFIG_API = `${_apiUrl}/api/v1/ml/gt-config`;   // ML Fine Tuning — GT Acquisition
 
+const RESPONSIVE_CSS = `
+    ${cssReset}
+
+    .gt-filter-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 16px;
+        margin-bottom: 20px;
+    }
+    .gt-filter-grid > *, .gt-page select { min-width: 0; }
+    .gt-action-row { display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
+    .gt-summary-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 16px;
+        margin-bottom: 16px;
+    }
+    .gt-active-job { min-width: 0; }
+    .gt-active-job-main { min-width: 0 !important; flex: 1 1 200px; }
+    .gt-active-job-actions { min-width: 0; }
+    .gt-saved-path { overflow-wrap: anywhere; }
+
+    @media (max-width: 900px) {
+        .gt-filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .gt-filter-grid > :last-child { grid-column: 1 / -1; }
+    }
+
+    @media (max-width: 600px) {
+        .gt-page { overflow-x: hidden; }
+        .gt-filter-grid, .gt-summary-grid { grid-template-columns: 1fr; gap: 12px; }
+        .gt-filter-grid > :last-child { grid-column: auto; }
+        .gt-action-row { flex-direction: column; }
+        .gt-action-button { width: 100% !important; min-width: 0 !important; }
+        .gt-active-job { align-items: flex-start !important; }
+        .gt-active-job-actions { width: 100%; margin-left: 0 !important; }
+        .gt-active-job-actions > * { max-width: 100%; }
+        .gt-page-card { padding: 16px !important; }
+        .gt-toast { left: 12px !important; right: 12px !important; bottom: 12px !important; max-width: none !important; }
+    }
+`;
+
 // Current minutes-of-day (0–1439) in Asia/Kolkata, independent of the
 // browser timezone — mirrors the server-side timeWindowGuard.
 function nowMinIST() {
@@ -712,7 +753,8 @@ export default function GroundTruthRTSP({
     );
 
     return (
-        <div style={styles.page}>
+        <div className="gt-page" style={styles.page}>
+            <style>{RESPONSIVE_CSS}</style>
             <div style={{ marginBottom: 28 }}>
                 <div style={styles.heading}>Ground Truth Acquisition</div>
                 <div style={styles.subheading}>
@@ -724,7 +766,7 @@ export default function GroundTruthRTSP({
 
             {/* ── Active acquisitions (reopen + other users) ─────────────────── */}
             {activeJobs.length > 0 && (
-                <div style={{ ...styles.card, marginBottom: 20 }}>
+                <div className="gt-page-card" style={{ ...styles.card, marginBottom: 20 }}>
                     <div style={{ fontSize: '13px', fontWeight: 700, color: theme.accent, marginBottom: 10 }}>
                         🟢 Active Acquisitions
                     </div>
@@ -733,14 +775,14 @@ export default function GroundTruthRTSP({
                             const attached = j.acquisitionId === acquisitionId;
                             const live = j.status === 'running' || j.status === 'stopping';
                             return (
-                                <div key={j.acquisitionId} style={{
+                                <div key={j.acquisitionId} className="gt-active-job" style={{
                                     display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
                                     padding: '10px 14px', borderRadius: 8,
                                     background: attached ? theme.accentDim || (theme.accent + '18') : theme.bg,
                                     border: `1px solid ${attached ? theme.accent : theme.border}`,
                                 }}>
                                     <Dot color={live ? theme.success : theme.textMuted} pulse={live} />
-                                    <div style={{ minWidth: 200 }}>
+                                    <div className="gt-active-job-main" style={{ minWidth: 200 }}>
                                         <div style={{ fontSize: '13px', fontWeight: 700, color: theme.text }}>
                                             {j.batch}
                                         </div>
@@ -750,7 +792,7 @@ export default function GroundTruthRTSP({
                                             {j.startedByName ? ` · ${j.startedByName}` : ''}
                                         </div>
                                     </div>
-                                    <div style={{ display: 'flex', gap: 8, marginLeft: 'auto', flexWrap: 'wrap', alignItems: 'center' }}>
+                                    <div className="gt-active-job-actions" style={{ display: 'flex', gap: 8, marginLeft: 'auto', flexWrap: 'wrap', alignItems: 'center' }}>
                                         <span style={{
                                             fontSize: '12px', fontWeight: 700, fontFamily: theme.fontMono,
                                             padding: '3px 10px', borderRadius: 20,
@@ -794,17 +836,12 @@ export default function GroundTruthRTSP({
                 </div>
             )}
 
-            <div style={{
+            <div className="gt-page-card" style={{
                 ...styles.card, marginBottom: 24,
                 opacity: isBusy ? 0.6 : 1,
                 pointerEvents: isBusy ? 'none' : 'auto',
             }}>
-                <div style={{
-                    display: 'grid',
-                    gridTemplateColumns: '1fr 1fr 1fr',
-                    gap: 16,
-                    marginBottom: 20,
-                }}>
+                <div className="gt-filter-grid">
                     <div>
                         <label style={styles.label}>Degree</label>
                         <select value={degree} onChange={e => setDegree(e.target.value)} style={styles.select}>
@@ -1022,13 +1059,14 @@ export default function GroundTruthRTSP({
                 </div>
             )}
 
-            <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
+            <div className="gt-action-row">
                 <button
                     onClick={handleStart}
                     disabled={isBusy || !batchName || !windowOpen
                         || (!selectedRoom && !selectedCamera)
                         || (selectedRoom && roomCameras.length === 0 && !roomCamsLoad)}
                     title={!windowOpen ? `Ground Truth acquisition is restricted to ${gtWindow.start}–${gtWindow.end} IST` : undefined}
+                    className="gt-action-button"
                     style={{
                         ...styles.btnPrimary,
                         opacity: (isBusy || !batchName || !windowOpen) ? 0.5 : 1,
@@ -1057,6 +1095,7 @@ export default function GroundTruthRTSP({
                     onClick={handleStartCombined}
                     disabled={isBusy || !batchName || !windowOpen || registeredCameras.length < 2}
                     title={!windowOpen ? `Ground Truth acquisition is restricted to ${gtWindow.start}–${gtWindow.end} IST` : undefined}
+                    className="gt-action-button"
                     style={{
                         padding: '10px 24px', borderRadius: 8,
                         cursor: (isBusy || !batchName || !windowOpen || registeredCameras.length < 2) ? 'default' : 'pointer',
@@ -1077,6 +1116,7 @@ export default function GroundTruthRTSP({
                 <button
                     onClick={handleStop}
                     disabled={!isBusy}
+                    className="gt-action-button"
                     style={{
                         padding: '10px 24px', borderRadius: 8,
                         cursor: isBusy ? 'pointer' : 'default',
@@ -1094,7 +1134,7 @@ export default function GroundTruthRTSP({
             </div>
 
             {(combinedMode || roomMode) && (
-                <div style={{
+                <div className="gt-page-card" style={{
                     display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16,
                     padding: '12px 16px', borderRadius: 8,
                     background: roomMode ? 'rgba(14,165,233,0.06)' : 'rgba(240,192,64,0.08)',
@@ -1202,11 +1242,11 @@ export default function GroundTruthRTSP({
             )}
 
             {isDone && summary && (
-                <div style={{ ...styles.card, borderColor: theme.success, background: theme.successDim, marginBottom: 20 }}>
+                <div className="gt-page-card" style={{ ...styles.card, borderColor: theme.success, background: theme.successDim, marginBottom: 20 }}>
                     <div style={{ fontSize: '18px', fontWeight: 700, color: theme.success, marginBottom: 12 }}>
                         ✅ Acquisition Complete
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginBottom: 16 }}>
+                    <div className="gt-summary-grid">
                         {[
                             { label: 'People Detected', value: summary.peopleDetected },
                             { label: 'Images Saved',    value: summary.imagesSaved    },
@@ -1221,7 +1261,7 @@ export default function GroundTruthRTSP({
                             </div>
                         ))}
                     </div>
-                    <div style={{
+                    <div className="gt-saved-path" style={{
                         padding: '10px 14px', background: theme.bg, borderRadius: 6,
                         fontFamily: theme.fontMono, fontSize: '12px', color: theme.textMuted,
                     }}>
@@ -1257,7 +1297,7 @@ export default function GroundTruthRTSP({
             )}
 
             {isIdle && otherRunningJobs.length === 0 && (
-                <div style={{ ...styles.card, textAlign: 'center', padding: '60px 20px', borderStyle: 'dashed' }}>
+                <div className="gt-page-card" style={{ ...styles.card, textAlign: 'center', padding: '60px 20px', borderStyle: 'dashed' }}>
                     <div style={{ fontSize: '40px', marginBottom: 12, opacity: 0.4 }}>📡</div>
                     <div style={{ fontSize: '15px', fontWeight: 600, marginBottom: 6 }}>Ready to acquire</div>
                     <div style={{ fontSize: '13px', color: theme.textMuted }}>
@@ -1273,7 +1313,7 @@ export default function GroundTruthRTSP({
             )}
 
             {toast && (
-                <div style={{
+                <div className="gt-toast" style={{
                     position: 'fixed', bottom: 24, right: 24, zIndex: 50,
                     padding: '12px 18px', borderRadius: 8, maxWidth: 360,
                     fontSize: '13px', fontWeight: 600, color: '#fff',

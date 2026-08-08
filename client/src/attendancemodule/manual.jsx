@@ -6,6 +6,31 @@ import ILeed from './BrandName';
 
 const T = theme;
 
+const MANUAL_CSS = `
+  ${cssReset}
+  .manual-responsive-grid > * { min-width: 0; }
+  .manual-header-actions { display: flex; align-items: center; gap: 14px; }
+  .manual-step-tabs { scrollbar-width: none; -ms-overflow-style: none; }
+  .manual-step-tabs::-webkit-scrollbar { display: none; width: 0; height: 0; }
+  @media (max-width: 800px) {
+    .manual-responsive-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+    .manual-dev-grid { grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr)) !important; }
+    .manual-page { padding: 18px 16px !important; }
+    .manual-hero { flex-wrap: wrap; }
+    .manual-header-actions { width: 100%; }
+    .manual-header-actions button { flex: 1; }
+  }
+  @media (max-width: 560px) {
+    .manual-responsive-grid { grid-template-columns: 1fr !important; }
+    .manual-page { padding: 14px 10px !important; }
+    .manual-content-card { padding: 18px 14px !important; }
+    .manual-topbar { padding: 10px 14px !important; gap: 10px; }
+    .manual-topbar > div span { display: none; }
+    .manual-header-actions { display: grid; grid-template-columns: 1fr; }
+    .manual-step { gap: 10px !important; }
+  }
+`;
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function Step({ n, title, children }) {
@@ -149,7 +174,7 @@ function TabOverview({ setTab }) {
 
             {/* role cards */}
             <SectionTitle>Who Does What</SectionTitle>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 28 }}>
+            <div className="manual-responsive-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 28 }}>
                 {[
                     {
                         icon: '🎓', title: 'Admin / Coordinator', color: '#6366f1',
@@ -187,7 +212,7 @@ function TabOverview({ setTab }) {
 
             {/* nav cards */}
             <SectionTitle>Jump to a Section</SectionTitle>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+            <div className="manual-responsive-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
                 {[
                     { tab: 'groundtruth', icon: '📹', title: 'Ground Truth Capture',  color: '#0ea5e9', desc: 'Live RTSP stream capture from classroom cameras' },
                     { tab: 'erp',         icon: '🖼️', title: 'ERP Photo Upload',      color: '#f472b6', desc: 'Upload official student photos as identification reference' },
@@ -231,7 +256,7 @@ function TabGroundTruth() {
                 background: '#f8f9ff', border: '1px solid #e4e8f5',
                 borderRadius: 12, padding: '20px 24px', marginBottom: 24,
             }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 0, marginBottom: 16 }}>
+                <div className="manual-responsive-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 0, marginBottom: 16 }}>
                     {[
                         { icon: '📹', label: 'Camera 1', sub: 'Front-left of room', color: '#0ea5e9' },
                         { icon: '⏱', label: '5 min', sub: 'auto-switch', color: '#6366f1' },
@@ -258,7 +283,7 @@ function TabGroundTruth() {
                 </div>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 28 }}>
+            <div className="manual-responsive-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 28 }}>
                 {[
                     { n: '1', title: 'Frames extracted', desc: 'Video frames are pulled from the RTSP stream at regular intervals (controlled by Frame Skip setting).' },
                     { n: '2', title: 'Faces detected', desc: 'Each frame is scanned for faces. Faces below the minimum size threshold (distant students) are filtered out.' },
@@ -381,7 +406,7 @@ function TabERP() {
             </Note>
 
             <SectionTitle>Why Upload ERP Photos?</SectionTitle>
-            <div style={{
+            <div className="manual-responsive-grid" style={{
                 background: '#f8f9ff', border: '1px solid #e4e8f5',
                 borderRadius: 10, padding: '18px 20px', marginBottom: 24,
                 display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20,
@@ -481,7 +506,7 @@ function TabRollAssign() {
             </Note>
 
             <SectionTitle>How It Works</SectionTitle>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 0, marginBottom: 24, borderRadius: 10, border: '1px solid #e4e8f5', overflow: 'hidden' }}>
+            <div className="manual-responsive-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 0, marginBottom: 24, borderRadius: 10, border: '1px solid #e4e8f5', overflow: 'hidden' }}>
                 {[
                     { label: 'Unprocessed', desc: 'Clusters from RTSP capture — identity unknown', color: '#6366f1', icon: '📂' },
                     { label: 'Auto-Match', desc: 'System compares clusters against ERP embeddings', color: '#0ea5e9', icon: '🔍' },
@@ -582,7 +607,7 @@ function TabEmbeddings() {
             </Note>
 
             <SectionTitle>Why This Step is Needed</SectionTitle>
-            <div style={{
+            <div className="manual-responsive-grid" style={{
                 display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 24,
             }}>
                 {[
@@ -716,7 +741,7 @@ function TabAttendance() {
 
             <div style={{ borderTop: '1px solid #e4e8f5', margin: '28px 0' }} />
             <SectionTitle>Attendance Status Reference</SectionTitle>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+            <div className="manual-responsive-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
                 {[
                     { status: 'P — Present', desc: 'Face detected and matched with high confidence against stored embeddings.', color: T.success, bg: '#f0fdf4' },
                     { status: 'A — Absent', desc: 'No matching face detected for this student across the entire session.', color: T.danger, bg: '#fef2f2' },
@@ -901,7 +926,7 @@ function TabDevelopers() {
                                 {devs.length} contributor{devs.length !== 1 ? 's' : ''}
                             </div>
                         </div>
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 8 }}>
+                        <div className="manual-dev-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 8 }}>
                             {devs.map((d, i) => <DevCard key={d.name} dev={d} rank={i} />)}
                         </div>
                     </div>
@@ -997,9 +1022,9 @@ export default function Manual({ standalone = false }) {
 
     return (
         <>
-            <style>{cssReset}</style>
+            <style>{MANUAL_CSS}</style>
             {standalone && (
-                <div style={{
+                <div className="manual-topbar" style={{
                     position: 'sticky', top: 0, zIndex: 100,
                     background: '#1e1b4b', borderBottom: '1px solid #312e81',
                     padding: '10px 28px', display: 'flex', alignItems: 'center',
@@ -1031,11 +1056,11 @@ export default function Manual({ standalone = false }) {
                     )}
                 </div>
             )}
-            <div style={{
+            <div className="manual-page" style={{
                 padding: '24px 28px', maxWidth: 900, margin: '0 auto',
                 fontFamily: T.fontBody,
             }}>
-                <div style={{ marginBottom: 20, display: 'flex', alignItems: 'center', gap: 14 }}>
+                <div className="manual-hero" style={{ marginBottom: 20, display: 'flex', alignItems: 'center', gap: 14 }}>
                     <div style={{
                         width: 42, height: 42, borderRadius: 10,
                         background: 'linear-gradient(135deg,#6366f1,#8b5cf6)',
@@ -1048,6 +1073,7 @@ export default function Manual({ standalone = false }) {
                             Step-by-step guide for iLEED — Intelligent Learning Engagement and Entity Detection
                         </div>
                     </div>
+                    <div className="manual-header-actions">
                     <button
                         onClick={() => { setShowDevs(v => !v); setShowDevCycle(false); }}
                         style={{
@@ -1076,10 +1102,11 @@ export default function Manual({ standalone = false }) {
                     >
                         🔄 Development Cycle
                     </button>
+                    </div>
                 </div>
 
                 {showDevs || showDevCycle ? (
-                    <div style={{
+                    <div className="manual-content-card" style={{
                         background: '#fff', borderRadius: 12,
                         border: '1px solid #e4e8f5',
                         padding: '28px 32px',
@@ -1090,7 +1117,7 @@ export default function Manual({ standalone = false }) {
                 ) : (<>
 
                 {/* Step navigator */}
-                <div style={{ display: 'flex', alignItems: 'flex-start', marginBottom: 32, overflowX: 'auto', paddingBottom: 4 }}>
+                <div className="manual-step-tabs" style={{ display: 'flex', alignItems: 'flex-start', marginBottom: 32, overflowX: 'auto', paddingBottom: 4 }}>
                     {TABS.map((t, i) => {
                         const active = tab === t.id;
                         const done = TABS.findIndex(x => x.id === tab) > i;
